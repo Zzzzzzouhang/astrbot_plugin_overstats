@@ -3,7 +3,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api import logger
 import httpx
 import json
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 class OverstatsPlugin(Star):
     def __init__(self, context: Context):
@@ -140,34 +140,7 @@ class OverstatsPlugin(Star):
                 # AstrBot暂不支持直接发送音频，发送提示
                 yield event.plain_result(f"[音频内容: {reply.get('media_type', 'audio')}]")
 
-    def _get_args(self, event: AstrMessageEvent) -> List[str]:
-        """
-        跨平台兼容的参数获取方法
-        解决QQOfficialMessageEvent没有args属性的问题
-        """
-        # 优先尝试使用event.args（兼容旧平台）
-        if hasattr(event, 'args'):
-            return event.args
-        
-        # 如果没有args属性，从消息文本中手动解析
-        try:
-            # 获取原始消息文本
-            message_text = event.get_message()
-            if not message_text:
-                return []
-            
-            # 分割消息为命令和参数
-            parts = message_text.strip().split()
-            if not parts:
-                return []
-            
-            # 第一个元素是命令，剩下的是参数
-            return parts[1:]
-        except Exception as e:
-            logger.error(f"解析命令参数失败: {str(e)}", exc_info=True)
-            return []
-
-    def _parse_bnet_id_from_args(self, args: List[str]) -> Optional[str]:
+    def _parse_bnet_id_from_args(self, args: Tuple[str, ...]) -> Optional[str]:
         """从参数列表中解析战网ID，处理包含空格的情况"""
         if not args:
             return None
@@ -193,27 +166,23 @@ class OverstatsPlugin(Star):
 
     # ==================== 调试命令 ====================
     @filter.command("ow-debug", aliases=["守望调试"])
-    async def cmd_debug(self, event: AstrMessageEvent):
+    async def cmd_debug(self, event: AstrMessageEvent, *args):
         """调试命令，显示参数信息"""
-        args = self._get_args(event)
         debug_info = f"""
 🔍 调试信息:
-event.args: {getattr(event, 'args', 'N/A')}
-len(event.args): {len(getattr(event, 'args', []))}
-event.command: {getattr(event, 'command', 'N/A')}
+args: {args}
+len(args): {len(args)}
+event.command: {event.command}
 event.raw_message: {getattr(event, 'raw_message', 'N/A')}
 event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 'N/A'}
-解析后的args: {args}
-len(解析后的args): {len(args)}
         """
         logger.info(debug_info)
         yield event.plain_result(debug_info.strip())
 
     # ==================== 大神资料 ====================
     @filter.command("profile", aliases=["大神资料", "资料", "p"])
-    async def cmd_profile(self, event: AstrMessageEvent):
+    async def cmd_profile(self, event: AstrMessageEvent, *args):
         """获取玩家资料: /profile [战网ID]"""
-        args = self._get_args(event)
         logger.info(f"profile命令被调用，参数: {args}")
         
         bnet_id = self._parse_bnet_id_from_args(args)
@@ -227,9 +196,8 @@ len(解析后的args): {len(args)}
 
     # ==================== 大神对局 ====================
     @filter.command("match", aliases=["大神对局", "对局", "m"])
-    async def cmd_match(self, event: AstrMessageEvent):
+    async def cmd_match(self, event: AstrMessageEvent, *args):
         """获取玩家最近对局: /match [战网ID] [数量]"""
-        args = self._get_args(event)
         logger.info(f"match命令被调用，参数: {args}")
         
         bnet_id = self._parse_bnet_id_from_args(args)
@@ -250,9 +218,8 @@ len(解析后的args): {len(args)}
             yield result
 
     @filter.command("match-detail", aliases=["对局详情", "md"])
-    async def cmd_match_detail(self, event: AstrMessageEvent):
+    async def cmd_match_detail(self, event: AstrMessageEvent, *args):
         """获取对局详情: /match-detail [战网ID] [序号] [show_all] [analyze]"""
-        args = self._get_args(event)
         logger.info(f"match-detail命令被调用，参数: {args}")
         
         bnet_id = self._parse_bnet_id_from_args(args)
@@ -291,9 +258,8 @@ len(解析后的args): {len(args)}
 
     # ==================== 大神同玩 ====================
     @filter.command("sameplay", aliases=["大神同玩", "同玩", "sp"])
-    async def cmd_sameplay(self, event: AstrMessageEvent):
+    async def cmd_sameplay(self, event: AstrMessageEvent, *args):
         """查询两个玩家的共同对局: /sameplay [玩家1] [玩家2]"""
-        args = self._get_args(event)
         logger.info(f"sameplay命令被调用，参数: {args}")
         
         # 查找第一个#的位置
@@ -333,9 +299,8 @@ len(解析后的args): {len(args)}
             yield result
 
     @filter.command("sameplay-detail", aliases=["同玩详情", "spd"])
-    async def cmd_sameplay_detail(self, event: AstrMessageEvent):
+    async def cmd_sameplay_detail(self, event: AstrMessageEvent, *args):
         """获取同玩对局详情: /sameplay-detail [玩家1] [玩家2] [序号] [show_all] [analyze]"""
-        args = self._get_args(event)
         logger.info(f"sameplay-detail命令被调用，参数: {args}")
         
         # 查找第一个#的位置
@@ -398,9 +363,8 @@ len(解析后的args): {len(args)}
 
     # ==================== 排名历史 ====================
     @filter.command("rank-history", aliases=["排名历史", "rh"])
-    async def cmd_rank_history(self, event: AstrMessageEvent):
+    async def cmd_rank_history(self, event: AstrMessageEvent, *args):
         """获取玩家赛季排名历史: /rank-history [战网ID]"""
-        args = self._get_args(event)
         logger.info(f"rank-history命令被调用，参数: {args}")
         
         bnet_id = self._parse_bnet_id_from_args(args)
@@ -414,9 +378,8 @@ len(解析后的args): {len(args)}
 
     # ==================== 实力分析 ====================
     @filter.command("quick-strength", aliases=["快速实力", "qs"])
-    async def cmd_quick_strength(self, event: AstrMessageEvent):
+    async def cmd_quick_strength(self, event: AstrMessageEvent, *args):
         """获取快速模式实力分析: /quick-strength [战网ID] [数量]"""
-        args = self._get_args(event)
         logger.info(f"quick-strength命令被调用，参数: {args}")
         
         bnet_id = self._parse_bnet_id_from_args(args)
@@ -437,9 +400,8 @@ len(解析后的args): {len(args)}
             yield result
 
     @filter.command("competitive-strength", aliases=["竞技实力", "cs", "cstrength"])
-    async def cmd_competitive_strength(self, event: AstrMessageEvent):
+    async def cmd_competitive_strength(self, event: AstrMessageEvent, *args):
         """获取竞技模式实力分析: /competitive-strength [战网ID] [数量]"""
-        args = self._get_args(event)
         logger.info(f"competitive-strength命令被调用，参数: {args}")
         
         bnet_id = self._parse_bnet_id_from_args(args)
@@ -461,9 +423,8 @@ len(解析后的args): {len(args)}
 
     # ==================== 排行榜 ====================
     @filter.command("rank-leaderboard", aliases=["排名榜", "rl", "leaderboard"])
-    async def cmd_rank_leaderboard(self, event: AstrMessageEvent):
+    async def cmd_rank_leaderboard(self, event: AstrMessageEvent, *args):
         """获取地区排名榜: /rank-leaderboard [省份] [角色(tank/dps/healer/open)]"""
-        args = self._get_args(event)
         logger.info(f"rank-leaderboard命令被调用，参数: {args}")
         
         province = "全国"
@@ -479,9 +440,8 @@ len(解析后的args): {len(args)}
             yield result
 
     @filter.command("hero-leaderboard", aliases=["英雄榜", "hl", "hero"])
-    async def cmd_hero_leaderboard(self, event: AstrMessageEvent):
+    async def cmd_hero_leaderboard(self, event: AstrMessageEvent, *args):
         """获取英雄排行榜: /hero-leaderboard [英雄名] [省份] [模式(preset/open)]"""
-        args = self._get_args(event)
         logger.info(f"hero-leaderboard命令被调用，参数: {args}")
         
         if not args:
@@ -503,9 +463,8 @@ len(解析后的args): {len(args)}
 
     # ==================== 英雄数据 ====================
     @filter.command("hero-pick-rate", aliases=["英雄选取率", "pickrate", "pr"])
-    async def cmd_hero_pick_rate(self, event: AstrMessageEvent):
+    async def cmd_hero_pick_rate(self, event: AstrMessageEvent, *args):
         """获取英雄选取率: /hero-pick-rate [模式(quick/competitive)] [段位]"""
-        args = self._get_args(event)
         logger.info(f"hero-pick-rate命令被调用，参数: {args}")
         
         game_mode = "competitive"
@@ -525,9 +484,8 @@ len(解析后的args): {len(args)}
             yield result
 
     @filter.command("hero-perk", aliases=["英雄威能", "perk"])
-    async def cmd_hero_perk(self, event: AstrMessageEvent):
+    async def cmd_hero_perk(self, event: AstrMessageEvent, *args):
         """获取英雄威能数据: /hero-perk [英雄名]"""
-        args = self._get_args(event)
         logger.info(f"hero-perk命令被调用，参数: {args}")
         
         if not args:
@@ -541,9 +499,8 @@ len(解析后的args): {len(args)}
 
     # ==================== 每日总结 ====================
     @filter.command("today-summary", aliases=["今日总结", "today", "ts"])
-    async def cmd_today_summary(self, event: AstrMessageEvent):
+    async def cmd_today_summary(self, event: AstrMessageEvent, *args):
         """获取今日游戏总结: /today-summary [战网ID]"""
-        args = self._get_args(event)
         logger.info(f"today-summary命令被调用，参数: {args}")
         
         bnet_id = self._parse_bnet_id_from_args(args)
@@ -556,9 +513,8 @@ len(解析后的args): {len(args)}
             yield result
 
     @filter.command("yesterday-summary", aliases=["昨日总结", "yesterday", "ys"])
-    async def cmd_yesterday_summary(self, event: AstrMessageEvent):
+    async def cmd_yesterday_summary(self, event: AstrMessageEvent, *args):
         """获取昨日游戏总结: /yesterday-summary [战网ID]"""
-        args = self._get_args(event)
         logger.info(f"yesterday-summary命令被调用，参数: {args}")
         
         bnet_id = self._parse_bnet_id_from_args(args)
@@ -571,9 +527,8 @@ len(解析后的args): {len(args)}
             yield result
 
     @filter.command("week-summary", aliases=["本周总结", "week", "ws"])
-    async def cmd_week_summary(self, event: AstrMessageEvent):
+    async def cmd_week_summary(self, event: AstrMessageEvent, *args):
         """获取本周游戏总结: /week-summary [战网ID] (可能需要较长时间)"""
-        args = self._get_args(event)
         logger.info(f"week-summary命令被调用，参数: {args}")
         
         bnet_id = self._parse_bnet_id_from_args(args)
@@ -588,23 +543,22 @@ len(解析后的args): {len(args)}
 
     # ==================== 电竞资讯 ====================
     @filter.command("esports", aliases=["电竞资讯", "电竞", "e"])
-    async def cmd_esports(self, event: AstrMessageEvent):
+    async def cmd_esports(self, event: AstrMessageEvent, *args):
         """获取最新电竞资讯"""
         async for result in self._send_image_result(event, "/ow-esports/image"):
             yield result
 
     # ==================== 商店信息 ====================
     @filter.command("shop", aliases=["商店", "s"])
-    async def cmd_shop(self, event: AstrMessageEvent):
+    async def cmd_shop(self, event: AstrMessageEvent, *args):
         """获取当前商店信息"""
         async for result in self._send_image_result(event, "/ow-shop/image"):
             yield result
 
     # ==================== 更新日志 ====================
     @filter.command("patch-notes", aliases=["更新日志", "patch", "pn"])
-    async def cmd_patch_notes(self, event: AstrMessageEvent):
+    async def cmd_patch_notes(self, event: AstrMessageEvent, *args):
         """获取更新日志: /patch-notes [latest/small/big]"""
-        args = self._get_args(event)
         logger.info(f"patch-notes命令被调用，参数: {args}")
         
         kind = " ".join(args) if args else "latest"
@@ -614,13 +568,12 @@ len(解析后的args): {len(args)}
 
     # ==================== 猜英雄游戏 ====================
     @filter.command("guess", aliases=["猜英雄", "g"])
-    async def cmd_guess(self, event: AstrMessageEvent):
+    async def cmd_guess(self, event: AstrMessageEvent, *args):
         """开始猜英雄游戏: /guess [类型]
         支持类型: hero_icon(英雄图标), map_music(地图音乐), skill_icon_hero(技能图标),
         perk_icon_hero(威能图标), map_image(地图图片), ult_voice(大招语音),
         hero_silhouette(英雄剪影), skill_icon_name(技能名称), hero_description(英雄描述)"""
         
-        args = self._get_args(event)
         logger.info(f"guess命令被调用，参数: {args}")
         
         question_type = " ".join(args) if args else "hero_icon"
@@ -630,9 +583,8 @@ len(解析后的args): {len(args)}
 
     # ==================== 自然语言查询 ====================
     @filter.command("ow", aliases=["守望", "o"])
-    async def cmd_auto_route(self, event: AstrMessageEvent):
+    async def cmd_auto_route(self, event: AstrMessageEvent, *args):
         """自然语言查询: /ow 帮我看一下海盐冰淇淋#5911这周总结"""
-        args = self._get_args(event)
         logger.info(f"ow命令被调用，参数: {args}")
         
         text = " ".join(args)
@@ -647,7 +599,7 @@ len(解析后的args): {len(args)}
 
     # ==================== 帮助命令 ====================
     @filter.command("ow-help", aliases=["守望帮助", "oh"])
-    async def cmd_help(self, event: AstrMessageEvent):
+    async def cmd_help(self, event: AstrMessageEvent, *args):
         """显示Overstats插件帮助"""
         help_text = """
 🎮 Overstats 守望先锋数据插件帮助 🎮
