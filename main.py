@@ -36,7 +36,7 @@ class OverstatsPlugin(Star):
         bind_id = await self.get_kv_data(f"bind_{user_id}", None)
         return bind_id
 
-    async def _fetch_image(self, endpoint: str, payload: dict = None, timeout: int = 30) -> bytes:
+    async def _fetch_image(self, endpoint: str, payload: dict = None, timeout: int = 600) -> bytes:
         """辅助方法：请求指定的图片 API 并返回二进制字节流"""
         url = f"{self.base_url}{endpoint}"
         payload = payload or {}
@@ -178,7 +178,7 @@ class OverstatsPlugin(Star):
             return
         
         yield event.plain_result(f"📊 正在生成 {target_id} 的本周战绩大数据总结，耗时较长（约30-60秒），请稍候...")
-        img_bytes = await self._fetch_image("/dashen-summary/week/image", {"bnet_id": target_id}, timeout=90)
+        img_bytes = await self._fetch_image("/dashen-summary/week/image", {"bnet_id": target_id}, timeout=900)
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
