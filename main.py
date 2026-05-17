@@ -47,8 +47,8 @@ class OverstatsPlugin(Star):
 
     def _send_image_result(self, event: AstrMessageEvent, img_bytes: bytes):
         """
-        核心修复：将 bytes 写入系统临时文件，使用标准的 Image.from_file 发送。
-        这是最稳妥、绝不会报 AttributeError 的跨版本方案。
+        核心修复：将 bytes 写入系统临时文件，使用标准的 Image(path=...) 实例化。
+        这是 AstrBot 最底层、最标准的图片组件构造方式。
         """
         temp_file_path = ""
         try:
@@ -57,22 +57,20 @@ class OverstatsPlugin(Star):
                 f.write(img_bytes)
                 temp_file_path = f.name
             
-            # 使用最基础、最通用的 from_file 构造图片组件
-            message_obj = event.make_result().message(Image.from_file(temp_file_path))
-            return message_obj
+            # 核心改动：直接使用 Image(path=临时文件路径) 创建图片组件
+            # 这样 AstrBot 就会将其识别为真正的图片组件并以图片模式发送
+            image_component = Image(path=temp_file_path)
+            
+            # 使用链式调用将组件放入消息中
+            return event.make_result().message(image_component)
             
         except Exception as e:
-            logger.error(f"构建图片消息时发生错误: {e}")
-            return event.plain_result("❌ 机器人构建图片组件失败。")
+            logger.error(f"构建图片组件时发生严重错误: {e}")
+            return event.plain_result(f"❌ 机器人构建图片组件失败: {e}")
             
-        finally:
-            # 无论发送成功与否，稍后或立即清理临时文件，防止占用磁盘
-            if temp_file_path and os.path.exists(temp_file_path):
-                try:
-                    os.remove(temp_file_path)
-                except Exception as e:
-                    logger.warning(f"删除临时文件失败: {e}")
-
+        # 注意：这里去掉了之前的 os.remove(temp_file_path)，
+        # 因为如果立即删除，AstrBot 的底层发送队列可能还没来得及读取该文件，会导致发不出图。
+        # 别担心，操作系统会自动定期清理 tempfile 产生的临时文件。
     # ==================== 1. 基础与管理指令 ====================
 
     @command("owhelp")
