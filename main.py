@@ -3,7 +3,6 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api import logger
 import httpx
 import json
-import base64
 from typing import Optional, Dict, Any, List, Tuple
 
 class OverstatsPlugin(Star):
@@ -109,7 +108,7 @@ class OverstatsPlugin(Star):
             return {"error": f"网络错误: {str(e)}"}
 
     async def _execute_image_command(self, event: AstrMessageEvent, endpoint: str, payload: Dict[str, Any] = None):
-        """替代 yield 的直接发送图片结果方法"""
+        """发送图片结果方法"""
         result = await self._fetch_image(endpoint, payload)
         if isinstance(result, bytes):
             return event.image_result(result)
@@ -119,7 +118,7 @@ class OverstatsPlugin(Star):
             return event.plain_result("获取图片失败，请稍后再试")
 
     async def _execute_replies_command(self, event: AstrMessageEvent, endpoint: str, payload: Dict[str, Any] = None):
-        """替代 yield 的直接处理并发送所有回复内容"""
+        """处理并发送所有回复内容"""
         result = await self._api_request(endpoint, payload)
         if not result or "error" in result:
             return event.plain_result(result.get("error", "获取数据失败") if result else "获取数据失败")
@@ -127,10 +126,6 @@ class OverstatsPlugin(Star):
         if "replies" not in result:
             return event.plain_result("API返回格式错误")
         
-        # 针对新版框架，合并多条回复为连贯链或直接分批发送
-        # 这里为了确保稳妥，在有多条回复时使用底层统一构建或返回最后/最核心的消息，
-        # 如果框架支持链式，可以通过多级组件发送；
-        # 鉴于一般 replies 包含一条核心文本或图片：
         for reply in result["replies"]:
             if reply["type"] == "text":
                 return event.plain_result(reply["data"])
@@ -143,7 +138,7 @@ class OverstatsPlugin(Star):
                 return event.plain_result(f"[音频内容: {reply.get('media_type', 'audio')}]")
         return event.plain_result("未收到有效的回复内容")
 
-    def _parse_bnet_id_from_args(self, args: Tuple[str, ...]) -> Optional[str]:
+    def _parse_bnet_id_from_args(self, args: List[str]) -> Optional[str]:
         """从参数列表中解析战网ID，处理包含空格的情况"""
         if not args:
             return None
@@ -165,22 +160,22 @@ class OverstatsPlugin(Star):
 
     # ==================== 调试命令 ====================
     @filter.command("ow-debug", aliases=["守望调试"])
-    async def cmd_debug(self, event: AstrMessageEvent, *args):
+    async def cmd_debug(self, event: AstrMessageEvent, args: list = None):
         """调试命令，显示参数信息"""
+        args = args or []
         debug_info = f"""
 🔍 调试信息:
 args: {args}
 len(args): {len(args)}
 event.command: {event.command}
-event.raw_message: {getattr(event, 'raw_message', 'N/A')}
         """
-        logger.info(debug_info)
         return event.plain_result(debug_info.strip())
 
     # ==================== 大神资料 ====================
     @filter.command("profile", aliases=["大神资料", "资料", "p"])
-    async def cmd_profile(self, event: AstrMessageEvent, *args):
+    async def cmd_profile(self, event: AstrMessageEvent, args: list = None):
         """获取玩家资料: /profile [战网ID]"""
+        args = args or []
         bnet_id = self._parse_bnet_id_from_args(args)
         if not bnet_id:
             return event.plain_result("请提供战网ID，例如: /profile 海盐冰淇淋#5911")
@@ -190,8 +185,9 @@ event.raw_message: {getattr(event, 'raw_message', 'N/A')}
 
     # ==================== 大神对局 ====================
     @filter.command("match", aliases=["大神对局", "对局", "m"])
-    async def cmd_match(self, event: AstrMessageEvent, *args):
+    async def cmd_match(self, event: AstrMessageEvent, args: list = None):
         """获取玩家最近对局: /match [战网ID] [数量]"""
+        args = args or []
         bnet_id = self._parse_bnet_id_from_args(args)
         limit = 12
         
@@ -206,8 +202,9 @@ event.raw_message: {getattr(event, 'raw_message', 'N/A')}
         return await self._execute_replies_command(event, "/dashen-match/replies", payload)
 
     @filter.command("match-detail", aliases=["对局详情", "md"])
-    async def cmd_match_detail(self, event: AstrMessageEvent, *args):
+    async def cmd_match_detail(self, event: AstrMessageEvent, args: list = None):
         """获取对局详情: /match-detail [战网ID] [序号] [show_all] [analyze]"""
+        args = args or []
         bnet_id = self._parse_bnet_id_from_args(args)
         index = 1
         show_all = False
@@ -240,8 +237,9 @@ event.raw_message: {getattr(event, 'raw_message', 'N/A')}
 
     # ==================== 大神同玩 ====================
     @filter.command("sameplay", aliases=["大神同玩", "同玩", "sp"])
-    async def cmd_sameplay(self, event: AstrMessageEvent, *args):
+    async def cmd_sameplay(self, event: AstrMessageEvent, args: list = None):
         """查询两个玩家的共同对局: /sameplay [玩家1] [玩家2]"""
+        args = args or []
         player1, player2 = None, None
         for i, arg in enumerate(args):
             if "#" in arg:
@@ -266,8 +264,9 @@ event.raw_message: {getattr(event, 'raw_message', 'N/A')}
         return await self._execute_replies_command(event, "/dashen-sameplay/replies", payload)
 
     @filter.command("sameplay-detail", aliases=["同玩详情", "spd"])
-    async def cmd_sameplay_detail(self, event: AstrMessageEvent, *args):
+    async def cmd_sameplay_detail(self, event: AstrMessageEvent, args: list = None):
         """获取同玩对局详情: /sameplay-detail [玩家1] [玩家2] [序号] [show_all] [analyze]"""
+        args = args or []
         player1, player2 = None, None
         index = 1
         show_all, analyze = False, False
@@ -313,8 +312,9 @@ event.raw_message: {getattr(event, 'raw_message', 'N/A')}
 
     # ==================== 排名历史 ====================
     @filter.command("rank-history", aliases=["排名历史", "rh"])
-    async def cmd_rank_history(self, event: AstrMessageEvent, *args):
+    async def cmd_rank_history(self, event: AstrMessageEvent, args: list = None):
         """获取玩家赛季排名历史: /rank-history [战网ID]"""
+        args = args or []
         bnet_id = self._parse_bnet_id_from_args(args)
         if not bnet_id:
             return event.plain_result("请提供战网ID，例如: /rank-history 海盐冰淇淋#5911")
@@ -324,8 +324,9 @@ event.raw_message: {getattr(event, 'raw_message', 'N/A')}
 
     # ==================== 实力分析 ====================
     @filter.command("quick-strength", aliases=["快速实力", "qs"])
-    async def cmd_quick_strength(self, event: AstrMessageEvent, *args):
+    async def cmd_quick_strength(self, event: AstrMessageEvent, args: list = None):
         """获取快速模式实力分析: /quick-strength [战网ID] [数量]"""
+        args = args or []
         bnet_id = self._parse_bnet_id_from_args(args)
         limit = 12
         if args and args[-1].isdigit():
@@ -339,8 +340,9 @@ event.raw_message: {getattr(event, 'raw_message', 'N/A')}
         return await self._execute_image_command(event, "/dashen-quick-strength/image", payload)
 
     @filter.command("competitive-strength", aliases=["竞技实力", "cs", "cstrength"])
-    async def cmd_competitive_strength(self, event: AstrMessageEvent, *args):
+    async def cmd_competitive_strength(self, event: AstrMessageEvent, args: list = None):
         """获取竞技模式实力分析: /competitive-strength [战网ID] [数量]"""
+        args = args or []
         bnet_id = self._parse_bnet_id_from_args(args)
         limit = 12
         if args and args[-1].isdigit():
@@ -355,16 +357,18 @@ event.raw_message: {getattr(event, 'raw_message', 'N/A')}
 
     # ==================== 排行榜 ====================
     @filter.command("rank-leaderboard", aliases=["排名榜", "rl", "leaderboard"])
-    async def cmd_rank_leaderboard(self, event: AstrMessageEvent, *args):
+    async def cmd_rank_leaderboard(self, event: AstrMessageEvent, args: list = None):
         """获取地区排名榜: /rank-leaderboard [省份] [角色]"""
+        args = args or []
         province = args[0] if len(args) >= 1 else "全国"
         role = args[1] if len(args) >= 2 else "all"
         payload = {"province": province, "role": role}
         return await self._execute_image_command(event, "/dashen-rank-leaderboard/image", payload)
 
     @filter.command("hero-leaderboard", aliases=["英雄榜", "hl", "hero"])
-    async def cmd_hero_leaderboard(self, event: AstrMessageEvent, *args):
+    async def cmd_hero_leaderboard(self, event: AstrMessageEvent, args: list = None):
         """获取英雄排行榜: /hero-leaderboard [英雄名] [省份]"""
+        args = args or []
         if not args:
             return event.plain_result("请提供英雄名，例如: /hero-leaderboard 安娜")
         hero = args[0]
@@ -375,16 +379,18 @@ event.raw_message: {getattr(event, 'raw_message', 'N/A')}
 
     # ==================== 英雄数据 ====================
     @filter.command("hero-pick-rate", aliases=["英雄选取率", "pickrate", "pr"])
-    async def cmd_hero_pick_rate(self, event: AstrMessageEvent, *args):
+    async def cmd_hero_pick_rate(self, event: AstrMessageEvent, args: list = None):
         """获取英雄选取率: /hero-pick-rate [模式] [段位]"""
+        args = args or []
         game_mode = args[0] if len(args) >= 1 else "competitive"
         mmr = args[1] if len(args) >= 2 else "all"
         payload = {"view": "ranking", "game_mode": game_mode, "mmr": mmr}
         return await self._execute_image_command(event, "/ow-hero-pick-rate/image", payload)
 
     @filter.command("hero-perk", aliases=["英雄威能", "perk"])
-    async def cmd_hero_perk(self, event: AstrMessageEvent, *args):
+    async def cmd_hero_perk(self, event: AstrMessageEvent, args: list = None):
         """获取英雄威能数据: /hero-perk [英雄名]"""
+        args = args or []
         if not args:
             return event.plain_result("请提供英雄名，例如: /hero-perk 安娜")
         hero = " ".join(args)
@@ -393,8 +399,9 @@ event.raw_message: {getattr(event, 'raw_message', 'N/A')}
 
     # ==================== 每日总结 ====================
     @filter.command("today-summary", aliases=["今日总结", "today", "ts"])
-    async def cmd_today_summary(self, event: AstrMessageEvent, *args):
+    async def cmd_today_summary(self, event: AstrMessageEvent, args: list = None):
         """获取今日游戏总结: /today-summary [战网ID]"""
+        args = args or []
         bnet_id = self._parse_bnet_id_from_args(args)
         if not bnet_id:
             return event.plain_result("请提供战网ID，例如: /today-summary 海盐冰淇淋#5911")
@@ -403,8 +410,9 @@ event.raw_message: {getattr(event, 'raw_message', 'N/A')}
         return await self._execute_image_command(event, "/dashen-summary/today/image", payload)
 
     @filter.command("yesterday-summary", aliases=["昨日总结", "yesterday", "ys"])
-    async def cmd_yesterday_summary(self, event: AstrMessageEvent, *args):
+    async def cmd_yesterday_summary(self, event: AstrMessageEvent, args: list = None):
         """获取昨日游戏总结: /yesterday-summary [战网ID]"""
+        args = args or []
         bnet_id = self._parse_bnet_id_from_args(args)
         if not bnet_id:
             return event.plain_result("请提供战网ID，例如: /yesterday-summary 海盐冰淇淋#5911")
@@ -413,48 +421,51 @@ event.raw_message: {getattr(event, 'raw_message', 'N/A')}
         return await self._execute_image_command(event, "/dashen-summary/yesterday/image", payload)
 
     @filter.command("week-summary", aliases=["本周总结", "week", "ws"])
-    async def cmd_week_summary(self, event: AstrMessageEvent, *args):
+    async def cmd_week_summary(self, event: AstrMessageEvent, args: list = None):
         """获取本周游戏总结: /week-summary [战网ID]"""
+        args = args or []
         bnet_id = self._parse_bnet_id_from_args(args)
         if not bnet_id:
             return event.plain_result("请提供战网ID，例如: /week-summary 海盐冰淇淋#5911")
         
-        # 由于生成时间较长，新框架下建议直接去获取并发送结果即可
         payload = {"bnet_id": bnet_id}
         return await self._execute_image_command(event, "/dashen-summary/week/image", payload)
 
     # ==================== 电竞资讯 ====================
     @filter.command("esports", aliases=["电竞资讯", "电竞", "e"])
-    async def cmd_esports(self, event: AstrMessageEvent, *args):
+    async def cmd_esports(self, event: AstrMessageEvent, args: list = None):
         """获取最新电竞资讯"""
         return await self._execute_image_command(event, "/ow-esports/image")
 
     # ==================== 商店信息 ====================
     @filter.command("shop", aliases=["商店", "s"])
-    async def cmd_shop(self, event: AstrMessageEvent, *args):
+    async def cmd_shop(self, event: AstrMessageEvent, args: list = None):
         """获取当前商店信息"""
         return await self._execute_image_command(event, "/ow-shop/image")
 
     # ==================== 更新日志 ====================
     @filter.command("patch-notes", aliases=["更新日志", "patch", "pn"])
-    async def cmd_patch_notes(self, event: AstrMessageEvent, *args):
+    async def cmd_patch_notes(self, event: AstrMessageEvent, args: list = None):
         """获取更新日志: /patch-notes [latest/small/big]"""
+        args = args or []
         kind = " ".join(args) if args else "latest"
         payload = {"patch_kind": kind}
         return await self._execute_image_command(event, "/patch-notes/image", payload)
 
     # ==================== 猜英雄游戏 ====================
     @filter.command("guess", aliases=["猜英雄", "g"])
-    async def cmd_guess(self, event: AstrMessageEvent, *args):
+    async def cmd_guess(self, event: AstrMessageEvent, args: list = None):
         """开始猜英雄游戏: /guess [类型]"""
+        args = args or []
         question_type = " ".join(args) if args else "hero_icon"
         payload = {"question_type": question_type}
         return await self._execute_replies_command(event, "/ow-guess/replies", payload)
 
     # ==================== 自然语言查询 ====================
     @filter.command("ow", aliases=["守望", "o"])
-    async def cmd_auto_route(self, event: AstrMessageEvent, *args):
+    async def cmd_auto_route(self, event: AstrMessageEvent, args: list = None):
         """自然语言查询: /ow 帮我看一下海盐冰淇淋#5911这周总结"""
+        args = args or []
         text = " ".join(args)
         if not text:
             return event.plain_result("请输入查询内容，例如: /ow 帮我看一下海盐冰淇淋#5911的竞技实力")
@@ -464,7 +475,7 @@ event.raw_message: {getattr(event, 'raw_message', 'N/A')}
 
     # ==================== 帮助命令 ====================
     @filter.command("ow-help", aliases=["守望帮助", "oh"])
-    async def cmd_help(self, event: AstrMessageEvent, *args):
+    async def cmd_help(self, event: AstrMessageEvent, args: list = None):
         """显示Overstats插件帮助"""
         help_text = """
 🎮 Overstats 守望先锋数据插件帮助 🎮
