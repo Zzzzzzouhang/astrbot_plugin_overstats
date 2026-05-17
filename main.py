@@ -1,11 +1,12 @@
-import io
+import os
 import aiohttp
 import logging
+import tempfile
 from astrbot.api.all import *
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.1")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.2")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -45,10 +46,32 @@ class OverstatsPlugin(Star):
             return None
 
     def _send_image_result(self, event: AstrMessageEvent, img_bytes: bytes):
-        """核心修复：通过标准的 io.BytesIO 转换字节流发送图片"""
-        image_stream = io.BytesIO(img_bytes)
-        # 兼容最新版 AstrBot 的 Image 发送逻辑
-        return event.make_result().message(Image.from_base64_or_url_or_file_or_bytes(image_stream))
+        """
+        核心修复：将 bytes 写入系统临时文件，使用标准的 Image.from_file 发送。
+        这是最稳妥、绝不会报 AttributeError 的跨版本方案。
+        """
+        temp_file_path = ""
+        try:
+            # 创建一个临时的 png 文件
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as f:
+                f.write(img_bytes)
+                temp_file_path = f.name
+            
+            # 使用最基础、最通用的 from_file 构造图片组件
+            message_obj = event.make_result().message(Image.from_file(temp_file_path))
+            return message_obj
+            
+        except Exception as e:
+            logger.error(f"构建图片消息时发生错误: {e}")
+            return event.plain_result("❌ 机器人构建图片组件失败。")
+            
+        finally:
+            # 无论发送成功与否，稍后或立即清理临时文件，防止占用磁盘
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except Exception as e:
+                    logger.warning(f"删除临时文件失败: {e}")
 
     # ==================== 1. 基础与管理指令 ====================
 
@@ -185,7 +208,7 @@ class OverstatsPlugin(Star):
         '''查询竞技/天梯对局表现与强度指数'''
         target_id = self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 进行绑定. ")
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 进行绑定。")
             return
         
         yield event.plain_result(f"🏆 正在评估 {target_id} 的竞技天梯强度指数...")
