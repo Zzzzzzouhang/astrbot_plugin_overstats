@@ -1,0 +1,8 @@
+{
+    "name": "astrbot_plugin_ow_dashen",
+    "version": "1.0.0",
+    "author": "Your Name",
+    "description": "守望先锋大神数据插件，通过调用本地API返回生成的图片结果",
+    "repo": "",
+    "tags": ["守望先锋", "数据", "图片"]
+}
