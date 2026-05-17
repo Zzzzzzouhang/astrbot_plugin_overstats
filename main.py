@@ -140,6 +140,33 @@ class OverstatsPlugin(Star):
                 # AstrBot暂不支持直接发送音频，发送提示
                 yield event.plain_result(f"[音频内容: {reply.get('media_type', 'audio')}]")
 
+    def _get_args(self, event: AstrMessageEvent) -> List[str]:
+        """
+        跨平台兼容的参数获取方法
+        解决QQOfficialMessageEvent没有args属性的问题
+        """
+        # 优先尝试使用event.args（兼容旧平台）
+        if hasattr(event, 'args'):
+            return event.args
+        
+        # 如果没有args属性，从消息文本中手动解析
+        try:
+            # 获取原始消息文本
+            message_text = event.get_message()
+            if not message_text:
+                return []
+            
+            # 分割消息为命令和参数
+            parts = message_text.strip().split()
+            if not parts:
+                return []
+            
+            # 第一个元素是命令，剩下的是参数
+            return parts[1:]
+        except Exception as e:
+            logger.error(f"解析命令参数失败: {str(e)}", exc_info=True)
+            return []
+
     def _parse_bnet_id_from_args(self, args: List[str]) -> Optional[str]:
         """从参数列表中解析战网ID，处理包含空格的情况"""
         if not args:
@@ -168,13 +195,16 @@ class OverstatsPlugin(Star):
     @filter.command("ow-debug", aliases=["守望调试"])
     async def cmd_debug(self, event: AstrMessageEvent):
         """调试命令，显示参数信息"""
+        args = self._get_args(event)
         debug_info = f"""
 🔍 调试信息:
-event.args: {event.args}
-len(event.args): {len(event.args)}
-event.command: {event.command}
+event.args: {getattr(event, 'args', 'N/A')}
+len(event.args): {len(getattr(event, 'args', []))}
+event.command: {getattr(event, 'command', 'N/A')}
 event.raw_message: {getattr(event, 'raw_message', 'N/A')}
 event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 'N/A'}
+解析后的args: {args}
+len(解析后的args): {len(args)}
         """
         logger.info(debug_info)
         yield event.plain_result(debug_info.strip())
@@ -183,9 +213,10 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("profile", aliases=["大神资料", "资料", "p"])
     async def cmd_profile(self, event: AstrMessageEvent):
         """获取玩家资料: /profile [战网ID]"""
-        logger.info(f"profile命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"profile命令被调用，参数: {args}")
         
-        bnet_id = self._parse_bnet_id_from_args(event.args)
+        bnet_id = self._parse_bnet_id_from_args(args)
         if not bnet_id:
             yield event.plain_result("请提供战网ID，例如: /profile 海盐冰淇淋#5911")
             return
@@ -198,16 +229,17 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("match", aliases=["大神对局", "对局", "m"])
     async def cmd_match(self, event: AstrMessageEvent):
         """获取玩家最近对局: /match [战网ID] [数量]"""
-        logger.info(f"match命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"match命令被调用，参数: {args}")
         
-        bnet_id = self._parse_bnet_id_from_args(event.args)
+        bnet_id = self._parse_bnet_id_from_args(args)
         limit = 12
         
         # 尝试解析数量参数（最后一个参数如果是数字）
-        if event.args and event.args[-1].isdigit():
-            limit = int(event.args[-1])
+        if args and args[-1].isdigit():
+            limit = int(args[-1])
             # 重新解析战网ID（排除最后一个数字参数）
-            bnet_id = self._parse_bnet_id_from_args(event.args[:-1])
+            bnet_id = self._parse_bnet_id_from_args(args[:-1])
         
         if not bnet_id:
             yield event.plain_result("请提供战网ID，例如: /match 海盐冰淇淋#5911")
@@ -220,9 +252,10 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("match-detail", aliases=["对局详情", "md"])
     async def cmd_match_detail(self, event: AstrMessageEvent):
         """获取对局详情: /match-detail [战网ID] [序号] [show_all] [analyze]"""
-        logger.info(f"match-detail命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"match-detail命令被调用，参数: {args}")
         
-        bnet_id = self._parse_bnet_id_from_args(event.args)
+        bnet_id = self._parse_bnet_id_from_args(args)
         index = 1
         show_all = False
         analyze = False
@@ -231,7 +264,7 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
         if bnet_id:
             # 找到战网ID在参数列表中的位置
             bnet_parts = bnet_id.split()
-            remaining_args = event.args[len(bnet_parts):]
+            remaining_args = args[len(bnet_parts):]
             
             if remaining_args:
                 if remaining_args[0].isdigit():
@@ -260,27 +293,28 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("sameplay", aliases=["大神同玩", "同玩", "sp"])
     async def cmd_sameplay(self, event: AstrMessageEvent):
         """查询两个玩家的共同对局: /sameplay [玩家1] [玩家2]"""
-        logger.info(f"sameplay命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"sameplay命令被调用，参数: {args}")
         
         # 查找第一个#的位置
         player1 = None
         player2 = None
         
-        for i, arg in enumerate(event.args):
+        for i, arg in enumerate(args):
             if "#" in arg:
                 # 解析第一个玩家
                 player1_parts = [arg]
-                for j in range(i+1, len(event.args)):
-                    if "#" in event.args[j]:
+                for j in range(i+1, len(args)):
+                    if "#" in args[j]:
                         # 找到第二个#，解析第二个玩家
-                        player2_parts = [event.args[j]]
-                        for k in range(j+1, len(event.args)):
-                            if event.args[k].isdigit() or event.args[k] in ["show_all", "all", "analyze", "ai"]:
+                        player2_parts = [args[j]]
+                        for k in range(j+1, len(args)):
+                            if args[k].isdigit() or args[k] in ["show_all", "all", "analyze", "ai"]:
                                 break
-                            player2_parts.append(event.args[k])
+                            player2_parts.append(args[k])
                         player2 = " ".join(player2_parts)
                         break
-                    player1_parts.append(event.args[j])
+                    player1_parts.append(args[j])
                 
                 player1 = " ".join(player1_parts)
                 break
@@ -301,7 +335,8 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("sameplay-detail", aliases=["同玩详情", "spd"])
     async def cmd_sameplay_detail(self, event: AstrMessageEvent):
         """获取同玩对局详情: /sameplay-detail [玩家1] [玩家2] [序号] [show_all] [analyze]"""
-        logger.info(f"sameplay-detail命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"sameplay-detail命令被调用，参数: {args}")
         
         # 查找第一个#的位置
         player1 = None
@@ -310,20 +345,20 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
         show_all = False
         analyze = False
         
-        for i, arg in enumerate(event.args):
+        for i, arg in enumerate(args):
             if "#" in arg:
                 # 解析第一个玩家
                 player1_parts = [arg]
-                for j in range(i+1, len(event.args)):
-                    if "#" in event.args[j]:
+                for j in range(i+1, len(args)):
+                    if "#" in args[j]:
                         # 找到第二个#，解析第二个玩家
-                        player2_parts = [event.args[j]]
+                        player2_parts = [args[j]]
                         remaining_args = []
-                        for k in range(j+1, len(event.args)):
-                            player2_parts.append(event.args[k])
+                        for k in range(j+1, len(args)):
+                            player2_parts.append(args[k])
                             # 检查是否是数字或特殊标志
-                            if event.args[k].isdigit() or event.args[k] in ["show_all", "all", "analyze", "ai"]:
-                                remaining_args = event.args[k+1:]
+                            if args[k].isdigit() or args[k] in ["show_all", "all", "analyze", "ai"]:
+                                remaining_args = args[k+1:]
                                 break
                         
                         player2 = " ".join(player2_parts)
@@ -340,7 +375,7 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
                                 analyze = True
                         
                         break
-                    player1_parts.append(event.args[j])
+                    player1_parts.append(args[j])
                 
                 player1 = " ".join(player1_parts)
                 break
@@ -365,9 +400,10 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("rank-history", aliases=["排名历史", "rh"])
     async def cmd_rank_history(self, event: AstrMessageEvent):
         """获取玩家赛季排名历史: /rank-history [战网ID]"""
-        logger.info(f"rank-history命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"rank-history命令被调用，参数: {args}")
         
-        bnet_id = self._parse_bnet_id_from_args(event.args)
+        bnet_id = self._parse_bnet_id_from_args(args)
         if not bnet_id:
             yield event.plain_result("请提供战网ID，例如: /rank-history 海盐冰淇淋#5911")
             return
@@ -380,16 +416,17 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("quick-strength", aliases=["快速实力", "qs"])
     async def cmd_quick_strength(self, event: AstrMessageEvent):
         """获取快速模式实力分析: /quick-strength [战网ID] [数量]"""
-        logger.info(f"quick-strength命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"quick-strength命令被调用，参数: {args}")
         
-        bnet_id = self._parse_bnet_id_from_args(event.args)
+        bnet_id = self._parse_bnet_id_from_args(args)
         limit = 12
         
         # 尝试解析数量参数（最后一个参数如果是数字）
-        if event.args and event.args[-1].isdigit():
-            limit = int(event.args[-1])
+        if args and args[-1].isdigit():
+            limit = int(args[-1])
             # 重新解析战网ID（排除最后一个数字参数）
-            bnet_id = self._parse_bnet_id_from_args(event.args[:-1])
+            bnet_id = self._parse_bnet_id_from_args(args[:-1])
         
         if not bnet_id:
             yield event.plain_result("请提供战网ID，例如: /quick-strength 海盐冰淇淋#5911")
@@ -402,16 +439,17 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("competitive-strength", aliases=["竞技实力", "cs", "cstrength"])
     async def cmd_competitive_strength(self, event: AstrMessageEvent):
         """获取竞技模式实力分析: /competitive-strength [战网ID] [数量]"""
-        logger.info(f"competitive-strength命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"competitive-strength命令被调用，参数: {args}")
         
-        bnet_id = self._parse_bnet_id_from_args(event.args)
+        bnet_id = self._parse_bnet_id_from_args(args)
         limit = 12
         
         # 尝试解析数量参数（最后一个参数如果是数字）
-        if event.args and event.args[-1].isdigit():
-            limit = int(event.args[-1])
+        if args and args[-1].isdigit():
+            limit = int(args[-1])
             # 重新解析战网ID（排除最后一个数字参数）
-            bnet_id = self._parse_bnet_id_from_args(event.args[:-1])
+            bnet_id = self._parse_bnet_id_from_args(args[:-1])
         
         if not bnet_id:
             yield event.plain_result("请提供战网ID，例如: /competitive-strength 海盐冰淇淋#5911")
@@ -425,15 +463,16 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("rank-leaderboard", aliases=["排名榜", "rl", "leaderboard"])
     async def cmd_rank_leaderboard(self, event: AstrMessageEvent):
         """获取地区排名榜: /rank-leaderboard [省份] [角色(tank/dps/healer/open)]"""
-        logger.info(f"rank-leaderboard命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"rank-leaderboard命令被调用，参数: {args}")
         
         province = "全国"
         role = "all"
         
-        if len(event.args) >= 1:
-            province = event.args[0]
-        if len(event.args) >= 2:
-            role = event.args[1]
+        if len(args) >= 1:
+            province = args[0]
+        if len(args) >= 2:
+            role = args[1]
         
         payload = {"province": province, "role": role}
         async for result in self._send_image_result(event, "/dashen-rank-leaderboard/image", payload):
@@ -442,20 +481,21 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("hero-leaderboard", aliases=["英雄榜", "hl", "hero"])
     async def cmd_hero_leaderboard(self, event: AstrMessageEvent):
         """获取英雄排行榜: /hero-leaderboard [英雄名] [省份] [模式(preset/open)]"""
-        logger.info(f"hero-leaderboard命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"hero-leaderboard命令被调用，参数: {args}")
         
-        if not event.args:
+        if not args:
             yield event.plain_result("请提供英雄名，例如: /hero-leaderboard 安娜")
             return
         
-        hero = event.args[0]
+        hero = args[0]
         province = "全国"
         mode = "preset"
         
-        if len(event.args) >= 2:
-            province = event.args[1]
-        if len(event.args) >= 3:
-            mode = event.args[2]
+        if len(args) >= 2:
+            province = args[1]
+        if len(args) >= 3:
+            mode = args[2]
         
         payload = {"hero": hero, "province": province, "mode": mode}
         async for result in self._send_image_result(event, "/dashen-hero-leaderboard/image", payload):
@@ -465,15 +505,16 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("hero-pick-rate", aliases=["英雄选取率", "pickrate", "pr"])
     async def cmd_hero_pick_rate(self, event: AstrMessageEvent):
         """获取英雄选取率: /hero-pick-rate [模式(quick/competitive)] [段位]"""
-        logger.info(f"hero-pick-rate命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"hero-pick-rate命令被调用，参数: {args}")
         
         game_mode = "competitive"
         mmr = "all"
         
-        if len(event.args) >= 1:
-            game_mode = event.args[0]
-        if len(event.args) >= 2:
-            mmr = event.args[1]
+        if len(args) >= 1:
+            game_mode = args[0]
+        if len(args) >= 2:
+            mmr = args[1]
         
         payload = {
             "view": "ranking",
@@ -486,13 +527,14 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("hero-perk", aliases=["英雄威能", "perk"])
     async def cmd_hero_perk(self, event: AstrMessageEvent):
         """获取英雄威能数据: /hero-perk [英雄名]"""
-        logger.info(f"hero-perk命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"hero-perk命令被调用，参数: {args}")
         
-        if not event.args:
+        if not args:
             yield event.plain_result("请提供英雄名，例如: /hero-perk 安娜")
             return
         
-        hero = " ".join(event.args)
+        hero = " ".join(args)
         payload = {"hero": hero}
         async for result in self._send_image_result(event, "/ow-hero-perk/image", payload):
             yield result
@@ -501,9 +543,10 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("today-summary", aliases=["今日总结", "today", "ts"])
     async def cmd_today_summary(self, event: AstrMessageEvent):
         """获取今日游戏总结: /today-summary [战网ID]"""
-        logger.info(f"today-summary命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"today-summary命令被调用，参数: {args}")
         
-        bnet_id = self._parse_bnet_id_from_args(event.args)
+        bnet_id = self._parse_bnet_id_from_args(args)
         if not bnet_id:
             yield event.plain_result("请提供战网ID，例如: /today-summary 海盐冰淇淋#5911")
             return
@@ -515,9 +558,10 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("yesterday-summary", aliases=["昨日总结", "yesterday", "ys"])
     async def cmd_yesterday_summary(self, event: AstrMessageEvent):
         """获取昨日游戏总结: /yesterday-summary [战网ID]"""
-        logger.info(f"yesterday-summary命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"yesterday-summary命令被调用，参数: {args}")
         
-        bnet_id = self._parse_bnet_id_from_args(event.args)
+        bnet_id = self._parse_bnet_id_from_args(args)
         if not bnet_id:
             yield event.plain_result("请提供战网ID，例如: /yesterday-summary 海盐冰淇淋#5911")
             return
@@ -529,9 +573,10 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("week-summary", aliases=["本周总结", "week", "ws"])
     async def cmd_week_summary(self, event: AstrMessageEvent):
         """获取本周游戏总结: /week-summary [战网ID] (可能需要较长时间)"""
-        logger.info(f"week-summary命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"week-summary命令被调用，参数: {args}")
         
-        bnet_id = self._parse_bnet_id_from_args(event.args)
+        bnet_id = self._parse_bnet_id_from_args(args)
         if not bnet_id:
             yield event.plain_result("请提供战网ID，例如: /week-summary 海盐冰淇淋#5911")
             return
@@ -559,9 +604,10 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("patch-notes", aliases=["更新日志", "patch", "pn"])
     async def cmd_patch_notes(self, event: AstrMessageEvent):
         """获取更新日志: /patch-notes [latest/small/big]"""
-        logger.info(f"patch-notes命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"patch-notes命令被调用，参数: {args}")
         
-        kind = " ".join(event.args) if event.args else "latest"
+        kind = " ".join(args) if args else "latest"
         payload = {"patch_kind": kind}
         async for result in self._send_image_result(event, "/patch-notes/image", payload):
             yield result
@@ -574,9 +620,10 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
         perk_icon_hero(威能图标), map_image(地图图片), ult_voice(大招语音),
         hero_silhouette(英雄剪影), skill_icon_name(技能名称), hero_description(英雄描述)"""
         
-        logger.info(f"guess命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"guess命令被调用，参数: {args}")
         
-        question_type = " ".join(event.args) if event.args else "hero_icon"
+        question_type = " ".join(args) if args else "hero_icon"
         payload = {"question_type": question_type}
         async for result in self._send_replies_result(event, "/ow-guess/replies", payload):
             yield result
@@ -585,9 +632,10 @@ event.get_message(): {event.get_message() if hasattr(event, 'get_message') else 
     @filter.command("ow", aliases=["守望", "o"])
     async def cmd_auto_route(self, event: AstrMessageEvent):
         """自然语言查询: /ow 帮我看一下海盐冰淇淋#5911这周总结"""
-        logger.info(f"ow命令被调用，参数: {event.args}")
+        args = self._get_args(event)
+        logger.info(f"ow命令被调用，参数: {args}")
         
-        text = " ".join(event.args)
+        text = " ".join(args)
         if not text:
             yield event.plain_result("请输入查询内容，例如: /ow 帮我看一下海盐冰淇淋#5911的竞技实力")
             return
