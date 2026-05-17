@@ -140,6 +140,23 @@ class OverstatsPlugin(Star):
                 # AstrBot暂不支持直接发送音频，发送提示
                 yield event.plain_result(f"[音频内容: {reply.get('media_type', 'audio')}]")
 
+    def _get_message_content(self, event: AstrMessageEvent) -> str:
+        """跨适配器获取消息内容的通用方法"""
+        try:
+            # 尝试使用官方推荐的方法
+            return event.get_message().strip()
+        except AttributeError:
+            try:
+                # 回退到旧版本的属性
+                return event.message.content.strip()
+            except AttributeError:
+                try:
+                    # 最后尝试直接获取content属性
+                    return event.content.strip()
+                except AttributeError:
+                    logger.error("无法获取消息内容，所有方法都失败了")
+                    return ""
+
     def _parse_bnet_id(self, args: str) -> Optional[str]:
         """解析战网ID，处理特殊字符和空格问题"""
         if not args:
@@ -165,7 +182,8 @@ class OverstatsPlugin(Star):
     @filter.command("profile", aliases=["大神资料", "资料", "p"])
     async def cmd_profile(self, event: AstrMessageEvent):
         """获取玩家资料: /profile [战网ID]"""
-        bnet_id = self._parse_bnet_id(event.message.content)
+        content = self._get_message_content(event)
+        bnet_id = self._parse_bnet_id(content)
         if not bnet_id:
             yield event.plain_result("请提供战网ID，例如: /profile 海盐冰淇淋#5911")
             return
@@ -178,13 +196,13 @@ class OverstatsPlugin(Star):
     @filter.command("match", aliases=["大神对局", "对局", "m"])
     async def cmd_match(self, event: AstrMessageEvent):
         """获取玩家最近对局: /match [战网ID] [数量]"""
-        args = event.message.content.strip()
-        if not args:
+        content = self._get_message_content(event)
+        if not content:
             yield event.plain_result("请提供战网ID，例如: /match 海盐冰淇淋#5911")
             return
         
-        parts = args.split()
-        bnet_id = self._parse_bnet_id(args)
+        parts = content.split()
+        bnet_id = self._parse_bnet_id(content)
         limit = 12
         
         # 尝试解析数量参数
@@ -204,13 +222,13 @@ class OverstatsPlugin(Star):
     @filter.command("match-detail", aliases=["对局详情", "md"])
     async def cmd_match_detail(self, event: AstrMessageEvent):
         """获取对局详情: /match-detail [战网ID] [序号] [show_all] [analyze]"""
-        args = event.message.content.strip()
-        if not args:
+        content = self._get_message_content(event)
+        if not content:
             yield event.plain_result("请提供战网ID和对局序号，例如: /match-detail 海盐冰淇淋#5911 1")
             return
         
-        parts = args.split()
-        bnet_id = self._parse_bnet_id(args)
+        parts = content.split()
+        bnet_id = self._parse_bnet_id(content)
         index = 1
         show_all = False
         analyze = False
@@ -250,13 +268,13 @@ class OverstatsPlugin(Star):
     @filter.command("sameplay", aliases=["大神同玩", "同玩", "sp"])
     async def cmd_sameplay(self, event: AstrMessageEvent):
         """查询两个玩家的共同对局: /sameplay [玩家1] [玩家2]"""
-        args = event.message.content.strip()
-        if not args:
+        content = self._get_message_content(event)
+        if not content:
             yield event.plain_result("请提供两个战网ID，例如: /sameplay 海盐冰淇淋#5911 Player#12345")
             return
         
         # 分割两个战网ID
-        parts = args.split()
+        parts = content.split()
         player1 = None
         player2 = None
         
@@ -282,12 +300,12 @@ class OverstatsPlugin(Star):
     @filter.command("sameplay-detail", aliases=["同玩详情", "spd"])
     async def cmd_sameplay_detail(self, event: AstrMessageEvent):
         """获取同玩对局详情: /sameplay-detail [玩家1] [玩家2] [序号] [show_all] [analyze]"""
-        args = event.message.content.strip()
-        if not args:
+        content = self._get_message_content(event)
+        if not content:
             yield event.plain_result("请提供两个战网ID和对局序号，例如: /sameplay-detail 海盐冰淇淋#5911 Player#12345 1")
             return
         
-        parts = args.split()
+        parts = content.split()
         player1 = None
         player2 = None
         index = 1
@@ -338,7 +356,8 @@ class OverstatsPlugin(Star):
     @filter.command("rank-history", aliases=["排名历史", "rh"])
     async def cmd_rank_history(self, event: AstrMessageEvent):
         """获取玩家赛季排名历史: /rank-history [战网ID]"""
-        bnet_id = self._parse_bnet_id(event.message.content)
+        content = self._get_message_content(event)
+        bnet_id = self._parse_bnet_id(content)
         if not bnet_id:
             yield event.plain_result("请提供战网ID，例如: /rank-history 海盐冰淇淋#5911")
             return
@@ -351,13 +370,13 @@ class OverstatsPlugin(Star):
     @filter.command("quick-strength", aliases=["快速实力", "qs"])
     async def cmd_quick_strength(self, event: AstrMessageEvent):
         """获取快速模式实力分析: /quick-strength [战网ID] [数量]"""
-        args = event.message.content.strip()
-        if not args:
+        content = self._get_message_content(event)
+        if not content:
             yield event.plain_result("请提供战网ID，例如: /quick-strength 海盐冰淇淋#5911")
             return
         
-        parts = args.split()
-        bnet_id = self._parse_bnet_id(args)
+        parts = content.split()
+        bnet_id = self._parse_bnet_id(content)
         limit = 12
         
         # 尝试解析数量参数
@@ -377,13 +396,13 @@ class OverstatsPlugin(Star):
     @filter.command("competitive-strength", aliases=["竞技实力", "cs", "cstrength"])
     async def cmd_competitive_strength(self, event: AstrMessageEvent):
         """获取竞技模式实力分析: /competitive-strength [战网ID] [数量]"""
-        args = event.message.content.strip()
-        if not args:
+        content = self._get_message_content(event)
+        if not content:
             yield event.plain_result("请提供战网ID，例如: /competitive-strength 海盐冰淇淋#5911")
             return
         
-        parts = args.split()
-        bnet_id = self._parse_bnet_id(args)
+        parts = content.split()
+        bnet_id = self._parse_bnet_id(content)
         limit = 12
         
         # 尝试解析数量参数
@@ -404,7 +423,8 @@ class OverstatsPlugin(Star):
     @filter.command("rank-leaderboard", aliases=["排名榜", "rl", "leaderboard"])
     async def cmd_rank_leaderboard(self, event: AstrMessageEvent):
         """获取地区排名榜: /rank-leaderboard [省份] [角色(tank/dps/healer/open)]"""
-        args = event.message.content.strip().split()
+        content = self._get_message_content(event)
+        args = content.split() if content else []
         province = "全国"
         role = "all"
         
@@ -420,7 +440,8 @@ class OverstatsPlugin(Star):
     @filter.command("hero-leaderboard", aliases=["英雄榜", "hl", "hero"])
     async def cmd_hero_leaderboard(self, event: AstrMessageEvent):
         """获取英雄排行榜: /hero-leaderboard [英雄名] [省份] [模式(preset/open)]"""
-        args = event.message.content.strip().split()
+        content = self._get_message_content(event)
+        args = content.split() if content else []
         if not args:
             yield event.plain_result("请提供英雄名，例如: /hero-leaderboard 安娜")
             return
@@ -442,7 +463,8 @@ class OverstatsPlugin(Star):
     @filter.command("hero-pick-rate", aliases=["英雄选取率", "pickrate", "pr"])
     async def cmd_hero_pick_rate(self, event: AstrMessageEvent):
         """获取英雄选取率: /hero-pick-rate [模式(quick/competitive)] [段位]"""
-        args = event.message.content.strip().split()
+        content = self._get_message_content(event)
+        args = content.split() if content else []
         game_mode = "competitive"
         mmr = "all"
         
@@ -462,7 +484,7 @@ class OverstatsPlugin(Star):
     @filter.command("hero-perk", aliases=["英雄威能", "perk"])
     async def cmd_hero_perk(self, event: AstrMessageEvent):
         """获取英雄威能数据: /hero-perk [英雄名]"""
-        hero = event.message.content.strip()
+        hero = self._get_message_content(event)
         if not hero:
             yield event.plain_result("请提供英雄名，例如: /hero-perk 安娜")
             return
@@ -475,7 +497,8 @@ class OverstatsPlugin(Star):
     @filter.command("today-summary", aliases=["今日总结", "today", "ts"])
     async def cmd_today_summary(self, event: AstrMessageEvent):
         """获取今日游戏总结: /today-summary [战网ID]"""
-        bnet_id = self._parse_bnet_id(event.message.content)
+        content = self._get_message_content(event)
+        bnet_id = self._parse_bnet_id(content)
         if not bnet_id:
             yield event.plain_result("请提供战网ID，例如: /today-summary 海盐冰淇淋#5911")
             return
@@ -487,7 +510,8 @@ class OverstatsPlugin(Star):
     @filter.command("yesterday-summary", aliases=["昨日总结", "yesterday", "ys"])
     async def cmd_yesterday_summary(self, event: AstrMessageEvent):
         """获取昨日游戏总结: /yesterday-summary [战网ID]"""
-        bnet_id = self._parse_bnet_id(event.message.content)
+        content = self._get_message_content(event)
+        bnet_id = self._parse_bnet_id(content)
         if not bnet_id:
             yield event.plain_result("请提供战网ID，例如: /yesterday-summary 海盐冰淇淋#5911")
             return
@@ -499,7 +523,8 @@ class OverstatsPlugin(Star):
     @filter.command("week-summary", aliases=["本周总结", "week", "ws"])
     async def cmd_week_summary(self, event: AstrMessageEvent):
         """获取本周游戏总结: /week-summary [战网ID] (可能需要较长时间)"""
-        bnet_id = self._parse_bnet_id(event.message.content)
+        content = self._get_message_content(event)
+        bnet_id = self._parse_bnet_id(content)
         if not bnet_id:
             yield event.plain_result("请提供战网ID，例如: /week-summary 海盐冰淇淋#5911")
             return
@@ -527,7 +552,7 @@ class OverstatsPlugin(Star):
     @filter.command("patch-notes", aliases=["更新日志", "patch", "pn"])
     async def cmd_patch_notes(self, event: AstrMessageEvent):
         """获取更新日志: /patch-notes [latest/small/big]"""
-        kind = event.message.content.strip() or "latest"
+        kind = self._get_message_content(event) or "latest"
         payload = {"patch_kind": kind}
         async for result in self._send_image_result(event, "/patch-notes/image", payload):
             yield result
@@ -540,7 +565,7 @@ class OverstatsPlugin(Star):
         perk_icon_hero(威能图标), map_image(地图图片), ult_voice(大招语音),
         hero_silhouette(英雄剪影), skill_icon_name(技能名称), hero_description(英雄描述)"""
         
-        question_type = event.message.content.strip() or "hero_icon"
+        question_type = self._get_message_content(event) or "hero_icon"
         payload = {"question_type": question_type}
         async for result in self._send_replies_result(event, "/ow-guess/replies", payload):
             yield result
@@ -549,7 +574,7 @@ class OverstatsPlugin(Star):
     @filter.command("ow", aliases=["守望", "o"])
     async def cmd_auto_route(self, event: AstrMessageEvent):
         """自然语言查询: /ow 帮我看一下海盐冰淇淋#5911这周总结"""
-        text = event.message.content.strip()
+        text = self._get_message_content(event)
         if not text:
             yield event.plain_result("请输入查询内容，例如: /ow 帮我看一下海盐冰淇淋#5911的竞技实力")
             return
