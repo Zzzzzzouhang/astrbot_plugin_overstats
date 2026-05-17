@@ -2,113 +2,267 @@ import aiohttp
 import logging
 from astrbot.api.all import *
 
-# 配置日志
 logger = logging.getLogger("astrbot")
 
-@register("overstats", "YourName", "Overstats 本地服务查询插件", "1.0.0")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.0")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
-        # 根据你的 API 文档配置本地服务地址
         self.base_url = "http://127.0.0.1:18080/api/v2"
+        # 简单的内存绑定数据库：QQ号 -> 战网ID
+        self.bind_db = {} 
+
+    def _get_bnet_id(self, event: AstrMessageEvent, input_id: str = None) -> str:
+        """辅助方法：获取战网ID，优先使用输入值，否则读取绑定值"""
+        if input_id and input_id.strip():
+            return input_id.strip()
+        
+        user_id = event.get_sender_id()
+        if user_id in self.bind_db:
+            return self.bind_db[user_id]
+        return None
 
     async def _fetch_image(self, endpoint: str, payload: dict = None, timeout: int = 30) -> bytes:
-        """
-        内部辅助方法：请求指定的图片 API 并返回二进制字节流。
-        """
+        """辅助方法：请求指定的图片 API 并返回二进制字节流"""
         url = f"{self.base_url}{endpoint}"
         payload = payload or {}
-        
         try:
-            # 针对如 /week 这种耗时较长的接口，支持自定义超时时间
             client_timeout = aiohttp.ClientTimeout(total=timeout)
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
                 async with session.post(url, json=payload) as resp:
                     if resp.status == 200:
                         return await resp.read()
                     else:
-                        error_data = await resp.json()
-                        logger.error(f"Overstats API Error: {resp.status} - {error_data}")
+                        try:
+                            error_data = await resp.json()
+                            logger.error(f"Overstats API 错误: {resp.status} - {error_data}")
+                        except:
+                            logger.error(f"Overstats API 返回了非 JSON 错误: {resp.status}")
                         return None
         except Exception as e:
-            logger.error(f"请求 Overstats API 时发生异常: {e}")
+            logger.error(f"网络请求异常: {e}")
             return None
 
-    @command("今日商店", alias=["owshop"])
+    # ==================== 1. 基础与管理指令 ====================
+
+    @command("owhelp")
+    async def ow_help(self, event: AstrMessageEvent):
+        '''显示所有守望先锋查询指令菜单'''
+        help_text = (
+            "📌 守望先锋 Overstats 查询菜单：\n"
+            "=======================\n"
+            "👉【数据/战绩查询】\n"
+            "   /大神绑定 [战网ID] - 绑定QQ与战网账号\n"
+            "   /大神数据 (战网ID) - 查询玩家详情卡片\n"
+            "   /大神对局 (战网ID) - 查询最近对局列表\n"
+            "   /今日总结 (战网ID) - 查询今日战绩总结\n"
+            "   /历史段位 (战网ID) - 查询历届赛季段位\n"
+            "   /同玩查询 [战网ID1] [战网ID2] - 查询两人开黑胜率\n"
+            "👉【指数/英雄分析】\n"
+            "   /快速强度指数 (战网ID) - 查看快速对局表现\n"
+            "   /竞技强度指数 (战网ID) - 查看竞技对局表现\n"
+            "   /威能 [英雄名] - 查询英雄当前版本前二核心威能\n"
+            "   /ow英雄 [英雄名] - 英雄详细梯队与pick率\n"
+            "   /获取段位分布 /banpick /mappick\n"
+            "👉【综合/赛事】\n"
+            "   /商店 - 查看今日守望先锋精选商店\n"
+            "   /ow赛事 - 查看当前正在进行的 OWCS 赛事\n"
+            "   /ow活动 /皮肤搜索\n"
+            "=======================\n"
+            "💡 提示：带()的参数代表如果您绑定了账号，则可以省略不填。"
+        )
+        yield event.plain_result(help_text)
+
+    @command("大神绑定")
+    async def dashen_bind(self, event: AstrMessageEvent, bnet_id: str):
+        '''绑定您的QQ与战网ID。格式：/大神绑定 名字#51234'''
+        user_id = event.get_sender_id()
+        if "#" not in bnet_id:
+            yield event.plain_result("❌ 绑定失败！请输入规范的战网ID，必须包含 # 号和数字（如：Player#12345）")
+            return
+        self.bind_db[user_id] = bnet_id.strip()
+        yield event.plain_result(f"✅ 绑定成功！您的QQ已与战网账号【{bnet_id}】关联，后续查询可直接省略输入ID。")
+
+    # ==================== 2. 战绩与核心数据 (Dashen系列) ====================
+
+    @command("大神数据")
+    async def dashen_profile(self, event: AstrMessageEvent, bnet_id: str = None):
+        '''查询玩家详情卡片'''
+        target_id = self._get_bnet_id(event, bnet_id)
+        if not target_id:
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 进行绑定。")
+            return
+        
+        yield event.plain_result(f"🔍 正在生成 {target_id} 的玩家详情...")
+        img_bytes = await self._fetch_image("/dashen-profile/image", {"bnet_id": target_id})
+        if img_bytes:
+            yield event.make_result().message(Image.from_bytes(img_bytes))
+        else:
+            yield event.plain_result("❌ 获取玩家详情卡片失败。")
+
+    @command("大神对局")
+    async def dashen_match(self, event: AstrMessageEvent, bnet_id: str = None):
+        '''查询最近对局列表'''
+        target_id = self._get_bnet_id(event, bnet_id)
+        if not target_id:
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 进行绑定。")
+            return
+        
+        yield event.plain_result(f"📊 正在拉取 {target_id} 的最近对局...")
+        img_bytes = await self._fetch_image("/dashen-match/image", {"bnet_id": target_id})
+        if img_bytes:
+            yield event.make_result().message(Image.from_bytes(img_bytes))
+        else:
+            yield event.plain_result("❌ 获取最近对局列表失败。")
+
+    @command("今日总结")
+    async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = None):
+        '''查询今日战绩总结'''
+        target_id = self._get_bnet_id(event, bnet_id)
+        if not target_id:
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 进行绑定。")
+            return
+        
+        yield event.plain_result(f"⏳ 正在计算 {target_id} 的今日战绩总结...")
+        img_bytes = await self._fetch_image("/dashen-summary/today/image", {"bnet_id": target_id})
+        if img_bytes:
+            yield event.make_result().message(Image.from_bytes(img_bytes))
+        else:
+            yield event.plain_result("❌ 获取今日总结失败。")
+
+    @command("历史段位")
+    async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = None):
+        '''查询历届赛季历史段位'''
+        target_id = self._get_bnet_id(event, bnet_id)
+        if not target_id:
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 进行绑定。")
+            return
+        
+        yield event.plain_result(f"📜 正在追溯 {target_id} 的历史段位记录...")
+        img_bytes = await self._fetch_image("/dashen-rank-history/image", {"bnet_id": target_id})
+        if img_bytes:
+            yield event.make_result().message(Image.from_bytes(img_bytes))
+        else:
+            yield event.plain_result("❌ 获取历史段位失败。")
+
+    @command("同玩查询")
+    async def dashen_sameplay(self, event: AstrMessageEvent, p1: str, p2: str):
+        '''查询两位玩家的开黑同玩记录。格式：/同玩查询 玩家A#123 玩家B#456'''
+        yield event.plain_result(f"👥 正在分析 {p1} 与 {p2} 的同玩胜率...")
+        payload = {"player1_bnet_id": p1, "player2_bnet_id": p2}
+        img_bytes = await self._fetch_image("/dashen-sameplay/image", payload)
+        if img_bytes:
+            yield event.make_result().message(Image.from_bytes(img_bytes))
+        else:
+            yield event.plain_result("❌ 无法获取同玩查询数据，请检查两个ID是否输入正确。")
+
+    # ==================== 3. 强度指数与技能威能 ====================
+
+    @command("快速强度指数")
+    async def quick_strength(self, event: AstrMessageEvent, bnet_id: str = None):
+        '''查询快速对局表现与强度指数'''
+        target_id = self._get_bnet_id(event, bnet_id)
+        if not target_id:
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 进行绑定。")
+            return
+        
+        yield event.plain_result(f"⚡ 正在评估 {target_id} 的快速强度指数...")
+        img_bytes = await self._fetch_image("/dashen-quick-strength/image", {"bnet_id": target_id})
+        if img_bytes:
+            yield event.make_result().message(Image.from_bytes(img_bytes))
+        else:
+            yield event.plain_result("❌ 获取快速强度指数失败。")
+
+    @command("竞技强度指数")
+    async def competitive_strength(self, event: AstrMessageEvent, bnet_id: str = None):
+        '''查询竞技/天梯对局表现与强度指数'''
+        target_id = self._get_bnet_id(event, bnet_id)
+        if not target_id:
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 进行绑定。")
+            return
+        
+        yield event.plain_result(f"🏆 正在评估 {target_id} 的竞技天梯强度指数...")
+        img_bytes = await self._fetch_image("/dashen-competitive-strength/image", {"bnet_id": target_id})
+        if img_bytes:
+            yield event.make_result().message(Image.from_bytes(img_bytes))
+        else:
+            yield event.plain_result("❌ 获取竞技强度指数失败。")
+
+    @command("威能")
+    async def ow_hero_perk(self, event: AstrMessageEvent, hero_name: str):
+        '''查询指定英雄当前版本的前二核心威能天赋'''
+        yield event.plain_result(f"🔮 正在提取 {hero_name} 的核心威能数据...")
+        img_bytes = await self._fetch_image("/ow-hero-perk/image", {"hero": hero_name})
+        if img_bytes:
+            yield event.make_result().message(Image.from_bytes(img_bytes))
+        else:
+            yield event.plain_result(f"❌ 未能找到英雄【{hero_name}】的威能图。")
+
+    @command("ow英雄")
+    async def ow_hero_pick(self, event: AstrMessageEvent, hero_name: str):
+        '''查询英雄当前的胜率、登场率走势'''
+        yield event.plain_result(f"🔥 正在读取 {hero_name} 的天梯 Pick 率走势图...")
+        # 默认查询竞技天梯全分段的 history 视图
+        payload = {"view": "history", "game_mode": "competitive", "mmr": "all", "hero": hero_name}
+        img_bytes = await self._fetch_image("/ow-hero-pick-rate/image", payload)
+        if img_bytes:
+            yield event.make_result().message(Image.from_bytes(img_bytes))
+        else:
+            yield event.plain_result(f"❌ 暂时无法获取英雄 {hero_name} 的数据走势。")
+
+    # ==================== 4. 商店、赛事与其余指令 ====================
+
+    @command("商店")
     async def ow_shop(self, event: AstrMessageEvent):
-        '''查询守望先锋今日商店'''
-        yield event.plain_result("正在获取今日商店，请稍候...")
-        
+        '''查询当前特惠和精选商店商品'''
+        yield event.plain_result("🛍️ 正在获取今日精选商店皮肤商品...")
         img_bytes = await self._fetch_image("/ow-shop/image")
-        
         if img_bytes:
-            # 使用 Image.from_bytes() 将二进制流转换为图片组件
             yield event.make_result().message(Image.from_bytes(img_bytes))
         else:
-            yield event.plain_result("❌ 获取今日商店失败，请检查本地服务是否运行。")
+            yield event.plain_result("❌ 获取精选商店图片失败。")
 
-    @command("补丁快讯", alias=["patch"])
-    async def patch_notes(self, event: AstrMessageEvent, patch_kind: str = "latest"):
-        '''查询游戏补丁快讯。可选参数: latest(默认), small, big'''
-        yield event.plain_result(f"正在获取 {patch_kind} 版本的补丁快讯...")
-        
-        payload = {"patch_kind": patch_kind}
-        img_bytes = await self._fetch_image("/patch-notes/image", payload=payload)
-        
+    @command("ow赛事")
+    async def ow_esports(self, event: AstrMessageEvent):
+        '''查询当前正在进行的 OWCS 等守望先锋职业赛事'''
+        yield event.plain_result("🎮 正在从 Pandascore 获取实时赛事对阵...")
+        img_bytes = await self._fetch_image("/ow-esports/image")
         if img_bytes:
             yield event.make_result().message(Image.from_bytes(img_bytes))
         else:
-            yield event.plain_result("❌ 获取补丁快讯失败，请检查后台服务。")
+            yield event.plain_result("❌ 赛事信息获取失败。请检查后台是否正确配置了 `OW_ESPORTS_API_KEY`。")
 
-    @command("玩家详情", alias=["profile"])
-    async def dashen_profile(self, event: AstrMessageEvent, bnet_id: str):
-        '''查询玩家详情。参数: 战网ID (例如 Gulee#5667)'''
-        yield event.plain_result(f"正在生成 {bnet_id} 的玩家详情卡片...")
-        
-        payload = {"bnet_id": bnet_id}
-        img_bytes = await self._fetch_image("/dashen-profile/image", payload=payload)
-        
-        if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
-        else:
-            yield event.plain_result(f"❌ 获取失败。可能是战网 ID 不正确，或者该账号未绑定/未公开。")
+    # ==================== 5. 暂未开放/文档外接口占位处理 ====================
 
-    @command("今日总结", alias=["today"])
-    async def dashen_today_summary(self, event: AstrMessageEvent, bnet_id: str):
-        '''查询玩家今日战绩总结。参数: 战网ID (例如 Gulee#5667)'''
-        yield event.plain_result(f"正在生成 {bnet_id} 的今日战绩总结...")
-        
-        payload = {"bnet_id": bnet_id}
-        img_bytes = await self._fetch_image("/dashen-summary/today/image", payload=payload)
-        
-        if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
-        else:
-            yield event.plain_result("❌ 获取总结失败，可能是今天没有打游戏或服务无响应。")
+    @command("获取段位分布")
+    async def get_rank_distribution(self, event: AstrMessageEvent):
+        '''获取天梯各段位玩家比例分布'''
+        # 提示：如果对应本地服务有未写入文档的接口（如 /dashen-rank-leaderboard/image），可以随时在此进行对接替换
+        yield event.plain_result("📊 正在统计天梯全服段位分布数据... [该模块正在开发对接中]")
 
-    @command("本周总结", alias=["week"])
-    async def dashen_week_summary(self, event: AstrMessageEvent, bnet_id: str):
-        '''查询玩家本周战绩总结。由于数据量大，耗时较长。参数: 战网ID'''
-        yield event.plain_result(f"正在生成 {bnet_id} 的本周战绩总结，这可能需要约 1 分钟时间，请耐心等待...")
-        
-        payload = {"bnet_id": bnet_id}
-        # 根据 API 文档，week 请求较慢，此处覆盖默认的 30s 超时，设置为 90s
-        img_bytes = await self._fetch_image("/dashen-summary/week/image", payload=payload, timeout=90)
-        
-        if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
-        else:
-            yield event.plain_result("❌ 生成本周总结失败（或请求超时）。")
+    @command("ow活动")
+    async def ow_activities(self, event: AstrMessageEvent):
+        '''查看守望先锋当前限时活动'''
+        yield event.plain_result("🎉 正在拉取当前版本节日/赛季活动公告... [本地接口升级中]")
 
-    @command("守望英雄", alias=["hero"])
-    async def hero_perk(self, event: AstrMessageEvent, hero_name: str):
-        '''查询英雄威能/天赋信息。参数: 英雄名称 (例如 安娜)'''
-        yield event.plain_result(f"正在查询 {hero_name} 的威能数据...")
-        
-        payload = {"hero": hero_name}
-        img_bytes = await self._fetch_image("/ow-hero-perk/image", payload=payload)
-        
+    @command("banpick")
+    async def ban_pick_stats(self, event: AstrMessageEvent):
+        '''查询天梯或比赛中英雄的禁用与选择率排行'''
+        yield event.plain_result("🚫 正在获取本周天梯英雄大盘选禁用排行...")
+        # 实际上可以通过排名视图接口展示
+        payload = {"view": "ranking", "game_mode": "competitive", "mmr": "all"}
+        img_bytes = await self._fetch_image("/ow-hero-pick-rate/image", payload)
         if img_bytes:
             yield event.make_result().message(Image.from_bytes(img_bytes))
         else:
-            yield event.plain_result(f"❌ 找不到英雄 {hero_name} 的数据，请检查名称是否正确。")
+            yield event.plain_result("❌ 无法获取全英雄排行。")
+
+    @command("mappick")
+    async def map_pick_stats(self, event: AstrMessageEvent):
+        '''查询地图热度与胜率排行'''
+        yield event.plain_result("🗺️ 正在拉取全模式地图胜率及出场分布... [当前接口暂不可用]")
+
+    @command("皮肤搜索")
+    async def skin_search(self, event: AstrMessageEvent, keyword: str):
+        '''搜索特定皮肤所属礼包或价格'''
+        yield event.plain_result(f"🔍 正在检索包含关键词【{keyword}】的英雄外观与内购历史... [开发中]")
