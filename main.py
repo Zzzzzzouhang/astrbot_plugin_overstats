@@ -1,10 +1,11 @@
+import io
 import aiohttp
 import logging
 from astrbot.api.all import *
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.0")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.1")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -42,6 +43,12 @@ class OverstatsPlugin(Star):
         except Exception as e:
             logger.error(f"网络请求异常: {e}")
             return None
+
+    def _send_image_result(self, event: AstrMessageEvent, img_bytes: bytes):
+        """核心修复：通过标准的 io.BytesIO 转换字节流发送图片"""
+        image_stream = io.BytesIO(img_bytes)
+        # 兼容最新版 AstrBot 的 Image 发送逻辑
+        return event.make_result().message(Image.from_base64_or_url_or_file_or_bytes(image_stream))
 
     # ==================== 1. 基础与管理指令 ====================
 
@@ -96,7 +103,7 @@ class OverstatsPlugin(Star):
         yield event.plain_result(f"🔍 正在生成 {target_id} 的玩家详情...")
         img_bytes = await self._fetch_image("/dashen-profile/image", {"bnet_id": target_id})
         if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
+            yield self._send_image_result(event, img_bytes)
         else:
             yield event.plain_result("❌ 获取玩家详情卡片失败。")
 
@@ -111,7 +118,7 @@ class OverstatsPlugin(Star):
         yield event.plain_result(f"📊 正在拉取 {target_id} 的最近对局...")
         img_bytes = await self._fetch_image("/dashen-match/image", {"bnet_id": target_id})
         if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
+            yield self._send_image_result(event, img_bytes)
         else:
             yield event.plain_result("❌ 获取最近对局列表失败。")
 
@@ -126,7 +133,7 @@ class OverstatsPlugin(Star):
         yield event.plain_result(f"⏳ 正在计算 {target_id} 的今日战绩总结...")
         img_bytes = await self._fetch_image("/dashen-summary/today/image", {"bnet_id": target_id})
         if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
+            yield self._send_image_result(event, img_bytes)
         else:
             yield event.plain_result("❌ 获取今日总结失败。")
 
@@ -141,7 +148,7 @@ class OverstatsPlugin(Star):
         yield event.plain_result(f"📜 正在追溯 {target_id} 的历史段位记录...")
         img_bytes = await self._fetch_image("/dashen-rank-history/image", {"bnet_id": target_id})
         if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
+            yield self._send_image_result(event, img_bytes)
         else:
             yield event.plain_result("❌ 获取历史段位失败。")
 
@@ -152,7 +159,7 @@ class OverstatsPlugin(Star):
         payload = {"player1_bnet_id": p1, "player2_bnet_id": p2}
         img_bytes = await self._fetch_image("/dashen-sameplay/image", payload)
         if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
+            yield self._send_image_result(event, img_bytes)
         else:
             yield event.plain_result("❌ 无法获取同玩查询数据，请检查两个ID是否输入正确。")
 
@@ -169,7 +176,7 @@ class OverstatsPlugin(Star):
         yield event.plain_result(f"⚡ 正在评估 {target_id} 的快速强度指数...")
         img_bytes = await self._fetch_image("/dashen-quick-strength/image", {"bnet_id": target_id})
         if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
+            yield self._send_image_result(event, img_bytes)
         else:
             yield event.plain_result("❌ 获取快速强度指数失败。")
 
@@ -178,13 +185,13 @@ class OverstatsPlugin(Star):
         '''查询竞技/天梯对局表现与强度指数'''
         target_id = self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 进行绑定。")
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 进行绑定. ")
             return
         
         yield event.plain_result(f"🏆 正在评估 {target_id} 的竞技天梯强度指数...")
         img_bytes = await self._fetch_image("/dashen-competitive-strength/image", {"bnet_id": target_id})
         if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
+            yield self._send_image_result(event, img_bytes)
         else:
             yield event.plain_result("❌ 获取竞技强度指数失败。")
 
@@ -194,7 +201,7 @@ class OverstatsPlugin(Star):
         yield event.plain_result(f"🔮 正在提取 {hero_name} 的核心威能数据...")
         img_bytes = await self._fetch_image("/ow-hero-perk/image", {"hero": hero_name})
         if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
+            yield self._send_image_result(event, img_bytes)
         else:
             yield event.plain_result(f"❌ 未能找到英雄【{hero_name}】的威能图。")
 
@@ -202,11 +209,10 @@ class OverstatsPlugin(Star):
     async def ow_hero_pick(self, event: AstrMessageEvent, hero_name: str):
         '''查询英雄当前的胜率、登场率走势'''
         yield event.plain_result(f"🔥 正在读取 {hero_name} 的天梯 Pick 率走势图...")
-        # 默认查询竞技天梯全分段的 history 视图
         payload = {"view": "history", "game_mode": "competitive", "mmr": "all", "hero": hero_name}
         img_bytes = await self._fetch_image("/ow-hero-pick-rate/image", payload)
         if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
+            yield self._send_image_result(event, img_bytes)
         else:
             yield event.plain_result(f"❌ 暂时无法获取英雄 {hero_name} 的数据走势。")
 
@@ -218,7 +224,7 @@ class OverstatsPlugin(Star):
         yield event.plain_result("🛍️ 正在获取今日精选商店皮肤商品...")
         img_bytes = await self._fetch_image("/ow-shop/image")
         if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
+            yield self._send_image_result(event, img_bytes)
         else:
             yield event.plain_result("❌ 获取精选商店图片失败。")
 
@@ -228,7 +234,7 @@ class OverstatsPlugin(Star):
         yield event.plain_result("🎮 正在从 Pandascore 获取实时赛事对阵...")
         img_bytes = await self._fetch_image("/ow-esports/image")
         if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
+            yield self._send_image_result(event, img_bytes)
         else:
             yield event.plain_result("❌ 赛事信息获取失败。请检查后台是否正确配置了 `OW_ESPORTS_API_KEY`。")
 
@@ -237,7 +243,6 @@ class OverstatsPlugin(Star):
     @command("获取段位分布")
     async def get_rank_distribution(self, event: AstrMessageEvent):
         '''获取天梯各段位玩家比例分布'''
-        # 提示：如果对应本地服务有未写入文档的接口（如 /dashen-rank-leaderboard/image），可以随时在此进行对接替换
         yield event.plain_result("📊 正在统计天梯全服段位分布数据... [该模块正在开发对接中]")
 
     @command("ow活动")
@@ -249,11 +254,10 @@ class OverstatsPlugin(Star):
     async def ban_pick_stats(self, event: AstrMessageEvent):
         '''查询天梯或比赛中英雄的禁用与选择率排行'''
         yield event.plain_result("🚫 正在获取本周天梯英雄大盘选禁用排行...")
-        # 实际上可以通过排名视图接口展示
         payload = {"view": "ranking", "game_mode": "competitive", "mmr": "all"}
         img_bytes = await self._fetch_image("/ow-hero-pick-rate/image", payload)
         if img_bytes:
-            yield event.make_result().message(Image.from_bytes(img_bytes))
+            yield self._send_image_result(event, img_bytes)
         else:
             yield event.plain_result("❌ 无法获取全英雄排行。")
 
