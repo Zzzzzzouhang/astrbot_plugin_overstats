@@ -3,10 +3,11 @@ import aiohttp
 import logging
 import tempfile
 from astrbot.api.all import *
+import astrbot.api.message_components as Comp
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.2")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.3")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -47,8 +48,8 @@ class OverstatsPlugin(Star):
 
     def _send_image_result(self, event: AstrMessageEvent, img_bytes: bytes):
         """
-        核心修复：将 bytes 写入系统临时文件，使用标准的 Image(path=...) 实例化。
-        这是 AstrBot 最底层、最标准的图片组件构造方式。
+        根据官方最新文档修复：
+        将 bytes 写入系统临时文件，使用标准的 Comp.Image.fromFileSystem 发送消息链。
         """
         temp_file_path = ""
         try:
@@ -57,20 +58,21 @@ class OverstatsPlugin(Star):
                 f.write(img_bytes)
                 temp_file_path = f.name
             
-            # 核心改动：直接使用 Image(path=临时文件路径) 创建图片组件
-            # 这样 AstrBot 就会将其识别为真正的图片组件并以图片模式发送
-            image_component = Image(path=temp_file_path)
+            # 核心修正：依照官方文档示例，使用 Comp.Image.fromFileSystem 传入本地路径
+            chain = [
+                Comp.Image.fromFileSystem(temp_file_path)
+            ]
             
-            # 使用链式调用将组件放入消息中
-            return event.make_result().message(image_component)
+            # 使用官方标准的 chain_result 返回消息链
+            return event.chain_result(chain)
             
         except Exception as e:
-            logger.error(f"构建图片组件时发生严重错误: {e}")
+            logger.error(f"构建图片消息链时发生严重错误: {e}")
             return event.plain_result(f"❌ 机器人构建图片组件失败: {e}")
             
-        # 注意：这里去掉了之前的 os.remove(temp_file_path)，
-        # 因为如果立即删除，AstrBot 的底层发送队列可能还没来得及读取该文件，会导致发不出图。
-        # 别担心，操作系统会自动定期清理 tempfile 产生的临时文件。
+        # 注意：这里我们同样不手动删除 temp_file_path，
+        # 操作系统会自动在后台异步清理 tempfile。若立即删除会导致底层还没读取就文件失效。
+
     # ==================== 1. 基础与管理指令 ====================
 
     @command("owhelp")
@@ -235,7 +237,7 @@ class OverstatsPlugin(Star):
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result(f"❌ 暂时无法获取英雄 {hero_name} 的数据走势。")
+            yield event.plain_result("❌ 暂时无法获取英雄 {hero_name} 的数据走势。")
 
     # ==================== 4. 商店、赛事与其余指令 ====================
 
@@ -264,7 +266,7 @@ class OverstatsPlugin(Star):
     @command("获取段位分布")
     async def get_rank_distribution(self, event: AstrMessageEvent):
         '''获取天梯各段位玩家比例分布'''
-        yield event.plain_result("📊 正在统计天梯全服段位分布数据... [该模块正在开发对接中]")
+        yield event.plain_result("📊 正在统计天梯全服段位分布 data... [该模块正在开发对接中]")
 
     @command("ow活动")
     async def ow_activities(self, event: AstrMessageEvent):
