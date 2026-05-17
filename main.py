@@ -135,7 +135,7 @@ class OverstatsPlugin(Star):
         # 核心改动：改用官方原生异步 put_kv_data 方法将战网 ID 永久存入官方数据库中
         await self.put_kv_data(f"bind_{user_id}", bnet_id.strip())
         
-        yield event.plain_result(f"✅ 绑定成功！您的QQ已通过原生 KV 持久化关联战网账号【{bnet_id}】，后续查询可直接省略输入ID。")
+        yield event.plain_result(f"✅ 绑定成功！关联战网账号【{bnet_id}】，后续查询可直接省略输入ID。")
 
     # ==================== 2. 战绩与核心数据 ====================
 
