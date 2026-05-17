@@ -1,0 +1,20 @@
+{
+    "type": "object",
+    "properties": {
+        "api_base_url": {
+            "type": "string",
+            "description": "API基础地址",
+            "hint": "守望先锋数据API的基础URL",
+            "default": "http://127.0.0.1:18080/api/v2"
+        },
+        "request_timeout": {
+            "type": "integer",
+            "description": "请求超时时间(秒)",
+            "hint": "API请求的超时时间",
+            "default": 30,
+            "minimum": 5,
+            "maximum": 120
+        }
+    },
+    "required": []
+}
