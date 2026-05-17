@@ -1,17 +1,12 @@
-from astrbot.api import Star, AstrBotConfig
-from astrbot.api.event import AstrMessageEvent
-from astrbot.api.filter import filter
-import astrbot.api.message_components as Comp
+from astrbot.api.star import Context, Star
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api import logger
 import httpx
-import logging
 from typing import Optional
 
-logger = logging.getLogger("astrbot_plugin_ow_dashen")
-
 class OWDshenPlugin(Star):
-    def __init__(self, context, config: AstrBotConfig):
+    def __init__(self, context: Context):
         super().__init__(context)
-        self.config = config
         self.base_url = "http://127.0.0.1:18080/api/v2"
         self.timeout = 30  # 请求超时时间(秒)
         
@@ -20,8 +15,8 @@ class OWDshenPlugin(Star):
         
         logger.info("守望先锋大神数据插件已加载")
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """插件退出时清理资源"""
+    async def terminate(self):
+        """插件退出时清理资源（AstrBot v4.5+ 标准方法）"""
         await self.client.aclose()
         logger.info("守望先锋大神数据插件已卸载")
 
