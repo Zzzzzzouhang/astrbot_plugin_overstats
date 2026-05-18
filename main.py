@@ -2,7 +2,7 @@ import os
 import aiohttp
 import logging
 import tempfile
-import threading
+import asyncio
 import re
 from pathlib import Path
 from astrbot.api.all import *
@@ -62,34 +62,63 @@ class OverstatsPlugin(Star):
             except Exception as e:
                 logger.warning(f"自动清理临时战绩图片失败: {e}")
 
+    # 新增：异步延迟删除文件（替代threading.Timer）
+    async def _delayed_remove(self, path: str, delay: int):
+        await asyncio.sleep(delay)
+        self._safe_remove(path)
+
     def _send_image_result(self, event: AstrMessageEvent, img_bytes: bytes):
         try:
             with tempfile.NamedTemporaryFile(dir=str(self.plugin_data_dir), delete=False, suffix=".png") as f:
                 f.write(img_bytes)
                 temp_file_path = f.name
             chain = [Comp.Image.fromFileSystem(temp_file_path)]
-            threading.Timer(1800.0, self._safe_remove, args=[temp_file_path]).start()
+            # 使用AstrBot原生异步任务调度，避免线程安全问题
+            self.context.run_task(self._delayed_remove(temp_file_path, 1800))
             return event.chain_result(chain)
         except Exception as e:
             logger.error(f"构建图片消息链时发生严重错误: {e}")
             return event.plain_result(f"❌ 机器人构建图片组件失败: {e}")
 
-    # 简化后的全局拦截器：仅支持纯文本@电子路灯
+    # 完全修复后的全局拦截器：支持QQ原生@机器人 + 纯文本@电子路灯
     @event_message_type(EventMessageType.ALL)
     async def intercept_text_at(self, event: AstrMessageEvent):
         msg = event.message_str
         if not msg:
             return
         
-        # 仅检查是否包含纯文本 "@电子路灯"
-        if "@电子路灯" not in msg:
+        # 调试日志（部署后可注释掉）
+        logger.debug(f"收到消息: {msg}")
+        logger.debug(f"消息组件: {event.message}")
+        
+        is_at_me = False
+        clean_msg = msg
+        
+        # 方式1：优先检测QQ原生At组件（最可靠）
+        try:
+            bot_id = event.bot_id
+            bot_name = event.bot_name
+            for comp in event.message:
+                if isinstance(comp, Comp.At) and comp.qq == bot_id:
+                    is_at_me = True
+                    # 移除At对应的文本（兼容不同适配器的格式）
+                    clean_msg = clean_msg.replace(f"@{bot_name}", "").strip()
+                    clean_msg = clean_msg.replace(f"@{bot_id}", "").strip()
+                    break
+        except Exception as e:
+            logger.debug(f"检查At组件失败: {e}")
+        
+        # 方式2：兼容纯文本@电子路灯的情况（保留原有逻辑）
+        if not is_at_me and "@电子路灯" in msg:
+            is_at_me = True
+            clean_msg = msg.replace("@电子路灯", "").strip()
+        
+        if not is_at_me:
             return
         
-        # 剥离掉称呼本身
-        clean_msg = msg.replace("@电子路灯", "").strip()
-        
         # 逻辑1：如果剩下的纯粹是一个符合规范的战网ID，则触发自动绑定
-        if re.match(r'^[\w\u4e00-\u9fa5\-\s]+#\d+$', clean_msg):
+        # 修复正则：允许前后任意空白，支持更多特殊字符
+        if re.match(r'^\s*[\w\u4e00-\u9fa5\-\_\.\s]+#\d+\s*$', clean_msg):
             user_id = event.get_sender_id()
             old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
             new_bind_id = clean_msg.strip()
@@ -101,7 +130,6 @@ class OverstatsPlugin(Star):
             else:
                 yield event.plain_result(f"✅ 自动更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
             
-            # 阻止消息继续传播
             event.stop_propagation()
             return
         
@@ -111,8 +139,8 @@ class OverstatsPlugin(Star):
             return
         
         cmd = parts[0]
-        # 获取指令后面的参数（如果有的话）
         cmd_args = parts[1].split() if len(parts) > 1 else []
+        
         # 路由映射表：纯文本指令 -> (对应的方法, 所需固定参数个数)
         cmd_map = {
             "今日总结": (self.dashen_today, 1),
@@ -144,7 +172,6 @@ class OverstatsPlugin(Star):
                 if arg_count == 0:
                     async for r in func(event): yield r
                 elif arg_count == 1:
-                    # 参数可选的指令传第一个参数或 None，如果是必须带参数的指令（如威能）交由原函数自己内部处理
                     passed_arg = cmd_args[0] if cmd_args else None
                     async for r in func(event, passed_arg): yield r
                 elif arg_count == 2:
@@ -154,8 +181,8 @@ class OverstatsPlugin(Star):
                         yield event.plain_result(f"❌ 【{cmd}】指令需要提供两个参数（例如：同玩查询 ID1 ID2）。")
             except Exception as e:
                 logger.error(f"纯文本快捷指令分发执行失败 ({cmd}): {e}")
+                yield event.plain_result(f"❌ 执行指令失败: {str(e)}")
             
-            # 阻止消息继续传播
             event.stop_propagation()
 
     @command("owhelp")
@@ -165,7 +192,7 @@ class OverstatsPlugin(Star):
             "=======================\n"
             "👉【数据/战绩总结】\n"
             "   /大神绑定 [战网ID] - 绑定QQ与战网账号\n"
-            "   @电子路灯 [战网ID] - 快速自动绑定/更新战网账号\n"
+            "   @机器人 [战网ID] - 快速自动绑定/更新战网账号\n"
             "   /大神数据 (战网ID) - 查询玩家详情卡片\n"
             "   /大神对局 (战网ID) - 查询最近对局列表\n"
             "   /今日总结 (战网ID) - 查询今日战绩总结（无记录自动查昨日）\n"
@@ -207,22 +234,19 @@ class OverstatsPlugin(Star):
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 或 @电子路灯 [战网ID]")
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 或 @机器人 [战网ID]")
             return
         
         yield event.plain_result(f"⏳ 正在计算 {target_id} 的今日战绩总结...")
         img_bytes, error_data = await self._fetch_image("/dashen-summary/today/image", {"bnet_id": target_id})
         
         if img_bytes:
-            # 正常返回今日总结图片
             yield self._send_image_result(event, img_bytes)
         elif error_data and error_data.get("error") == "summary_empty" and error_data.get("details", {}).get("scope") == "today":
-            # 今日无对局，自动转昨日总结
             yield event.plain_result(f"ℹ️ 你在过去的 24 小时内没有对局记录，尝试生成昨日总结...")
             async for result in self.dashen_yesterday(event, target_id):
                 yield result
         else:
-            # 其他错误情况
             err_msg = error_data.get("message") if error_data else "未知错误"
             yield event.plain_result(f"❌ 获取今日总结失败：{err_msg}")
 
