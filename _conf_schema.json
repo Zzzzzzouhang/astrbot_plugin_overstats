@@ -1,0 +1,9 @@
+{
+  "overstats_api_url": {
+    "description": "Overstats API 地址",
+    "type": "string",
+    "hint": "例如：http://127.0.0.1:18080/api/v2",
+    "obvious_hint": true,
+    "default": "http://127.0.0.1:18080/api/v2"
+  }
+}
