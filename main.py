@@ -11,7 +11,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.8")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.9")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -74,91 +74,99 @@ class OverstatsPlugin(Star):
             logger.error(f"构建图片消息链时发生严重错误: {e}")
             return event.plain_result(f"❌ 机器人构建图片组件失败: {e}")
 
-    # 修复后的全局拦截器：解决自动绑定问题
+    # 增强后的全局拦截器：同时支持@机器人和@电子路灯两种方式
     @event_message_type(EventMessageType.ALL)
     async def intercept_text_at(self, event: AstrMessageEvent):
         msg = event.message_str
         if not msg:
             return
         
-        # 移除可能存在的真实 At 元素，避免框架本身的冲突
-        clean_msg = re.sub(r'\[At:\d+\]', '', msg).strip()
+        # 提取所有At元素的QQ号
+        at_pattern = re.compile(r'\[At:(\d+)\]')
+        at_users = at_pattern.findall(msg)
+        # 获取机器人自己的QQ号
+        bot_qq = str(self.context.get_bot_info().get("user_id", ""))
         
-        # 检查是否包含纯文本 "@电子路灯"
-        if "@电子路灯" in clean_msg:
-            # 剥离掉称呼本身
-            clean_msg = clean_msg.replace("@电子路灯", "").strip()
+        # 判断是否是@机器人 或者 包含纯文本@电子路灯
+        is_at_bot = bot_qq in at_users
+        is_at_electronic_lamp = "@电子路灯" in msg
+        
+        if not is_at_bot and not is_at_electronic_lamp:
+            return
+        
+        # 移除所有At元素和@电子路灯文本
+        clean_msg = at_pattern.sub('', msg).strip()
+        clean_msg = clean_msg.replace("@电子路灯", "").strip()
+        
+        # 逻辑1：如果剩下的纯粹是一个符合规范的战网ID，则触发自动绑定
+        if re.match(r'^[\w\u4e00-\u9fa5\-\s]+#\d+$', clean_msg):
+            user_id = event.get_sender_id()
+            old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
+            new_bind_id = clean_msg.strip()
             
-            # 逻辑 1：如果剥离后，剩下的纯粹是一个符合规范的战网ID，则触发自动绑定
-            # 改进的正则表达式：支持中文、英文、数字、下划线、连字符和空格
-            if re.match(r'^[\w\u4e00-\u9fa5\-\s]+#\d+$', clean_msg):
-                user_id = event.get_sender_id()
-                old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
-                new_bind_id = clean_msg.strip()
-                
-                await self.put_kv_data(f"bind_{user_id}", new_bind_id)
-                
-                if not old_bind_id:
-                    yield event.plain_result(f"✅ 自动绑定成功！已为您关联战网账号【{new_bind_id}】")
-                else:
-                    yield event.plain_result(f"✅ 自动更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
-                
-                # 阻止消息继续传播
-                event.stop_propagation()
-                return
+            await self.put_kv_data(f"bind_{user_id}", new_bind_id)
             
-            # 逻辑 2：如果是带了指令（如：今日总结 或 今日总结 某个ID）
-            parts = clean_msg.split(maxsplit=1)
-            if not parts:
-                return
+            if not old_bind_id:
+                yield event.plain_result(f"✅ 自动绑定成功！已为您关联战网账号【{new_bind_id}】")
+            else:
+                yield event.plain_result(f"✅ 自动更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
             
-            cmd = parts[0]
-            # 获取指令后面的参数（如果有的话）
-            cmd_args = parts[1].split() if len(parts) > 1 else []
-            # 路由映射表：纯文本指令 -> (对应的方法, 所需固定参数个数)
-            cmd_map = {
-                "今日总结": (self.dashen_today, 1),
-                "昨日总结": (self.dashen_yesterday, 1),
-                "周度总结": (self.dashen_week, 1),
-                "本周总结": (self.dashen_week, 1),
-                "大神数据": (self.dashen_profile, 1),
-                "大神对局": (self.dashen_match, 1),
-                "历史段位": (self.dashen_rank_history, 1),
-                "快速强度指数": (self.quick_strength, 1),
-                "竞技强度指数": (self.competitive_strength, 1),
-                "威能": (self.ow_hero_perk, 1),
-                "ow英雄": (self.ow_hero_pick, 1),
-                "皮肤搜索": (self.skin_search, 1),
-                "大神绑定": (self.dashen_bind, 1),
-                "同玩查询": (self.dashen_sameplay, 2),
-                "商店": (self.ow_shop, 0),
-                "ow赛事": (self.ow_esports, 0),
-                "ow活动": (self.ow_activities, 0),
-                "banpick": (self.ban_pick_stats, 0),
-                "mappick": (self.map_pick_stats, 0),
-                "owhelp": (self.ow_help, 0),
-                "获取段位分布": (self.get_rank_distribution, 0)
-            }
+            # 阻止消息继续传播
+            event.stop_propagation()
+            return
+        
+        # 逻辑2：如果是带了指令（如：今日总结 或 今日总结 某个ID）
+        parts = clean_msg.split(maxsplit=1)
+        if not parts:
+            return
+        
+        cmd = parts[0]
+        # 获取指令后面的参数（如果有的话）
+        cmd_args = parts[1].split() if len(parts) > 1 else []
+        # 路由映射表：纯文本指令 -> (对应的方法, 所需固定参数个数)
+        cmd_map = {
+            "今日总结": (self.dashen_today, 1),
+            "昨日总结": (self.dashen_yesterday, 1),
+            "周度总结": (self.dashen_week, 1),
+            "本周总结": (self.dashen_week, 1),
+            "大神数据": (self.dashen_profile, 1),
+            "大神对局": (self.dashen_match, 1),
+            "历史段位": (self.dashen_rank_history, 1),
+            "快速强度指数": (self.quick_strength, 1),
+            "竞技强度指数": (self.competitive_strength, 1),
+            "威能": (self.ow_hero_perk, 1),
+            "ow英雄": (self.ow_hero_pick, 1),
+            "皮肤搜索": (self.skin_search, 1),
+            "大神绑定": (self.dashen_bind, 1),
+            "同玩查询": (self.dashen_sameplay, 2),
+            "商店": (self.ow_shop, 0),
+            "ow赛事": (self.ow_esports, 0),
+            "ow活动": (self.ow_activities, 0),
+            "banpick": (self.ban_pick_stats, 0),
+            "mappick": (self.map_pick_stats, 0),
+            "owhelp": (self.ow_help, 0),
+            "获取段位分布": (self.get_rank_distribution, 0)
+        }
+        
+        if cmd in cmd_map:
+            func, arg_count = cmd_map[cmd]
+            try:
+                if arg_count == 0:
+                    async for r in func(event): yield r
+                elif arg_count == 1:
+                    # 参数可选的指令传第一个参数或 None，如果是必须带参数的指令（如威能）交由原函数自己内部处理
+                    passed_arg = cmd_args[0] if cmd_args else None
+                    async for r in func(event, passed_arg): yield r
+                elif arg_count == 2:
+                    if len(cmd_args) >= 2:
+                        async for r in func(event, cmd_args[0], cmd_args[1]): yield r
+                    else:
+                        yield event.plain_result(f"❌ 【{cmd}】指令需要提供两个参数（例如：同玩查询 ID1 ID2）。")
+            except Exception as e:
+                logger.error(f"纯文本快捷指令分发执行失败 ({cmd}): {e}")
             
-            if cmd in cmd_map:
-                func, arg_count = cmd_map[cmd]
-                try:
-                    if arg_count == 0:
-                        async for r in func(event): yield r
-                    elif arg_count == 1:
-                        # 参数可选的指令传第一个参数或 None，如果是必须带参数的指令（如威能）交由原函数自己内部处理
-                        passed_arg = cmd_args[0] if cmd_args else None
-                        async for r in func(event, passed_arg): yield r
-                    elif arg_count == 2:
-                        if len(cmd_args) >= 2:
-                            async for r in func(event, cmd_args[0], cmd_args[1]): yield r
-                        else:
-                            yield event.plain_result(f"❌ 【{cmd}】指令需要提供两个参数（例如：同玩查询 ID1 ID2）。")
-                except Exception as e:
-                    logger.error(f"纯文本快捷指令分发执行失败 ({cmd}): {e}")
-                
-                # 阻止消息继续传播
-                event.stop_propagation()
+            # 阻止消息继续传播
+            event.stop_propagation()
 
     @command("owhelp")
     async def ow_help(self, event: AstrMessageEvent):
@@ -167,6 +175,7 @@ class OverstatsPlugin(Star):
             "=======================\n"
             "👉【数据/战绩总结】\n"
             "   /大神绑定 [战网ID] - 绑定QQ与战网账号\n"
+            "   @机器人 [战网ID] - 快速自动绑定/更新战网账号\n"
             "   @电子路灯 [战网ID] - 快速自动绑定/更新战网账号\n"
             "   /大神数据 (战网ID) - 查询玩家详情卡片\n"
             "   /大神对局 (战网ID) - 查询最近对局列表\n"
@@ -209,7 +218,7 @@ class OverstatsPlugin(Star):
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 或 @电子路灯 [战网ID]")
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 或 @机器人 [战网ID]")
             return
         
         yield event.plain_result(f"⏳ 正在计算 {target_id} 的今日战绩总结...")
