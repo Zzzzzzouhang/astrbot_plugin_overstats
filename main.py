@@ -11,13 +11,12 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.6")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.7")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
         self.base_url = self.config.get("overstats_api_url", "http://127.0.0.1:18080/api/v2")
-
         try:
             plugin_name = getattr(self, "name", "overstats_full")
             self.plugin_data_dir = Path(get_astrbot_data_path()) / "plugin_data" / plugin_name
@@ -33,7 +32,8 @@ class OverstatsPlugin(Star):
         bind_id = await self.get_kv_data(f"bind_{user_id}", None)
         return bind_id
 
-    async def _fetch_image(self, endpoint: str, payload: dict = None, timeout: int = 600) -> bytes:
+    # 改造后的_fetch_image：返回(图片字节, 错误详情)元组
+    async def _fetch_image(self, endpoint: str, payload: dict = None, timeout: int = 600) -> tuple[bytes | None, dict | None]:
         url = f"{self.base_url}{endpoint}"
         payload = payload or {}
         try:
@@ -41,17 +41,18 @@ class OverstatsPlugin(Star):
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
                 async with session.post(url, json=payload) as resp:
                     if resp.status == 200:
-                        return await resp.read()
+                        return await resp.read(), None
                     else:
                         try:
                             error_data = await resp.json()
                             logger.error(f"Overstats API 错误: {resp.status} - {error_data}")
+                            return None, error_data
                         except:
                             logger.error(f"Overstats API 返回了非 JSON 错误: {resp.status}")
-                        return None
+                            return None, {"error": "non_json_error", "message": "API返回非JSON格式错误"}
         except Exception as e:
             logger.error(f"网络请求异常: {e}")
-            return None
+            return None, {"error": "network_error", "message": str(e)}
 
     def _safe_remove(self, path: str):
         if path and os.path.exists(path):
@@ -66,7 +67,6 @@ class OverstatsPlugin(Star):
             with tempfile.NamedTemporaryFile(dir=str(self.plugin_data_dir), delete=False, suffix=".png") as f:
                 f.write(img_bytes)
                 temp_file_path = f.name
-
             chain = [Comp.Image.fromFileSystem(temp_file_path)]
             threading.Timer(1800.0, self._safe_remove, args=[temp_file_path]).start()
             return event.chain_result(chain)
@@ -80,15 +80,12 @@ class OverstatsPlugin(Star):
         msg = event.message_str
         if not msg:
             return
-
         # 移除可能存在的真实 At 元素，避免框架本身的冲突
         clean_msg = re.sub(r'\[At:\d+\]', '', msg).strip()
-
         # 检查是否包含纯文本 "@电子路灯"
         if "@电子路灯" in clean_msg:
             # 剥离掉掉称呼本身
             clean_msg = clean_msg.replace("@电子路灯", "").strip()
-
             # 逻辑 1：如果剥离后，剩下的纯粹是一个符合规范的战网ID（如：玩家#12345），则触发自动绑定
             if re.match(r'^[\w\u4e00-\u9fa5]+#\d+$', clean_msg):
                 user_id = event.get_sender_id()
@@ -97,7 +94,6 @@ class OverstatsPlugin(Star):
                     await self.put_kv_data(f"bind_{user_id}", clean_msg)
                     yield event.plain_result(f"✅ 自动绑定成功！已为您关联战网账号【{clean_msg}】")
                 return
-
             # 逻辑 2：如果是带了指令（如：今日总结 或 今日总结 某个ID）
             parts = clean_msg.split(maxsplit=1)
             if not parts:
@@ -106,7 +102,6 @@ class OverstatsPlugin(Star):
             cmd = parts[0]
             # 获取指令后面的参数（如果有的话）
             cmd_args = parts[1].split() if len(parts) > 1 else []
-
             # 路由映射表：纯文本指令 -> (对应的方法, 所需固定参数个数)
             cmd_map = {
                 "今日总结": (self.dashen_today, 1),
@@ -131,7 +126,6 @@ class OverstatsPlugin(Star):
                 "owhelp": (self.ow_help, 0),
                 "获取段位分布": (self.get_rank_distribution, 0)
             }
-
             if cmd in cmd_map:
                 func, arg_count = cmd_map[cmd]
                 try:
@@ -158,7 +152,7 @@ class OverstatsPlugin(Star):
             "   /大神绑定 [战网ID] - 绑定QQ与战网账号\n"
             "   /大神数据 (战网ID) - 查询玩家详情卡片\n"
             "   /大神对局 (战网ID) - 查询最近对局列表\n"
-            "   /今日总结 (战网ID) - 查询今日战绩总结\n"
+            "   /今日总结 (战网ID) - 查询今日战绩总结（无记录自动查昨日）\n"
             "   /昨日总结 (战网ID) - 查询昨日战绩数据\n"
             "   /周度总结 (战网ID) - 查询本周数据总结\n"
             "   /历史段位 (战网ID) - 查询历届赛季段位\n"
@@ -184,18 +178,29 @@ class OverstatsPlugin(Star):
         await self.put_kv_data(f"bind_{user_id}", bnet_id.strip())
         yield event.plain_result(f"✅ 绑定成功！关联战网账号【{bnet_id}】")
 
+    # 改造后的今日总结：自动处理空记录并转昨日总结
     @command("今日总结")
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
+        
         yield event.plain_result(f"⏳ 正在计算 {target_id} 的今日战绩总结...")
-        img_bytes = await self._fetch_image("/dashen-summary/today/image", {"bnet_id": target_id})
+        img_bytes, error_data = await self._fetch_image("/dashen-summary/today/image", {"bnet_id": target_id})
+        
         if img_bytes:
+            # 正常返回今日总结图片
             yield self._send_image_result(event, img_bytes)
+        elif error_data and error_data.get("error") == "summary_empty" and error_data.get("details", {}).get("scope") == "today":
+            # 今日无对局，自动转昨日总结
+            yield event.plain_result(f"ℹ️ 你在过去的 24 小时内没有对局记录，尝试生成昨日总结...")
+            async for result in self.dashen_yesterday(event, target_id):
+                yield result
         else:
-            yield event.plain_result("❌ 获取今日总结失败。")
+            # 其他错误情况
+            err_msg = error_data.get("message") if error_data else "未知错误"
+            yield event.plain_result(f"❌ 获取今日总结失败：{err_msg}")
 
     @command("昨日总结")
     async def dashen_yesterday(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -204,11 +209,12 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"⏳ 正在统计 {target_id} 的昨日战绩数据...")
-        img_bytes = await self._fetch_image("/dashen-summary/yesterday/image", {"bnet_id": target_id})
+        img_bytes, error_data = await self._fetch_image("/dashen-summary/yesterday/image", {"bnet_id": target_id})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result("❌ 获取昨日总结失败，可能昨日未登录游戏。")
+            err_msg = error_data.get("message") if error_data else "获取昨日总结失败，可能昨日未登录游戏。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("周度总结", alias=["本周总结"])
     async def dashen_week(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -217,11 +223,12 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"📊 正在生成 {target_id} 的本周战绩大数据总结，耗时较长（约30-60秒），请稍候...")
-        img_bytes = await self._fetch_image("/dashen-summary/week/image", {"bnet_id": target_id}, timeout=900)
+        img_bytes, error_data = await self._fetch_image("/dashen-summary/week/image", {"bnet_id": target_id}, timeout=900)
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result("❌ 获取周度总结失败，请检查服务日志或是否请求超时。")
+            err_msg = error_data.get("message") if error_data else "获取周度总结失败，请检查服务日志或是否请求超时。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("大神数据")
     async def dashen_profile(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -230,11 +237,12 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"🔍 正在生成 {target_id} 的玩家详情...")
-        img_bytes = await self._fetch_image("/dashen-profile/image", {"bnet_id": target_id})
+        img_bytes, error_data = await self._fetch_image("/dashen-profile/image", {"bnet_id": target_id})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result("❌ 获取玩家详情卡片失败。")
+            err_msg = error_data.get("message") if error_data else "获取玩家详情卡片失败。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("大神对局")
     async def dashen_match(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -243,11 +251,12 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"📊 正在拉取 {target_id} 的最近对局...")
-        img_bytes = await self._fetch_image("/dashen-match/image", {"bnet_id": target_id})
+        img_bytes, error_data = await self._fetch_image("/dashen-match/image", {"bnet_id": target_id})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result("❌ 获取最近对局列表失败。")
+            err_msg = error_data.get("message") if error_data else "获取最近对局列表失败。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("历史段位")
     async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -256,21 +265,23 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"📜 正在追溯 {target_id} 的历史段位记录...")
-        img_bytes = await self._fetch_image("/dashen-rank-history/image", {"bnet_id": target_id})
+        img_bytes, error_data = await self._fetch_image("/dashen-rank-history/image", {"bnet_id": target_id})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result("❌ 获取历史段位失败。")
+            err_msg = error_data.get("message") if error_data else "获取历史段位失败。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("同玩查询")
     async def dashen_sameplay(self, event: AstrMessageEvent, p1: str, p2: str):
         yield event.plain_result(f"👥 正在分析 {p1} 与 {p2} 的同玩胜率...")
         payload = {"player1_bnet_id": p1, "player2_bnet_id": p2}
-        img_bytes = await self._fetch_image("/dashen-sameplay/image", payload)
+        img_bytes, error_data = await self._fetch_image("/dashen-sameplay/image", payload)
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result("❌ 无法获取同玩查询数据，请检查两个ID是否输入正确。")
+            err_msg = error_data.get("message") if error_data else "无法获取同玩查询数据，请检查两个ID是否输入正确。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("快速强度指数")
     async def quick_strength(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -279,11 +290,12 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"⚡ 正在评估 {target_id} 的快速强度指数...")
-        img_bytes = await self._fetch_image("/dashen-quick-strength/image", {"bnet_id": target_id})
+        img_bytes, error_data = await self._fetch_image("/dashen-quick-strength/image", {"bnet_id": target_id})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result("❌ 获取快速强度指数失败。")
+            err_msg = error_data.get("message") if error_data else "获取快速强度指数失败。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("竞技强度指数")
     async def competitive_strength(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -292,11 +304,12 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"🏆 正在评估 {target_id} 的竞技天梯强度指数...")
-        img_bytes = await self._fetch_image("/dashen-competitive-strength/image", {"bnet_id": target_id})
+        img_bytes, error_data = await self._fetch_image("/dashen-competitive-strength/image", {"bnet_id": target_id})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result("❌ 获取竞技强度指数失败。")
+            err_msg = error_data.get("message") if error_data else "获取竞技强度指数失败。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("威能")
     async def ow_hero_perk(self, event: AstrMessageEvent, hero_name: str):
@@ -304,11 +317,12 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入英雄名称，如：/威能 源氏")
             return
         yield event.plain_result(f"🔮 正在提取 {hero_name} 的核心威能数据...")
-        img_bytes = await self._fetch_image("/ow-hero-perk/image", {"hero": hero_name})
+        img_bytes, error_data = await self._fetch_image("/ow-hero-perk/image", {"hero": hero_name})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result(f"❌ 未能找到英雄【{hero_name}】的威能图。")
+            err_msg = error_data.get("message") if error_data else f"未能找到英雄【{hero_name}】的威能图。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("ow英雄")
     async def ow_hero_pick(self, event: AstrMessageEvent, hero_name: str):
@@ -317,29 +331,32 @@ class OverstatsPlugin(Star):
             return
         yield event.plain_result(f"🔥 正在读取 {hero_name} 的天梯 Pick 率走势图...")
         payload = {"view": "history", "game_mode": "competitive", "mmr": "all", "hero": hero_name}
-        img_bytes = await self._fetch_image("/ow-hero-pick-rate/image", payload)
+        img_bytes, error_data = await self._fetch_image("/ow-hero-pick-rate/image", payload)
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result(f"❌ 暂时无法获取英雄 {hero_name} 的数据走势。")
+            err_msg = error_data.get("message") if error_data else f"暂时无法获取英雄 {hero_name} 的数据走势。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("商店")
     async def ow_shop(self, event: AstrMessageEvent):
         yield event.plain_result("🛍️ 正在获取今日精选商店皮肤商品...")
-        img_bytes = await self._fetch_image("/ow-shop/image")
+        img_bytes, error_data = await self._fetch_image("/ow-shop/image")
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result("❌ 获取精选商店图片失败。")
+            err_msg = error_data.get("message") if error_data else "获取精选商店图片失败。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("ow赛事")
     async def ow_esports(self, event: AstrMessageEvent):
         yield event.plain_result("🎮 正在从 Pandascore 获取实时赛事对阵...")
-        img_bytes = await self._fetch_image("/ow-esports/image")
+        img_bytes, error_data = await self._fetch_image("/ow-esports/image")
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result("❌ 赛事信息获取失败。请检查后台是否正确配置了 `OW_ESPORTS_API_KEY`。")
+            err_msg = error_data.get("message") if error_data else "赛事信息获取失败。请检查后台是否正确配置了 `OW_ESPORTS_API_KEY`。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("获取段位分布")
     async def get_rank_distribution(self, event: AstrMessageEvent):
@@ -353,11 +370,12 @@ class OverstatsPlugin(Star):
     async def ban_pick_stats(self, event: AstrMessageEvent):
         yield event.plain_result("🚫 正在获取本周天梯英雄大盘选禁用排行...")
         payload = {"view": "ranking", "game_mode": "competitive", "mmr": "all"}
-        img_bytes = await self._fetch_image("/ow-hero-pick-rate/image", payload)
+        img_bytes, error_data = await self._fetch_image("/ow-hero-pick-rate/image", payload)
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
-            yield event.plain_result("❌ 无法获取全英雄排行。")
+            err_msg = error_data.get("message") if error_data else "无法获取全英雄排行。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("mappick")
     async def map_pick_stats(self, event: AstrMessageEvent):
