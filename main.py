@@ -11,7 +11,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.12")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.13")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -80,14 +80,32 @@ class OverstatsPlugin(Star):
             logger.error(f"构建图片消息链时发生严重错误: {e}")
             return event.plain_result(f"❌ 机器人构建图片组件失败: {e}")
 
-    # 还原后的全局拦截器：仅支持纯文本@电子路灯
+    # 增强后的全局拦截器：支持纯文本@电子路灯 和 直接发送战网ID自动绑定
     @event_message_type(EventMessageType.ALL)
     async def intercept_text_at(self, event: AstrMessageEvent):
         msg = event.message_str
         if not msg:
             return
         
-        # 仅检查是否包含纯文本 "@电子路灯"
+        # 新增：直接发送战网ID自动绑定逻辑
+        # 检查消息是否纯粹是一个符合规范的战网ID
+        if re.match(r'^\s*[\w\u4e00-\u9fa5\-\_\.\s]+#\d+\s*$', msg.strip()):
+            user_id = event.get_sender_id()
+            old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
+            new_bind_id = msg.strip()
+            
+            await self.put_kv_data(f"bind_{user_id}", new_bind_id)
+            
+            if not old_bind_id:
+                yield event.plain_result(f"✅ 自动绑定成功！已为您关联战网账号【{new_bind_id}】")
+            else:
+                yield event.plain_result(f"✅ 自动更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
+            
+            # 阻止消息继续传播
+            event.stop_propagation()
+            return
+        
+        # 保留原有的@电子路灯功能
         if "@电子路灯" not in msg:
             return
         
@@ -95,7 +113,6 @@ class OverstatsPlugin(Star):
         clean_msg = msg.replace("@电子路灯", "").strip()
         
         # 逻辑1：如果剩下的纯粹是一个符合规范的战网ID，则触发自动绑定
-        # 保留了优化后的正则表达式（支持更多特殊字符）
         if re.match(r'^\s*[\w\u4e00-\u9fa5\-\_\.\s]+#\d+\s*$', clean_msg):
             user_id = event.get_sender_id()
             old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
@@ -173,6 +190,7 @@ class OverstatsPlugin(Star):
             "=======================\n"
             "👉【数据/战绩总结】\n"
             "   /大神绑定 [战网ID] - 绑定QQ与战网账号\n"
+            "   直接发送战网ID - 快速自动绑定/更新战网账号\n"
             "   @电子路灯 [战网ID] - 快速自动绑定/更新战网账号\n"
             "   /大神数据 (战网ID) - 查询玩家详情卡片\n"
             "   /大神对局 (战网ID) - 查询最近对局列表\n"
@@ -215,7 +233,7 @@ class OverstatsPlugin(Star):
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 或 @电子路灯 [战网ID]")
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 或 直接发送战网ID")
             return
         
         yield event.plain_result(f"⏳ 正在计算 {target_id} 的今日战绩总结...")
