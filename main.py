@@ -3,6 +3,7 @@ import aiohttp
 import logging
 import tempfile
 import threading
+import re
 from pathlib import Path
 from astrbot.api.all import *
 import astrbot.api.message_components as Comp
@@ -33,7 +34,7 @@ class OverstatsPlugin(Star):
         bind_id = await self.get_kv_data(f"bind_{user_id}", None)
         return bind_id
 
-    async def _fetch_image(self, endpoint: str, payload: dict = None, timeout: int = 600) -> bytes:
+    async def _fetch_image(self, endpoint: str, payload: dict = None, timeout: int = 600) -> tuple:
         url = f"{self.base_url}{endpoint}"
         payload = payload or {}
         try:
@@ -41,17 +42,18 @@ class OverstatsPlugin(Star):
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
                 async with session.post(url, json=payload) as resp:
                     if resp.status == 200:
-                        return await resp.read()
+                        return await resp.read(), None
                     else:
                         try:
                             error_data = await resp.json()
                             logger.error(f"Overstats API 错误: {resp.status} - {error_data}")
+                            return None, error_data
                         except:
                             logger.error(f"Overstats API 返回了非 JSON 错误: {resp.status}")
-                        return None
+                            return None, None
         except Exception as e:
             logger.error(f"网络请求异常: {e}")
-            return None
+            return None, None
 
     def _safe_remove(self, path: str):
         if path and os.path.exists(path):
@@ -73,6 +75,26 @@ class OverstatsPlugin(Star):
         except Exception as e:
             logger.error(f"构建图片消息链时发生严重错误: {e}")
             return event.plain_result(f"❌ 机器人构建图片组件失败: {e}")
+
+    @event_message_type(EventMessageType.ALL)
+    async def auto_bind_bnet_id(self, event: AstrMessageEvent):
+        # 获取消息纯文本
+        msg = event.message_str
+        if not msg:
+            return
+            
+        # 移除 At 标签和特定的机器人称呼
+        msg = re.sub(r'\[At:\d+\]', '', msg)
+        msg = msg.replace('@电子路灯', '').strip()
+        
+        # 判断是否为规范的战网ID格式 (如：Player#12345)
+        if re.match(r'^[\w\u4e00-\u9fa5]+#\d+$', msg):
+            user_id = event.get_sender_id()
+            bind_id = await self.get_kv_data(f"bind_{user_id}", None)
+            # 如果未绑定，自动进行绑定
+            if not bind_id:
+                await self.put_kv_data(f"bind_{user_id}", msg)
+                yield event.plain_result(f"✅ 自动绑定成功！已为您关联战网账号【{msg}】")
 
     @command("owhelp")
     async def ow_help(self, event: AstrMessageEvent):
@@ -116,9 +138,12 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"⏳ 正在计算 {target_id} 的今日战绩总结...")
-        img_bytes = await self._fetch_image("/dashen-summary/today/image", {"bnet_id": target_id})
+        img_bytes, err = await self._fetch_image("/dashen-summary/today/image", {"bnet_id": target_id})
+        
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
+        elif err and err.get("error") == "summary_empty":
+            yield event.plain_result(f"❌ {err.get('message', '你在过去的 24 小时内没有对局记录。')}")
         else:
             yield event.plain_result("❌ 获取今日总结失败。")
 
@@ -129,7 +154,7 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"⏳ 正在统计 {target_id} 的昨日战绩数据...")
-        img_bytes = await self._fetch_image("/dashen-summary/yesterday/image", {"bnet_id": target_id})
+        img_bytes, _ = await self._fetch_image("/dashen-summary/yesterday/image", {"bnet_id": target_id})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
@@ -142,7 +167,7 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"📊 正在生成 {target_id} 的本周战绩大数据总结，耗时较长（约30-60秒），请稍候...")
-        img_bytes = await self._fetch_image("/dashen-summary/week/image", {"bnet_id": target_id}, timeout=900)
+        img_bytes, _ = await self._fetch_image("/dashen-summary/week/image", {"bnet_id": target_id}, timeout=900)
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
@@ -155,7 +180,7 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"🔍 正在生成 {target_id} 的玩家详情...")
-        img_bytes = await self._fetch_image("/dashen-profile/image", {"bnet_id": target_id})
+        img_bytes, _ = await self._fetch_image("/dashen-profile/image", {"bnet_id": target_id})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
@@ -168,7 +193,7 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"📊 正在拉取 {target_id} 的最近对局...")
-        img_bytes = await self._fetch_image("/dashen-match/image", {"bnet_id": target_id})
+        img_bytes, _ = await self._fetch_image("/dashen-match/image", {"bnet_id": target_id})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
@@ -181,7 +206,7 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"📜 正在追溯 {target_id} 的历史段位记录...")
-        img_bytes = await self._fetch_image("/dashen-rank-history/image", {"bnet_id": target_id})
+        img_bytes, _ = await self._fetch_image("/dashen-rank-history/image", {"bnet_id": target_id})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
@@ -191,7 +216,7 @@ class OverstatsPlugin(Star):
     async def dashen_sameplay(self, event: AstrMessageEvent, p1: str, p2: str):
         yield event.plain_result(f"👥 正在分析 {p1} 与 {p2} 的同玩胜率...")
         payload = {"player1_bnet_id": p1, "player2_bnet_id": p2}
-        img_bytes = await self._fetch_image("/dashen-sameplay/image", payload)
+        img_bytes, _ = await self._fetch_image("/dashen-sameplay/image", payload)
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
@@ -204,7 +229,7 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"⚡ 正在评估 {target_id} 的快速强度指数...")
-        img_bytes = await self._fetch_image("/dashen-quick-strength/image", {"bnet_id": target_id})
+        img_bytes, _ = await self._fetch_image("/dashen-quick-strength/image", {"bnet_id": target_id})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
@@ -217,7 +242,7 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
             return
         yield event.plain_result(f"🏆 正在评估 {target_id} 的竞技天梯强度指数...")
-        img_bytes = await self._fetch_image("/dashen-competitive-strength/image", {"bnet_id": target_id})
+        img_bytes, _ = await self._fetch_image("/dashen-competitive-strength/image", {"bnet_id": target_id})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
@@ -226,7 +251,7 @@ class OverstatsPlugin(Star):
     @command("威能")
     async def ow_hero_perk(self, event: AstrMessageEvent, hero_name: str):
         yield event.plain_result(f"🔮 正在提取 {hero_name} 的核心威能数据...")
-        img_bytes = await self._fetch_image("/ow-hero-perk/image", {"hero": hero_name})
+        img_bytes, _ = await self._fetch_image("/ow-hero-perk/image", {"hero": hero_name})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
@@ -236,7 +261,7 @@ class OverstatsPlugin(Star):
     async def ow_hero_pick(self, event: AstrMessageEvent, hero_name: str):
         yield event.plain_result(f"🔥 正在读取 {hero_name} 的天梯 Pick 率走势图...")
         payload = {"view": "history", "game_mode": "competitive", "mmr": "all", "hero": hero_name}
-        img_bytes = await self._fetch_image("/ow-hero-pick-rate/image", payload)
+        img_bytes, _ = await self._fetch_image("/ow-hero-pick-rate/image", payload)
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
@@ -245,7 +270,7 @@ class OverstatsPlugin(Star):
     @command("商店")
     async def ow_shop(self, event: AstrMessageEvent):
         yield event.plain_result("🛍️ 正在获取今日精选商店皮肤商品...")
-        img_bytes = await self._fetch_image("/ow-shop/image")
+        img_bytes, _ = await self._fetch_image("/ow-shop/image")
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
@@ -254,7 +279,7 @@ class OverstatsPlugin(Star):
     @command("ow赛事")
     async def ow_esports(self, event: AstrMessageEvent):
         yield event.plain_result("🎮 正在从 Pandascore 获取实时赛事对阵...")
-        img_bytes = await self._fetch_image("/ow-esports/image")
+        img_bytes, _ = await self._fetch_image("/ow-esports/image")
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
@@ -272,7 +297,7 @@ class OverstatsPlugin(Star):
     async def ban_pick_stats(self, event: AstrMessageEvent):
         yield event.plain_result("🚫 正在获取本周天梯英雄大盘选禁用排行...")
         payload = {"view": "ranking", "game_mode": "competitive", "mmr": "all"}
-        img_bytes = await self._fetch_image("/ow-hero-pick-rate/image", payload)
+        img_bytes, _ = await self._fetch_image("/ow-hero-pick-rate/image", payload)
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
