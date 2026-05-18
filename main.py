@@ -14,7 +14,7 @@ logger = logging.getLogger("astrbot")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
-        self.base_url = "http://127.0.0.1:18080/api/v2"
+        self.base_url = "http://host.docker.internal:18080/api/v2"
         
         # 1. 依照官方规范，定义插件专属的大文件/媒体数据存储目录
         try:
