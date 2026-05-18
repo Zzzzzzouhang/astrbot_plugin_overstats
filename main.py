@@ -11,7 +11,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.13")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.14")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -101,8 +101,8 @@ class OverstatsPlugin(Star):
             else:
                 yield event.plain_result(f"✅ 自动更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
             
-            # 阻止消息继续传播
-            event.stop_propagation()
+            # 修复：使用AstrBot v4.x正确的终止事件传播方法
+            event.stop_event()
             return
         
         # 保留原有的@电子路灯功能
@@ -125,8 +125,8 @@ class OverstatsPlugin(Star):
             else:
                 yield event.plain_result(f"✅ 自动更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
             
-            # 阻止消息继续传播
-            event.stop_propagation()
+            # 修复：使用AstrBot v4.x正确的终止事件传播方法
+            event.stop_event()
             return
         
         # 逻辑2：如果是带了指令（如：今日总结 或 今日总结 某个ID）
@@ -180,8 +180,8 @@ class OverstatsPlugin(Star):
                 logger.error(f"纯文本快捷指令分发执行失败 ({cmd}): {e}")
                 yield event.plain_result(f"❌ 执行指令失败: {str(e)}")
             
-            # 阻止消息继续传播
-            event.stop_propagation()
+            # 修复：使用AstrBot v4.x正确的终止事件传播方法
+            event.stop_event()
 
     @command("owhelp")
     async def ow_help(self, event: AstrMessageEvent):
