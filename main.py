@@ -11,7 +11,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.14")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.15")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -73,8 +73,8 @@ class OverstatsPlugin(Star):
                 f.write(img_bytes)
                 temp_file_path = f.name
             chain = [Comp.Image.fromFileSystem(temp_file_path)]
-            # 使用AstrBot原生异步任务调度，避免线程安全问题
-            self.context.run_task(self._delayed_remove(temp_file_path, 1800))
+            # 修复：使用Python标准库asyncio.create_task替代被移除的Context.run_task
+            asyncio.create_task(self._delayed_remove(temp_file_path, 1800))
             return event.chain_result(chain)
         except Exception as e:
             logger.error(f"构建图片消息链时发生严重错误: {e}")
