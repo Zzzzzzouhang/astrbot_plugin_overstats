@@ -11,7 +11,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.11")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.12")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -80,7 +80,7 @@ class OverstatsPlugin(Star):
             logger.error(f"构建图片消息链时发生严重错误: {e}")
             return event.plain_result(f"❌ 机器人构建图片组件失败: {e}")
 
-    # 完全修复后的全局拦截器：支持QQ原生@机器人 + 纯文本@电子路灯
+    # 完全修复后的全局拦截器：兼容所有AstrBot适配器
     @event_message_type(EventMessageType.ALL)
     async def intercept_text_at(self, event: AstrMessageEvent):
         msg = event.message_str
@@ -89,24 +89,41 @@ class OverstatsPlugin(Star):
         
         # 调试日志（部署后可注释掉）
         logger.debug(f"收到消息: {msg}")
-        logger.debug(f"消息组件: {event.message}")
+        logger.debug(f"事件类型: {type(event).__name__}")
         
         is_at_me = False
         clean_msg = msg
         
-        # 方式1：优先检测QQ原生At组件（最可靠）
+        # 方式1：优先检测QQ原生At组件（兼容所有适配器）
         try:
             bot_id = event.bot_id
             bot_name = event.bot_name
-            for comp in event.message:
+            
+            # 通用方法：使用get_message()获取消息组件
+            message_components = event.get_message()
+            
+            for comp in message_components:
                 if isinstance(comp, Comp.At) and comp.qq == bot_id:
                     is_at_me = True
                     # 移除At对应的文本（兼容不同适配器的格式）
                     clean_msg = clean_msg.replace(f"@{bot_name}", "").strip()
                     clean_msg = clean_msg.replace(f"@{bot_id}", "").strip()
                     break
+        except AttributeError as e:
+            logger.debug(f"适配器不支持get_message()方法: {e}")
+            # 备用方案：如果get_message()失败，尝试直接访问message属性
+            try:
+                if hasattr(event, 'message'):
+                    for comp in event.message:
+                        if isinstance(comp, Comp.At) and comp.qq == bot_id:
+                            is_at_me = True
+                            clean_msg = clean_msg.replace(f"@{bot_name}", "").strip()
+                            clean_msg = clean_msg.replace(f"@{bot_id}", "").strip()
+                            break
+            except Exception as e2:
+                logger.debug(f"备用At检测方案也失败: {e2}")
         except Exception as e:
-            logger.debug(f"检查At组件失败: {e}")
+            logger.debug(f"检查At组件时发生未知错误: {e}")
         
         # 方式2：兼容纯文本@电子路灯的情况（保留原有逻辑）
         if not is_at_me and "@电子路灯" in msg:
