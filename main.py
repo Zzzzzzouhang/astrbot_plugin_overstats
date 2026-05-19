@@ -87,9 +87,11 @@ class OverstatsPlugin(Star):
         if not msg:
             return
         
+        # 修复1：战网ID不能包含空格，去掉了中括号里的 \s 防止将带空格的指令误判为ID
+        bnet_pattern = r'^\s*[\w\u4e00-\u9fa5\-\_\.]+#\d+\s*$'
+        
         # 新增：直接发送战网ID自动绑定逻辑
-        # 检查消息是否纯粹是一个符合规范的战网ID
-        if re.match(r'^\s*[\w\u4e00-\u9fa5\-\_\.\s]+#\d+\s*$', msg.strip()):
+        if re.match(bnet_pattern, msg.strip()):
             user_id = event.get_sender_id()
             old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
             new_bind_id = msg.strip()
@@ -113,7 +115,7 @@ class OverstatsPlugin(Star):
         clean_msg = msg.replace("@电子路灯", "").strip()
         
         # 逻辑1：如果剩下的纯粹是一个符合规范的战网ID，则触发自动绑定
-        if re.match(r'^\s*[\w\u4e00-\u9fa5\-\_\.\s]+#\d+\s*$', clean_msg):
+        if re.match(bnet_pattern, clean_msg):
             user_id = event.get_sender_id()
             old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
             new_bind_id = clean_msg.strip()
@@ -134,7 +136,8 @@ class OverstatsPlugin(Star):
         if not parts:
             return
         
-        cmd = parts[0]
+        # 修复2：兼容用户输入 "/周度总结" 的情况，剔除开头的斜杠
+        cmd = parts[0].lstrip('/')
         # 获取指令后面的参数（如果有的话）
         cmd_args = parts[1].split() if len(parts) > 1 else []
         # 路由映射表：纯文本指令 -> (对应的方法, 所需固定参数个数)
