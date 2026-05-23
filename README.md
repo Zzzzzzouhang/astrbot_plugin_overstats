@@ -1,6 +1,8 @@
 # astrbot-plugin-overstats
 用于连接overstats守望先锋插件
+
 https://github.com/AddOneSecondL/Overstats
+守望先锋数据查询，基于网易大神接口，支持玩家资料、战绩、段位、强度分析、总结、英雄选取率、商店、补丁说明等
 
 1.需要在服务器部署原项目，这个插件仅用于astrbot与原项目通讯，插件配置界面提供了配置选项
 2.大部分代码并非人类编写
@@ -8,8 +10,8 @@ https://github.com/AddOneSecondL/Overstats
 📌 守望先锋 Overstats 查询菜单：
 
 👉【数据/战绩总结】
-   /大神绑定 [战网ID] - 绑定QQ与战网账号
-   直接发送战网ID - 快速自动绑定/更新战网账号
+   /大神绑定 [战网ID] - 绑定QQ与战网账号 
+   直接发送战网ID - 快速自动绑定/更新战网
    @电子路灯 [战网ID] - 快速自动绑定/更新战网账号
    /大神数据 (战网ID) - 查询玩家详情卡片
    /大神对局 (战网ID) - 查询最近对局列表
