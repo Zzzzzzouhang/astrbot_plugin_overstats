@@ -253,7 +253,6 @@ class OverstatsPlugin(Star):
         help_text = (
             "📌 Overstats 查询菜单\n"
             "🔗 ➤ 绑定「战网 ID」\n"
-            "   ➤ @机器人「战网 ID」\n"
             "📋 ➤ 今日     ➤ 昨日     ➤ 本周\n"
             "📊 ➤ 大神数据 ➤ 大神对局 ➤ 历史段位\n"
             "📈 ➤ 快速强度 ➤ 竞技强度\n"
