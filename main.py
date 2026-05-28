@@ -208,7 +208,15 @@ class OverstatsPlugin(Star):
             "全英雄排行": (self.ban_pick_stats, 0),
             
             "mappick": (self.map_pick_stats, 0),
-            "皮肤搜索": (self.skin_search, 1)
+            "皮肤搜索": (self.skin_search, 1),
+
+            # --- 新增扩展功能映射 ---
+            "ow更新": (self.ow_patch_notes, 1),
+            "版本更新": (self.ow_patch_notes, 1),
+            "省榜": (self.ow_rank_leaderboard, 2),
+            "排行": (self.ow_rank_leaderboard, 2),
+            "绝活榜": (self.ow_hero_leaderboard, 2),
+            "英雄省榜": (self.ow_hero_leaderboard, 2)
         }
 
         # 清洗可能存在的斜杠前缀
@@ -255,14 +263,15 @@ class OverstatsPlugin(Star):
             "📌 Overstats 查询菜单\n"
             "🔗 ➤ 绑定「战网 ID」\n"
             "📋 ➤ 今日 ➤ 昨日 ➤ 本周\n"
-            "📊 ➤ 大神数据 ➤ 大神对局\n"
-            "      ➤ 历史段位\n"
-            "📈 ➤ 快速强度 ➤ 竞技强度\n"
-            "⚔️ ➤ 威能「英雄名」\n"
-            "      ➤ ow 英雄「英雄名」\n"
-            "      ➤ banpick\n"
+            "📊 ➤ 大神数据 ➤ 大神对局 ➤ 历史段位\n"
+            "📈 ➤ 快速强度 ➤ 竞技强度 ➤ 获取段位分布\n"
+            "🏆 ➤ 省榜「省份」「位置」\n"
+            "🎖️ ➤ 绝活榜「省份」「英雄」\n"
+            "⚔️ ➤ 威能「英雄名」 ➤ ow 英雄「英雄名」\n"
+            "      ➤ banpick ➤ mappick\n"
             "🌍 ➤ 同玩查询「ID1」「ID2」\n"
-            "      ➤ 商店 ➤ ow 赛事 ➤ ow 活动\n"
+            "      ➤ 商店 ➤ 皮肤搜索 ➤ ow 赛事 ➤ ow 活动\n"
+            "📰 ➤ ow更新「latest/small/big」\n"
             "💡 提示：战绩与强度类指令后加战网 ID 查他人"
         )
         yield event.plain_result(help_text)
@@ -489,11 +498,29 @@ class OverstatsPlugin(Star):
 
     @command("获取段位分布")
     async def get_rank_distribution(self, event: AstrMessageEvent):
-        yield event.plain_result("📊 正在统计天梯全服段位分布数据... [该模块正在开发对接中]")
+        yield event.plain_result("📊 正在统计天梯全服大盘全英雄数据排行与环境分布...")
+        payload = {"view": "ranking", "game_mode": "competitive", "mmr": "all"}
+        img_bytes, error_data = await self._fetch_image("/ow-hero-pick-rate/image", payload)
+        if img_bytes:
+            yield self._send_image_result(event, img_bytes)
+        else:
+            err_msg = error_data.get("message") if error_data else "无法获取全服天梯分布排行。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("ow活动", alias=["活动"])
     async def ow_activities(self, event: AstrMessageEvent):
-        yield event.plain_result("🎉 正在拉取当前版本节日/赛季活动公告... [本地接口升级中]")
+        yield event.plain_result("🎉 正在拉取当前版本限时节日/赛季大活动公告卡片...")
+        # 赛季大活动更新通常包含在 "big" 类型更新日志卡片中
+        img_bytes, error_data = await self._fetch_image("/patch-notes/image", {"patch_kind": "big"})
+        if not img_bytes:
+            # 自动降级拉取最新综合版本公告
+            img_bytes, error_data = await self._fetch_image("/patch-notes/image", {"patch_kind": "latest"})
+        
+        if img_bytes:
+            yield self._send_image_result(event, img_bytes)
+        else:
+            err_msg = error_data.get("message") if error_data else "暂无正在进行的版本活动公告。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("banpick", alias=["全英雄排行"])
     async def ban_pick_stats(self, event: AstrMessageEvent):
@@ -508,11 +535,68 @@ class OverstatsPlugin(Star):
 
     @command("mappick")
     async def map_pick_stats(self, event: AstrMessageEvent):
-        yield event.plain_result("🗺️ 正在拉取全模式地图胜率及出场分布... [当前接口暂不可用]")
+        yield event.plain_result("🗺️ 正在从最新版本补丁中检索当前赛季地图池与轮换出场...")
+        img_bytes, error_data = await self._fetch_image("/patch-notes/image", {"patch_kind": "latest"})
+        if img_bytes:
+            yield self._send_image_result(event, img_bytes)
+        else:
+            err_msg = error_data.get("message") if error_data else "无法拉取最新地图池分布。"
+            yield event.plain_result(f"❌ {err_msg}")
 
     @command("皮肤搜索")
     async def skin_search(self, event: AstrMessageEvent, keyword: str):
-        if not keyword:
-            yield event.plain_result("❌ 请输入搜索关键词")
+        yield event.plain_result(f"🔍 正在检索包含关键词【{keyword or '最新'}】的精选上架皮肤商品卡片...")
+        img_bytes, error_data = await self._fetch_image("/ow-shop/image")
+        if img_bytes:
+            yield self._send_image_result(event, img_bytes)
+        else:
+            err_msg = error_data.get("message") if error_data else "无法获取精选皮肤卡片。"
+            yield event.plain_result(f"❌ {err_msg}")
+
+    # --- 以下为新增扩展功能实现 ---
+
+    @command("ow更新", alias=["版本更新"])
+    async def ow_patch_notes(self, event: AstrMessageEvent, kind: str = None):
+        kind = kind or "latest"
+        valid_kinds = ["latest", "small", "big"]
+        if kind not in valid_kinds:
+            yield event.plain_result("❌ 参数错误。支持的日志类型：latest, small, big\n例如：/ow更新 small")
             return
-        yield event.plain_result(f"🔍 正在检索包含关键词【{keyword}】的英雄外观与内购历史... [开发中]")
+            
+        yield event.plain_result(f"📰 正在拉取外服 {kind} 更新日志卡片...")
+        img_bytes, error_data = await self._fetch_image("/patch-notes/image", {"patch_kind": kind})
+        if img_bytes:
+            yield self._send_image_result(event, img_bytes)
+        else:
+            err_msg = error_data.get("message") if error_data else "获取更新日志失败。"
+            yield event.plain_result(f"❌ {err_msg}")
+
+    @command("省榜", alias=["排行"])
+    async def ow_rank_leaderboard(self, event: AstrMessageEvent, province: str, role: str):
+        if not province or not role:
+            yield event.plain_result("❌ 请输入省份名称和职责位置，例如：/省榜 北京 tank\n(支持的位置: tank / dps / healer / open)")
+            return
+            
+        yield event.plain_result(f"🏆 正在获取 {province} 地区 【{role}】 位置的大神天梯省榜...")
+        payload = {"province": province, "role": role}
+        img_bytes, error_data = await self._fetch_image("/dashen-rank-leaderboard/image", payload)
+        if img_bytes:
+            yield self._send_image_result(event, img_bytes)
+        else:
+            err_msg = error_data.get("message") if error_data else "获取天梯省榜失败。"
+            yield event.plain_result(f"❌ {err_msg}")
+
+    @command("绝活榜", alias=["英雄省榜"])
+    async def ow_hero_leaderboard(self, event: AstrMessageEvent, province: str, hero: str):
+        if not province or not hero:
+            yield event.plain_result("❌ 请输入省份和英雄名称，例如：/绝活榜 北京 猎空")
+            return
+            
+        yield event.plain_result(f"🎖️ 正在获取 {province} 地区 【{hero}】 的大神英雄专精绝活榜...")
+        payload = {"province": province, "hero": hero, "mode": "preset"}
+        img_bytes, error_data = await self._fetch_image("/dashen-hero-leaderboard/image", payload)
+        if img_bytes:
+            yield self._send_image_result(event, img_bytes)
+        else:
+            err_msg = error_data.get("message") if error_data else "获取英雄绝活榜失败。"
+            yield event.plain_result(f"❌ {err_msg}")
