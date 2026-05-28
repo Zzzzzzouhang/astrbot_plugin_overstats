@@ -497,32 +497,26 @@ class OverstatsPlugin(Star):
     @command("单局详细", alias=["单局"])
     async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = None, arg2: str = None):
         """
-        支持形式：
+        支持以下任意顺序的参数形式：
         /单局详细 1
         /单局详细 1 Player#12345
-        或回复单独数字触发
+        /单局详细 Player#12345 1
         """
         index = 0
         bnet_id = None
         
-        # 1. 提取参数逻辑
-        if arg1:
-            if arg1.isdigit():
-                digit = int(arg1)
+        for arg in [arg1, arg2]:
+            if not arg:
+                continue
+            if arg.isdigit():  # 如果是纯数字，说明是局数索引
+                digit = int(arg)
                 if digit > 20:
                     yield event.plain_result("❌ 错误：单局详细的数字索引不能大于 20！")
                     return
-                # 这里进行了 1-based 到 0-based 的转换
                 index = max(0, digit - 1) if digit > 0 else 0
-                bnet_id = arg2
-            else:
-                bnet_id = arg1
-                if arg2 and arg2.isdigit():
-                    digit = int(arg2)
-                    if digit > 20:
-                        yield event.plain_result("❌ 错误：单局详细的数字索引不能大于 20！")
-                        return
-                    index = max(0, digit - 1) if digit > 0 else 0
+            else:  # 如果不是纯数字，那必然是战网 ID
+                bnet_id = arg
+
 
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
@@ -531,7 +525,7 @@ class OverstatsPlugin(Star):
             
         yield event.plain_result(f"⏳ 正在拉取 {target_id} 第 {index + 1} 局的单局多图详细战绩...")
         
-        # 2. 封装请求参数
+        # 2. 封装请求参数 (保持你原本的逻辑不变)
         payload = {
             "bnet_id": target_id,
             "index": str(index),
@@ -569,14 +563,9 @@ class OverstatsPlugin(Star):
                     # 3. 线性循环处理图片
                     for u in raw_img_list:
                         img_str = ""
-                        
-                        # 提取图片路径/Base64数据
                         if isinstance(u, dict):
-                            # 优先匹配新结构：type: image, base64: ...
                             if u.get("type") == "image":
                                 img_str = str(u.get("base64", "")).strip()
-                            
-                            # 兜底：尝试其他可能的键名
                             if not img_str:
                                 for key in ["url", "image", "src", "path", "file"]:
                                     if u.get(key):
@@ -588,16 +577,12 @@ class OverstatsPlugin(Star):
                         if not img_str:
                             continue
 
-                        # 下载或解码逻辑
                         img_data = None
                         try:
-                            # 情况 A: 已有协议头的 Base64
                             if img_str.startswith("base64://"):
                                 img_data = base64.b64decode(img_str.replace("base64://", ""))
                             elif img_str.startswith("data:image") and "base64," in img_str:
                                 img_data = base64.b64decode(img_str.split("base64,")[1])
-                            
-                            # 情况 B: 无头长字符串（疑似原始 Base64）
                             elif len(img_str) > 100 and not img_str.startswith("http") and not img_str.startswith("/"):
                                 padding = len(img_str) % 4
                                 if padding: img_str += '=' * (4 - padding)
@@ -606,7 +591,6 @@ class OverstatsPlugin(Star):
                                 except Exception:
                                     pass
                             
-                            # 情况 C: URL 下载
                             if not img_data:
                                 full_img_url = img_str if img_str.startswith("http") else f"{self.base_url.rstrip('/').removesuffix('/api/v2')}{img_str if img_str.startswith('/') else '/' + img_str}"
                                 async with session.get(full_img_url, timeout=30, ssl=False) as img_resp:
@@ -630,7 +614,7 @@ class OverstatsPlugin(Star):
 
         except Exception as e:
             logger.error(f"处理单局详细图片异常: {e}")
-            yield event.plain_result("❌ 处理图片请求时发生系统错误")
+            yield event.plain_result("❌ 处理图片请求时发生 system 错误")
 
     @command("历史段位", alias=["历届段位"])
     async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = None):
