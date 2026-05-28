@@ -621,11 +621,9 @@ class OverstatsPlugin(Star):
                             yield event.plain_result(f"❌ 获取单局详细失败：{err_msg}")
                         except Exception:
                             yield event.plain_result(f"❌ 后端接口响应异常，状态码: {resp.status}")
-
-                        except Exception as e:
-                            logger.error(f"处理单局详细图片异常: {e}")
-                            yield event.plain_result("❌ 处理图片请求时发生系统错误")
-            
+        except Exception as e:
+            logger.error(f"处理单局详细图片异常: {e}")
+            yield event.plain_result("❌ 处理图片请求时发生系统错误")
     @command("历史段位", alias=["历届段位"])
     async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
