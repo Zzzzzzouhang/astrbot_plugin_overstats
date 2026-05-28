@@ -204,14 +204,21 @@ class OverstatsPlugin(Star):
         if not is_triggered:
             return
         
-        # 自动关联战网账号逻辑
-        bnet_pattern = r'^[\w\u4e00-\u9fa5\-\_\.]+#\d+$'
-        if re.match(bnet_pattern, clean_msg):
+        # 1. 定义战网ID正则 (允许中文/英文/数字/下划线/点/杠 + # + 数字)
+        bnet_id_pattern = r'([\w\u4e00-\u9fa5\-\_\.]+#\d+)'
+        
+        # 2. 在 clean_msg 中搜索该模式
+        match = re.search(bnet_id_pattern, clean_msg)
+        
+        # 3. 判定逻辑：
+        # 如果匹配到了ID，且消息中包含“绑定”字样，或者消息本身就是纯ID，则视为绑定指令
+        if match and ("绑定" in clean_msg or re.fullmatch(bnet_id_pattern, clean_msg)):
+            new_bind_id = match.group(1)
             user_id = event.get_sender_id()
             old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
-            new_bind_id = clean_msg
             
             await self.put_kv_data(f"bind_{user_id}", new_bind_id)
+            
             if not old_bind_id:
                 yield event.plain_result(f"✅ 自动绑定成功！已为您关联战网账号【{new_bind_id}】")
             else:
@@ -359,7 +366,6 @@ class OverstatsPlugin(Star):
             
             event.stop_event()
 
-    # ... (后续所有函数逻辑保持不变，因为它们都已经正确处理了减 1 逻辑)
     @command("owhelp", alias=["ow菜单", "ow帮助", "OW帮助"])
     async def ow_help(self, event: AstrMessageEvent):
         help_text = (
