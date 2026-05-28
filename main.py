@@ -463,6 +463,7 @@ class OverstatsPlugin(Star):
                 yield event.plain_result(f"❌ {err_msg}")
 
     # --- 新增扩展功能：单局详细 ---
+# --- 新增扩展功能：单局详细 ---
     @command("单局详细", alias=["单局"])
     async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = None, arg2: str = None):
         """
@@ -523,35 +524,42 @@ class OverstatsPlugin(Star):
                             yield event.plain_result("❌ 未能生成该单局的详细图片链接")
                             return
                             
-                        # 导入 AstrBot 富媒体组件
-                        import astrbot.api.message_components as Comp
-                        
-                        # 初始化消息链，可以先加个文本抬头
-                        chain = [Comp.Plain(f"📊 {target_id} 第 {index + 1} 局详细战绩面板：\n")]
-                        
-                        # 遍历并解析后端返回的图片数据
+                        # 1. 📥 核心修改：异步将所有图片 URL 下载为二进制 Bytes
+                        imgs_list = []
                         for u in img_urls:
-                            # 🎯 修复修复 'dict' object has no attribute 'startswith' 报错
-                            # 如果后端返回的是字典，提取其中的 url 字符串；如果是串则直接用
+                            # 容错解析字典或字符串
                             if isinstance(u, dict):
-                                img_str = u.get("url", "")  # ⚠️ 这里的 "url" 请根据后端实际 key 修改（如 "image"/"src"）
+                                img_str = ""
+                                for key in ["url", "image", "src", "path"]:
+                                    if u.get(key):
+                                        img_str = str(u.get(key)).strip()
+                                        break
                             else:
-                                img_str = str(u)
+                                img_str = str(u).strip()
                                 
                             if not img_str:
                                 continue
                                 
-                            # 拼接完整 URL 路径
+                            # 拼接完整图片下载 URL 
                             full_img_url = img_str if img_str.startswith("http") else f"{self.base_url.removesuffix('/api/v2')}{img_str}"
                             
-                            # 🎯 遵循新文档：直接使用统一的从 URL 发送图片组件
-                            chain.append(Comp.Image.fromURL(full_img_url))
+                            try:
+                                # 发起 GET 请求下载静态图片文件
+                                async with session.get(full_img_url, timeout=30) as img_resp:
+                                    if img_resp.status == 200:
+                                        img_bytes = await img_resp.read()
+                                        imgs_list.append(img_bytes)
+                                    else:
+                                        logger.error(f"下载战绩图片失败，状态码: {img_resp.status}, URL: {full_img_url}")
+                            except Exception as download_err:
+                                logger.error(f"下载战绩图片时发生网络异常: {download_err}, URL: {full_img_url}")
                         
-                        # 发送构建好的富媒体消息链
-                        if len(chain) > 1:  # 说明除了抬头文本外，成功添加了图片组件
-                            yield event.chain_result(chain)
+                        # 2. 📤 对接你现有的 _send_multiple_images_result 方法
+                        # 该方法会自动将 Bytes 写入本地临时文件、生成消息链、并在 30 分钟后自动清理
+                        if imgs_list:
+                            yield self._send_multiple_images_result(event, imgs_list)
                         else:
-                            yield event.plain_result("❌ 未能提取到有效的战绩图片地址。")
+                            yield event.plain_result("❌ 成功获取到图片链接，但下载到本地失败。")
                             
                     else:
                         try:
