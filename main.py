@@ -136,46 +136,69 @@ class OverstatsPlugin(Star):
             event.stop_event()
             return
         
-        # 指令路由字典 (包含所有扩充简写别名)
+        # 指令路由字典 (已全面同步下方各指令的所有原生名及 alias 别名)
         cmd_map = {
+            "owhelp": (self.ow_help, 0),
+            "ow帮助": (self.ow_help, 0),
+            "OW帮助": (self.ow_help, 0),
+            "ow菜单": (self.ow_help, 0),
+            
+            "大神绑定": (self.dashen_bind, 1),
+            "绑定": (self.dashen_bind, 1),
+            
             "今日总结": (self.dashen_today, 1),
             "今日": (self.dashen_today, 1),
             "今日数据": (self.dashen_today, 1),
+            
             "昨日总结": (self.dashen_yesterday, 1),
             "昨日": (self.dashen_yesterday, 1),
             "昨日数据": (self.dashen_yesterday, 1),
+            "昨天数据": (self.dashen_yesterday, 1),
+            "昨天": (self.dashen_yesterday, 1),
+            
             "周度总结": (self.dashen_week, 1),
             "本周总结": (self.dashen_week, 1),
             "本周数据": (self.dashen_week, 1),
+            "本周": (self.dashen_week, 1),
+            
             "大神数据": (self.dashen_profile, 1),
             "详情卡片": (self.dashen_profile, 1),
             "战绩查询": (self.dashen_profile, 1),
+            
             "大神对局": (self.dashen_match, 1),
             "最近对局": (self.dashen_match, 1),
+            
             "历史段位": (self.dashen_rank_history, 1),
             "历届段位": (self.dashen_rank_history, 1),
-            "快速强度指数": (self.quick_strength, 1),
-            "快速强度": (self.quick_strength, 1),
-            "竞技强度指数": (self.competitive_strength, 1),
-            "竞技强度": (self.competitive_strength, 1),
-            "威能": (self.ow_hero_perk, 1),
-            "ow英雄": (self.ow_hero_pick, 1),
-            "皮肤搜索": (self.skin_search, 1),
-            "大神绑定": (self.dashen_bind, 1),
-            "绑定": (self.dashen_bind, 1),
+            
             "同玩查询": (self.dashen_sameplay, 2),
             "开黑胜率": (self.dashen_sameplay, 2),
+            
+            "快速强度": (self.quick_strength, 1),
+            "快速强度指数": (self.quick_strength, 1),
+            
+            "竞技强度": (self.competitive_strength, 1),
+            "竞技强度指数": (self.competitive_strength, 1),
+            
+            "威能": (self.ow_hero_perk, 1),
+            "ow英雄": (self.ow_hero_pick, 1),
+            
             "商店": (self.ow_shop, 0),
             "ow商店": (self.ow_shop, 0),
+            
             "ow赛事": (self.ow_esports, 0),
             "赛事": (self.ow_esports, 0),
+            
+            "获取段位分布": (self.get_rank_distribution, 0),
+            
             "ow活动": (self.ow_activities, 0),
             "活动": (self.ow_activities, 0),
+            
             "banpick": (self.ban_pick_stats, 0),
             "全英雄排行": (self.ban_pick_stats, 0),
+            
             "mappick": (self.map_pick_stats, 0),
-            "owhelp": (self.ow_help, 0),
-            "获取段位分布": (self.get_rank_distribution, 0)
+            "皮肤搜索": (self.skin_search, 1)
         }
         
         # 如果既没有被艾特、也不是私聊、也没有以 / 开头，则过滤掉非指令文本
@@ -190,8 +213,8 @@ class OverstatsPlugin(Star):
         cmd = None
         cmd_args = []
         
-        # 优先使用完整的公共前缀匹配
-        for k in cmd_map.keys():
+        # 优先使用完整的公共前缀匹配（按长度从大到小排序，防止“今日”误拦截“今日数据”）
+        for k in sorted(cmd_map.keys(), key=len, reverse=True):
             if clean_msg.startswith(k):
                 cmd = k
                 remain = clean_msg[len(k):].strip()
@@ -225,7 +248,7 @@ class OverstatsPlugin(Star):
             
             event.stop_event()
 
-@command("owhelp", alias=["ow菜单", "ow帮助", "OW帮助", "ow菜单"])
+    @command("owhelp", alias=["ow菜单", "ow帮助", "OW帮助", "ow菜单"])
     async def ow_help(self, event: AstrMessageEvent):
         help_text = (
             "📌 Overstats 查询菜单\n"
