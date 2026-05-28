@@ -545,8 +545,20 @@ class OverstatsPlugin(Star):
                             yield event.plain_result("❌ 未能生成该单局的详细图片链接")
                             return
                             
-                        # 1. 📥 核心修改：异步将所有图片 URL 下载为二进制 Bytes
-                        imgs_list = []
+                        # 定义并发下载单张图片的方法
+                        async def download_image(img_url: str):
+                            try:
+                                # 增加 ssl=False 防止本地局域网证书校验失败导致的无法拉取
+                                async with session.get(img_url, timeout=30, ssl=False) as img_resp:
+                                    if img_resp.status == 200:
+                                        return await img_resp.read()
+                                    else:
+                                        logger.error(f"下载战绩图片失败，状态码: {img_resp.status}, URL: {img_url}")
+                            except Exception as download_err:
+                                logger.error(f"下载战绩图片时发生网络异常: {download_err}, URL: {img_url}")
+                            return None
+
+                        tasks = []
                         for u in img_urls:
                             # 容错解析字典或字符串
                             if isinstance(u, dict):
@@ -561,22 +573,27 @@ class OverstatsPlugin(Star):
                             if not img_str:
                                 continue
                                 
-                            # 拼接完整图片下载 URL 
-                            full_img_url = img_str if img_str.startswith("http") else f"{self.base_url.removesuffix('/api/v2')}{img_str}"
+                            # 📥 核心修复：智能处理基础路径与相对路径的拼接，防止因缺少 "/" 导致下载失败
+                            if img_str.startswith("http"):
+                                full_img_url = img_str
+                            else:
+                                base_root = self.base_url.rstrip("/")
+                                if base_root.endswith("/api/v2"):
+                                    base_root = base_root.removesuffix("/api/v2")
+                                
+                                # 根据开头是否有斜杠做智能拼接
+                                if img_str.startswith("/"):
+                                    full_img_url = f"{base_root}{img_str}"
+                                else:
+                                    full_img_url = f"{base_root}/{img_str}"
                             
-                            try:
-                                # 发起 GET 请求下载静态图片文件
-                                async with session.get(full_img_url, timeout=30) as img_resp:
-                                    if img_resp.status == 200:
-                                        img_bytes = await img_resp.read()
-                                        imgs_list.append(img_bytes)
-                                    else:
-                                        logger.error(f"下载战绩图片失败，状态码: {img_resp.status}, URL: {full_img_url}")
-                            except Exception as download_err:
-                                logger.error(f"下载战绩图片时发生网络异常: {download_err}, URL: {full_img_url}")
+                            tasks.append(download_image(full_img_url))
+                        
+                        # ⚡ 核心优化：并发异步执行所有下载，速度极大提升
+                        results = await asyncio.gather(*tasks)
+                        imgs_list = [img for img in results if img is not None]
                         
                         # 2. 📤 对接你现有的 _send_multiple_images_result 方法
-                        # 该方法会自动将 Bytes 写入本地临时文件、生成消息链、并在 30 分钟后自动清理
                         if imgs_list:
                             yield self._send_multiple_images_result(event, imgs_list)
                         else:
