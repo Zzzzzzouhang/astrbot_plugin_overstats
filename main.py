@@ -532,95 +532,95 @@ class OverstatsPlugin(Star):
             "analyze": True
         }
         
-# 调用 /api/v2/dashen-match/detail/replies
-url = f"{self.base_url}/dashen-match/detail/replies"
-# 提前定义变量，确保在异常捕获或后续逻辑中引用时不会触发 NameError
-tasks = []
-
-try:
-    client_timeout = aiohttp.ClientTimeout(total=600)
-    async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        async with session.post(url, json=payload) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                img_urls = data.get("replies", [])
-                
-                if not img_urls:
-                    yield event.plain_result("❌ 未能生成该单局的详细图片链接")
-                    return
-                    
-                import base64
-                
-                # 定义智能处理图片的方法
-                async def process_image(img_str: str):
-                    if img_str.startswith("base64://"):
-                        try:
-                            return base64.b64decode(img_str.replace("base64://", ""))
-                        except Exception as e:
-                            logger.error(f"Base64 解码失败: {e}")
-                            return None
-                    elif img_str.startswith("data:image") and "base64," in img_str:
-                        try:
-                            return base64.b64decode(img_str.split("base64,")[1])
-                        except Exception as e:
-                            logger.error(f"DataURI Base64 解码失败: {e}")
-                            return None
-
-                    # 处理常规 URL
-                    if img_str.startswith("http"):
-                        full_img_url = img_str
-                    else:
-                        base_root = self.base_url.rstrip("/")
-                        if base_root.endswith("/api/v2"):
-                            base_root = base_root.removesuffix("/api/v2")
-                        full_img_url = f"{base_root}{img_str}" if img_str.startswith("/") else f"{base_root}/{img_str}"
-
-                    try:
-                        async with session.get(full_img_url, timeout=30, ssl=False) as img_resp:
-                            if img_resp.status == 200:
-                                return await img_resp.read()
-                            else:
-                                logger.error(f"下载战绩图片失败，状态码: {img_resp.status}, URL: {full_img_url}")
-                    except Exception as download_err:
-                        logger.error(f"下载战绩图片网络异常: {download_err}, URL: {full_img_url}")
-                    return None
-
-                # 构建任务列表
-                for u in img_urls:
-                    img_str = ""
-                    if isinstance(u, dict):
-                        if u.get("type") == "image" and isinstance(u.get("data"), dict):
-                            img_str = str(u["data"].get("file", "")).strip()
-                        if not img_str:
-                            for key in ["url", "image", "src", "path", "file", "base64"]:
-                                if u.get(key):
-                                    img_str = str(u.get(key)).strip()
-                                    break
-                    else:
-                        img_str = str(u).strip()
+        # 调用 /api/v2/dashen-match/detail/replies
+        url = f"{self.base_url}/dashen-match/detail/replies"
+        # 提前定义变量，确保在异常捕获或后续逻辑中引用时不会触发 NameError
+        tasks = []
+        
+        try:
+            client_timeout = aiohttp.ClientTimeout(total=600)
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                async with session.post(url, json=payload) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        img_urls = data.get("replies", [])
                         
-                    if img_str:
-                        tasks.append(process_image(img_str))
-                
-                # 执行并发下载
-                if tasks:
-                    results = await asyncio.gather(*tasks)
-                    imgs_list = [img for img in results if img is not None]
-                    
-                    if imgs_list:
-                        yield self._send_multiple_images_result(event, imgs_list)
-                    else:
-                        yield event.plain_result("❌ 成功获取到图片链接，但下载到本地失败。")
-                else:
-                    yield event.plain_result("❌ 未解析到有效的图片地址。")
+                        if not img_urls:
+                            yield event.plain_result("❌ 未能生成该单局的详细图片链接")
+                            return
                             
-            else:
-                try:
-                    error_data = await resp.json()
-                    err_msg = error_data.get("message", "未知后端 service 错误")
-                    yield event.plain_result(f"❌ 获取单局详细失败：{err_msg}")
-                except Exception:
-                    yield event.plain_result(f"❌ 后端接口响应异常，状态码: {resp.status}")
+                        import base64
+                        
+                        # 定义智能处理图片的方法
+                        async def process_image(img_str: str):
+                            if img_str.startswith("base64://"):
+                                try:
+                                    return base64.b64decode(img_str.replace("base64://", ""))
+                                except Exception as e:
+                                    logger.error(f"Base64 解码失败: {e}")
+                                    return None
+                            elif img_str.startswith("data:image") and "base64," in img_str:
+                                try:
+                                    return base64.b64decode(img_str.split("base64,")[1])
+                                except Exception as e:
+                                    logger.error(f"DataURI Base64 解码失败: {e}")
+                                    return None
+        
+                            # 处理常规 URL
+                            if img_str.startswith("http"):
+                                full_img_url = img_str
+                            else:
+                                base_root = self.base_url.rstrip("/")
+                                if base_root.endswith("/api/v2"):
+                                    base_root = base_root.removesuffix("/api/v2")
+                                full_img_url = f"{base_root}{img_str}" if img_str.startswith("/") else f"{base_root}/{img_str}"
+        
+                            try:
+                                async with session.get(full_img_url, timeout=30, ssl=False) as img_resp:
+                                    if img_resp.status == 200:
+                                        return await img_resp.read()
+                                    else:
+                                        logger.error(f"下载战绩图片失败，状态码: {img_resp.status}, URL: {full_img_url}")
+                            except Exception as download_err:
+                                logger.error(f"下载战绩图片网络异常: {download_err}, URL: {full_img_url}")
+                            return None
+        
+                        # 构建任务列表
+                        for u in img_urls:
+                            img_str = ""
+                            if isinstance(u, dict):
+                                if u.get("type") == "image" and isinstance(u.get("data"), dict):
+                                    img_str = str(u["data"].get("file", "")).strip()
+                                if not img_str:
+                                    for key in ["url", "image", "src", "path", "file", "base64"]:
+                                        if u.get(key):
+                                            img_str = str(u.get(key)).strip()
+                                            break
+                            else:
+                                img_str = str(u).strip()
+                                
+                            if img_str:
+                                tasks.append(process_image(img_str))
+                        
+                        # 执行并发下载
+                        if tasks:
+                            results = await asyncio.gather(*tasks)
+                            imgs_list = [img for img in results if img is not None]
+                            
+                            if imgs_list:
+                                yield self._send_multiple_images_result(event, imgs_list)
+                            else:
+                                yield event.plain_result("❌ 成功获取到图片链接，但下载到本地失败。")
+                        else:
+                            yield event.plain_result("❌ 未解析到有效的图片地址。")
+                                    
+                    else:
+                        try:
+                            error_data = await resp.json()
+                            err_msg = error_data.get("message", "未知后端 service 错误")
+                            yield event.plain_result(f"❌ 获取单局详细失败：{err_msg}")
+                        except Exception:
+                            yield event.plain_result(f"❌ 后端接口响应异常，状态码: {resp.status}")
 
 except Exception as e:
     logger.error(f"处理单局详细图片异常: {e}")
