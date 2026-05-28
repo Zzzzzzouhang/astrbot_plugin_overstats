@@ -11,7 +11,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.17")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.18")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -90,7 +90,7 @@ class OverstatsPlugin(Star):
                 os.remove(path)
                 logger.debug(f"临时战绩图片已成功自动清理: {path}")
             except Exception as e:
-                logger.warning(f"自动清理临时战绩图片失败: {e}")
+                warning(f"自动清理临时战绩图片失败: {e}")
 
     async def _delayed_remove(self, path: str, delay: int):
         await asyncio.sleep(delay)
@@ -115,6 +115,26 @@ class OverstatsPlugin(Star):
         except Exception as e:
             logger.error(f"构建图片消息链时发生严重错误: {e}")
             return event.plain_result(f"❌ 机器人构建图片组件失败: {e}")
+
+    def _send_multiple_images_result(self, event: AstrMessageEvent, imgs_list: list[bytes]):
+        """多张图片一起发送的组件"""
+        try:
+            user_id = event.get_sender_id()
+            chain = [Comp.At(qq=user_id), Comp.Plain("\n")]
+            
+            for img_bytes in imgs_list:
+                if not img_bytes:
+                    continue
+                with tempfile.NamedTemporaryFile(dir=str(self.plugin_data_dir), delete=False, suffix=".png") as f:
+                    f.write(img_bytes)
+                    temp_file_path = f.name
+                chain.append(Comp.Image.fromFileSystem(temp_file_path))
+                asyncio.create_task(self._delayed_remove(temp_file_path, 1800))
+                
+            return event.chain_result(chain)
+        except Exception as e:
+            logger.error(f"构建多图消息链时发生严重错误: {e}")
+            return event.plain_result(f"❌ 机器人构建多图组件失败: {e}")
 
     # 智能全局事件拦截器
     @event_message_type(EventMessageType.ALL)
@@ -141,7 +161,6 @@ class OverstatsPlugin(Star):
         is_text_at_lampion = False
         if clean_msg.startswith("@电子路灯"):
             is_text_at_lampion = True
-            # 剥离纯文本前缀，提取后面的指令
             clean_msg = clean_msg[len("@电子路灯"):].strip()
         
         # 3. 如果是真正的 At 组件触发，提取出 @ 之后的纯净指令文本
@@ -158,7 +177,6 @@ class OverstatsPlugin(Star):
         # 核心触发判定：必须满足【真艾特】或【纯文本@电子路灯】或【私聊】
         is_triggered = is_at_me or is_text_at_lampion or is_private
         
-        # 如果均不满足，直接拦截并跳过，不再向下匹配指令
         if not is_triggered:
             return
         
@@ -177,6 +195,27 @@ class OverstatsPlugin(Star):
             
             event.stop_event()
             return
+
+        # 检查是否是纯数字或以“单局详细”开头的快捷指令（为了捕捉单独回复数字的场景）
+        if clean_msg.isdigit() or (clean_msg.startswith("单局") and any(char.isdigit() for char in clean_msg)):
+            # 提取数字
+            num_match = re.search(r'\d+', clean_msg)
+            if num_match:
+                digit = int(num_match.group())
+                if digit < 0:
+                    index = 0
+                elif digit > 20:
+                    yield event.plain_result("❌ 错误：单局详细的数字索引不能大于 20！")
+                    event.stop_event()
+                    return
+                else:
+                    index = max(0, digit - 1)
+                
+                # 路由到单局详细处理
+                async for r in self.dashen_match_detail(event, str(index)):
+                    yield r
+                event.stop_event()
+                return
         
         cmd_map = {
             "owhelp": (self.ow_help, 0),
@@ -208,6 +247,9 @@ class OverstatsPlugin(Star):
             
             "大神对局": (self.dashen_match, 1),
             "最近对局": (self.dashen_match, 1),
+            
+            "单局详细": (self.dashen_match_detail, 'var'),
+            "单局": (self.dashen_match_detail, 'var'),
             
             "历史段位": (self.dashen_rank_history, 1),
             "历届段位": (self.dashen_rank_history, 1),
@@ -246,7 +288,6 @@ class OverstatsPlugin(Star):
             "mappick": (self.map_pick_stats, 0),
             "皮肤搜索": (self.skin_search, 1),
 
-            # --- 新增扩展功能映射 ---
             "ow更新": (self.ow_patch_notes, 1),
             "版本更新": (self.ow_patch_notes, 1),
             "省榜": (self.ow_rank_leaderboard, 2),
@@ -255,7 +296,6 @@ class OverstatsPlugin(Star):
             "英雄省榜": (self.ow_hero_leaderboard, 2)
         }
 
-        # 清洗可能存在的斜杠前缀
         clean_msg = clean_msg.lstrip('/')
         
         cmd = None
@@ -286,7 +326,7 @@ class OverstatsPlugin(Star):
                     if len(cmd_args) >= 2:
                         async for r in func(event, cmd_args[0], cmd_args[1]): yield r
                     else:
-                        yield event.plain_result(f"❌ 【{cmd}】指令需要提供两个参数（例如：同玩查询 ID1 ID2）。")
+                        yield event.plain_result(f"❌ 【{cmd}】指令需要提供两个参数。")
                 elif arg_count == 'var':
                     arg1 = cmd_args[0] if len(cmd_args) > 0 else None
                     arg2 = cmd_args[1] if len(cmd_args) > 1 else None
@@ -303,17 +343,14 @@ class OverstatsPlugin(Star):
             "📌 Overstats 查询菜单\n"
             "🔗 ➤ 绑定「战网 ID」\n"
             "📋 ➤ 今日 ➤ 昨日 ➤ 本周\n"
-            "📊 ➤ 大神数据「快速/竞技」 ➤ 大神对局 ➤ 历史段位\n"
+            "📊 ➤ 大神数据 ➤ 大神对局 ➤ 单局详细「数字」\n"
             "📈 ➤ 快速强度 ➤ 竞技强度 ➤ 获取段位分布\n"
-            "🗺️ ➤ 快速云图 ➤ 竞技云图 (可选加赛季数字)\n"
-            "🏆 ➤ 省榜「省份」「位置」\n"
-            "🎖️ ➤ 绝活榜「省份」「英雄」\n"
-            "⚔️ ➤ 威能「英雄名」 ➤ ow 英雄「英雄名」\n"
-            "      ➤ banpick ➤ mappick\n"
-            "🌍 ➤ 同玩查询「ID1」「ID2」\n"
-            "      ➤ 商店 ➤ 皮肤搜索 ➤ ow 赛事 ➤ ow 活动\n"
+            "🗺️ ➤ 快速云图 ➤ 竞技云图\n"
+            "🏆 ➤ 省榜「省份」「位置」 ➤ 绝活榜「省份」「英雄」\n"
+            "⚔️ ➤ 威能「英雄名」 ➤ ow 英雄「英雄名」 ➤ banpick ➤ mappick\n"
+            "🌍 ➤ 同玩查询「ID1」「ID2」 ➤ 商店 ➤ 皮肤搜索 ➤ ow 赛事\n"
             "📰 ➤ ow更新「latest/small/big」\n"
-            "💡 提示：战绩与强度类指令后加战网 ID 查他人"
+            "💡 提示：在「大神对局」图片发出来后，直接回复数字即可看单局详细。"
         )
         yield event.plain_result(help_text)
 
@@ -326,7 +363,6 @@ class OverstatsPlugin(Star):
         
         old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
         new_bind_id = bnet_id.strip()
-        
         await self.put_kv_data(f"bind_{user_id}", new_bind_id)
         
         if not old_bind_id:
@@ -426,6 +462,97 @@ class OverstatsPlugin(Star):
             else:
                 yield event.plain_result(f"❌ {err_msg}")
 
+    # --- 新增扩展功能：单局详细 ---
+    @command("单局详细", alias=["单局"])
+    async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = None, arg2: str = None):
+        """
+        支持形式：
+        /单局详细 1
+        /单局详细 1 Player#12345
+        或回复单独数字触发
+        """
+        index = 0
+        bnet_id = None
+        
+        # 提取参数逻辑
+        if arg1:
+            if arg1.isdigit():
+                digit = int(arg1)
+                if digit > 20:
+                    yield event.plain_result("❌ 错误：单局详细的数字索引不能大于 20！")
+                    return
+                index = max(0, digit - 1) if digit > 0 else 0
+                bnet_id = arg2
+            else:
+                bnet_id = arg1
+                if arg2 and arg2.isdigit():
+                    digit = int(arg2)
+                    if digit > 20:
+                        yield event.plain_result("❌ 错误：单局详细的数字索引不能大于 20！")
+                        return
+                    index = max(0, digit - 1) if digit > 0 else 0
+
+        target_id = await self._get_bnet_id(event, bnet_id)
+        if not target_id:
+            yield event.plain_result("❌ 请输入战网ID，如：/单局详细 1 Player#12345 或先使用 /绑定 指令")
+            return
+            
+        yield event.plain_result(f"⏳ 正在拉取 {target_id} 第 {index + 1} 局的单局多图详细战绩...")
+        
+        # 封装并发请求，一并获取所有可能发送的详情图
+        payload = {
+            "bnet_id": target_id,
+            "index": str(index),
+            "limit": "20",
+            "include_fight": True,
+            "include_previous_season": True,
+            "show_all_heroes": True,
+            "analyze": True
+        }
+        
+        # 调用 /api/v2/dashen-match/detail/replies
+        url = f"{self.base_url}/dashen-match/detail/replies"
+        try:
+            client_timeout = aiohttp.ClientTimeout(total=600)
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                async with session.post(url, json=payload) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # 从返回的 json 列表中拿到对应的图片名或直连链接
+                        # 这里我们并发请求后台详情多图内容
+                        img_urls = data.get("replies", [])
+                        if not img_urls:
+                            yield event.plain_result("❌ 未能生成该单局的详细图片链接")
+                            return
+                            
+                        # 并发请求列表里的全部图片数据
+                        tasks = []
+                        for u in img_urls:
+                            # 判断是否已经是完整url，如果不是拼上基础路径
+                            full_img_url = u if u.startswith("http") else f"{self.base_url.removesuffix('/api/v2')}{u}"
+                            tasks.append(session.get(full_img_url))
+                            
+                        responses = await asyncio.gather(*tasks, return_exceptions=True)
+                        imgs_bytes_list = []
+                        for r in responses:
+                            if isinstance(r, aiohttp.ClientResponse) and r.status == 200:
+                                imgs_bytes_list.append(await r.read())
+                        
+                        if imgs_bytes_list:
+                            yield self._send_multiple_images_result(event, imgs_bytes_list)
+                        else:
+                            yield event.plain_result("❌ 下载详细单局战绩图片失败。")
+                    else:
+                        try:
+                            error_data = await resp.json()
+                            err_msg = error_data.get("message", "未知后端服务错误")
+                            yield event.plain_result(f"❌ 获取单局详细失败：{err_msg}")
+                        except:
+                            yield event.plain_result(f"❌ 后端接口响应异常，状态码: {resp.status}")
+        except Exception as e:
+            logger.error(f"单局详细网络请求异常: {e}")
+            yield event.plain_result(f"❌ 请求失败，网络或配置异常: {e}")
+
     @command("历史段位", alias=["历届段位"])
     async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
@@ -490,8 +617,6 @@ class OverstatsPlugin(Star):
                 yield event.plain_result("❌ 获取竞技强度指数失败：未查询到id或者id错误")
             else:
                 yield event.plain_result(f"❌ {err_msg}")
-
-    # --- 功能：英雄云图 ---
 
     @command("快速英雄云图", alias=["快速云图"])
     async def quick_hero_treemap(self, event: AstrMessageEvent, arg1: str = None, arg2: str = None):
@@ -608,10 +733,8 @@ class OverstatsPlugin(Star):
     @command("ow活动", alias=["活动"])
     async def ow_activities(self, event: AstrMessageEvent):
         yield event.plain_result("🎉 正在拉取当前版本限时节日/赛季大活动公告卡片...")
-        # 赛季大活动更新通常包含在 "big" 类型更新日志卡片中
         img_bytes, error_data = await self._fetch_image("/patch-notes/image", {"patch_kind": "big"})
         if not img_bytes:
-            # 自动降级拉取最新综合版本公告
             img_bytes, error_data = await self._fetch_image("/patch-notes/image", {"patch_kind": "latest"})
         
         if img_bytes:
@@ -650,8 +773,6 @@ class OverstatsPlugin(Star):
         else:
             err_msg = error_data.get("message") if error_data else "无法获取精选皮肤卡片。"
             yield event.plain_result(f"❌ {err_msg}")
-
-    # --- 扩展功能扩展 ---
 
     @command("ow更新", alias=["版本更新"])
     async def ow_patch_notes(self, event: AstrMessageEvent, kind: str = None):
