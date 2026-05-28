@@ -18,6 +18,10 @@ class OverstatsPlugin(Star):
         super().__init__(context)
         self.config = config
         self.base_url = self.config.get("overstats_api_url", "http://127.0.0.1:18080/api/v2")
+        
+        # --- 新增：用于动态缓存每个群聊/私聊会话最后一次查询的战网ID ---
+        self.last_match_bnet_id = {}
+        
         try:
             plugin_name = getattr(self, "name", "overstats_full")
             self.plugin_data_dir = Path(get_astrbot_data_path()) / "plugin_data" / plugin_name
@@ -32,6 +36,12 @@ class OverstatsPlugin(Star):
             self.plugin_data_dir = Path(tempfile.gettempdir())
             self.temp_image_dir = self.plugin_data_dir / "temp"
             self.temp_image_dir.mkdir(parents=True, exist_ok=True)
+
+    def _get_session_id(self, event: AstrMessageEvent) -> str:
+        """获取当前事件的唯一会话ID（区分群聊与私聊）"""
+        if event.message_obj and event.message_obj.group_id:
+            return f"g_{event.message_obj.group_id}"
+        return f"u_{event.get_sender_id()}"
 
     async def _get_bnet_id(self, event: AstrMessageEvent, input_id: str = None) -> str:
         if input_id and input_id.strip():
@@ -483,6 +493,12 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield event.plain_result("❌ 请输入战网ID，如：大神对局 Player#12345 或先使用 /绑定 指令")
             return
+            
+        # --- 新增修改：保存当前群组/私聊会话中最后一次成功查询对局的战网ID ---
+        session_id = self._get_session_id(event)
+        self.last_match_bnet_id[session_id] = target_id
+        # -----------------------------------------------------------------
+
         yield event.plain_result(f"📊 正在拉取 {target_id} 的最近对局...")
         img_bytes, error_data = await self._fetch_image("/dashen-match/image", {"bnet_id": target_id})
         if img_bytes:
@@ -517,6 +533,11 @@ class OverstatsPlugin(Star):
             else:  # 如果不是纯数字，那必然是战网 ID
                 bnet_id = arg
 
+        # --- 新增修改：若用户发送快捷指令（仅数字）未包含战网ID，优先读取该会话上次查询过的ID ---
+        if not bnet_id:
+            session_id = self._get_session_id(event)
+            bnet_id = self.last_match_bnet_id.get(session_id)
+        # ---------------------------------------------------------------------------------
 
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
