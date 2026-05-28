@@ -11,7 +11,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.15")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.17")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -31,6 +31,37 @@ class OverstatsPlugin(Star):
         user_id = event.get_sender_id()
         bind_id = await self.get_kv_data(f"bind_{user_id}", None)
         return bind_id
+
+    def _parse_treemap_args(self, arg1: str = None, arg2: str = None) -> tuple[str | None, str | None]:
+        """智能解析云图指令的参数组合"""
+        bnet_id = None
+        season = None
+        
+        if arg1 and arg2:
+            bnet_id = arg1
+            season = arg2
+        elif arg1:
+            if arg1.isdigit():
+                season = arg1
+            else:
+                bnet_id = arg1
+        return bnet_id, season
+
+    def _parse_profile_args(self, arg1: str = None, arg2: str = None) -> tuple[str | None, str]:
+        """智能解析大神数据的参数组合，默认模式为 competitive"""
+        bnet_id = None
+        mode = "competitive"
+        
+        for arg in [arg1, arg2]:
+            if not arg:
+                continue
+            if arg in ["快速", "quick"]:
+                mode = "quick"
+            elif arg in ["竞技", "competitive"]:
+                mode = "competitive"
+            else:
+                bnet_id = arg
+        return bnet_id, mode
 
     async def _fetch_image(self, endpoint: str, payload: dict = None, timeout: int = 600) -> tuple[bytes | None, dict | None]:
         url = f"{self.base_url}{endpoint}"
@@ -171,9 +202,9 @@ class OverstatsPlugin(Star):
             "本周数据": (self.dashen_week, 1),
             "本周": (self.dashen_week, 1),
             
-            "大神数据": (self.dashen_profile, 1),
-            "详情卡片": (self.dashen_profile, 1),
-            "战绩查询": (self.dashen_profile, 1),
+            "大神数据": (self.dashen_profile, 'var'),
+            "详情卡片": (self.dashen_profile, 'var'),
+            "战绩查询": (self.dashen_profile, 'var'),
             
             "大神对局": (self.dashen_match, 1),
             "最近对局": (self.dashen_match, 1),
@@ -189,6 +220,11 @@ class OverstatsPlugin(Star):
             
             "竞技强度": (self.competitive_strength, 1),
             "竞技强度指数": (self.competitive_strength, 1),
+            
+            "快速英雄云图": (self.quick_hero_treemap, 'var'),
+            "快速云图": (self.quick_hero_treemap, 'var'),
+            "竞技英雄云图": (self.competitive_hero_treemap, 'var'),
+            "竞技云图": (self.competitive_hero_treemap, 'var'),
             
             "威能": (self.ow_hero_perk, 1),
             "ow英雄": (self.ow_hero_pick, 1),
@@ -251,6 +287,10 @@ class OverstatsPlugin(Star):
                         async for r in func(event, cmd_args[0], cmd_args[1]): yield r
                     else:
                         yield event.plain_result(f"❌ 【{cmd}】指令需要提供两个参数（例如：同玩查询 ID1 ID2）。")
+                elif arg_count == 'var':
+                    arg1 = cmd_args[0] if len(cmd_args) > 0 else None
+                    arg2 = cmd_args[1] if len(cmd_args) > 1 else None
+                    async for r in func(event, arg1, arg2): yield r
             except Exception as e:
                 logger.error(f"纯文本快捷指令分发执行失败 ({cmd}): {e}")
                 yield event.plain_result(f"❌ 执行指令失败: {str(e)}")
@@ -263,8 +303,9 @@ class OverstatsPlugin(Star):
             "📌 Overstats 查询菜单\n"
             "🔗 ➤ 绑定「战网 ID」\n"
             "📋 ➤ 今日 ➤ 昨日 ➤ 本周\n"
-            "📊 ➤ 大神数据 ➤ 大神对局 ➤ 历史段位\n"
+            "📊 ➤ 大神数据「快速/竞技」 ➤ 大神对局 ➤ 历史段位\n"
             "📈 ➤ 快速强度 ➤ 竞技强度 ➤ 获取段位分布\n"
+            "🗺️ ➤ 快速云图 ➤ 竞技云图 (可选加赛季数字)\n"
             "🏆 ➤ 省榜「省份」「位置」\n"
             "🎖️ ➤ 绝活榜「省份」「英雄」\n"
             "⚔️ ➤ 威能「英雄名」 ➤ ow 英雄「英雄名」\n"
@@ -351,13 +392,14 @@ class OverstatsPlugin(Star):
                 yield event.plain_result(f"❌ {err_msg}")
 
     @command("大神数据", alias=["详情卡片", "战绩查询"])
-    async def dashen_profile(self, event: AstrMessageEvent, bnet_id: str = None):
+    async def dashen_profile(self, event: AstrMessageEvent, arg1: str = None, arg2: str = None):
+        bnet_id, mode = self._parse_profile_args(arg1, arg2)
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
             yield event.plain_result("❌ 请输入战网ID，如：大神数据 Player#12345 或先使用 /绑定 指令")
             return
         yield event.plain_result(f"🔍 正在生成 {target_id} 的玩家详情...")
-        img_bytes, error_data = await self._fetch_image("/dashen-profile/image", {"bnet_id": target_id})
+        img_bytes, error_data = await self._fetch_image("/dashen-profile/image", {"bnet_id": target_id, "mode": mode})
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
@@ -446,6 +488,62 @@ class OverstatsPlugin(Star):
             err_msg = error_data.get("message") if error_data else "获取竞技强度指数失败。"
             if err_msg and "Could not resolve customerToken" in err_msg:
                 yield event.plain_result("❌ 获取竞技强度指数失败：未查询到id或者id错误")
+            else:
+                yield event.plain_result(f"❌ {err_msg}")
+
+    # --- 功能：英雄云图 ---
+
+    @command("快速英雄云图", alias=["快速云图"])
+    async def quick_hero_treemap(self, event: AstrMessageEvent, arg1: str = None, arg2: str = None):
+        bnet_id, season = self._parse_treemap_args(arg1, arg2)
+        target_id = await self._get_bnet_id(event, bnet_id)
+        if not target_id:
+            yield event.plain_result("❌ 请输入战网ID，如：快速英雄云图 Player#12345 或先使用 /绑定 指令")
+            return
+        
+        yield event.plain_result(f"📊 正在获取 {target_id} 的快速模式英雄云图...")
+        payload = {
+            "bnet_id": target_id,
+            "mode": "quick",
+            "include_previous_season": True
+        }
+        if season:
+            payload["season"] = str(season)
+            
+        img_bytes, error_data = await self._fetch_image("/dashen-hero-treemap/image", payload)
+        if img_bytes:
+            yield self._send_image_result(event, img_bytes)
+        else:
+            err_msg = error_data.get("message") if error_data else "获取快速英雄云图失败。"
+            if err_msg and "Could not resolve customerToken" in err_msg:
+                yield event.plain_result("❌ 获取快速英雄云图失败：未查询到id或者id错误")
+            else:
+                yield event.plain_result(f"❌ {err_msg}")
+
+    @command("竞技英雄云图", alias=["竞技云图"])
+    async def competitive_hero_treemap(self, event: AstrMessageEvent, arg1: str = None, arg2: str = None):
+        bnet_id, season = self._parse_treemap_args(arg1, arg2)
+        target_id = await self._get_bnet_id(event, bnet_id)
+        if not target_id:
+            yield event.plain_result("❌ 请输入战网ID，如：竞技英雄云图 Player#12345 或先使用 /绑定 指令")
+            return
+        
+        yield event.plain_result(f"🏆 正在获取 {target_id} 的竞技模式英雄云图...")
+        payload = {
+            "bnet_id": target_id,
+            "mode": "competitive",
+            "include_previous_season": True
+        }
+        if season:
+            payload["season"] = str(season)
+            
+        img_bytes, error_data = await self._fetch_image("/dashen-hero-treemap/image", payload)
+        if img_bytes:
+            yield self._send_image_result(event, img_bytes)
+        else:
+            err_msg = error_data.get("message") if error_data else "获取竞技英雄云图失败。"
+            if err_msg and "Could not resolve customerToken" in err_msg:
+                yield event.plain_result("❌ 获取竞技英雄云图失败：未查询到id或者id错误")
             else:
                 yield event.plain_result(f"❌ {err_msg}")
 
@@ -553,7 +651,7 @@ class OverstatsPlugin(Star):
             err_msg = error_data.get("message") if error_data else "无法获取精选皮肤卡片。"
             yield event.plain_result(f"❌ {err_msg}")
 
-    # --- 以下为新增扩展功能实现 ---
+    # --- 扩展功能扩展 ---
 
     @command("ow更新", alias=["版本更新"])
     async def ow_patch_notes(self, event: AstrMessageEvent, kind: str = None):
@@ -574,7 +672,7 @@ class OverstatsPlugin(Star):
     @command("省榜", alias=["排行"])
     async def ow_rank_leaderboard(self, event: AstrMessageEvent, province: str, role: str):
         if not province or not role:
-            yield event.plain_result("❌ 请输入省份名称和职责位置，例如：/省榜 北京 tank\n(支持的位置: tank / dps / healer / open)")
+            yield event.plain_result("❌ 请输入省份名称 and 职责位置，例如：/省榜 北京 tank\n(支持的位置: tank / dps / healer / open)")
             return
             
         yield event.plain_result(f"🏆 正在获取 {province} 地区 【{role}】 位置的大神天梯省榜...")
