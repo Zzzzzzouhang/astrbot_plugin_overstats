@@ -210,10 +210,13 @@ class OverstatsPlugin(Star):
         # 2. 在 clean_msg 中搜索该模式
         match = re.search(bnet_id_pattern, clean_msg)
         
-        # 3. 判定逻辑：
-        # 如果匹配到了ID，且消息中包含“绑定”字样，或者消息本身就是纯ID，则视为绑定指令
         if match and ("绑定" in clean_msg or re.fullmatch(bnet_id_pattern, clean_msg)):
             new_bind_id = match.group(1)
+            
+            # 【新增修复】如果提取的 ID 开头包含了“绑定”，将其删除
+            if new_bind_id.startswith("绑定"):
+                new_bind_id = new_bind_id[2:]
+                
             user_id = event.get_sender_id()
             old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
             
