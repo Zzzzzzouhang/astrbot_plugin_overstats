@@ -85,7 +85,7 @@ class OverstatsPlugin(Star):
             logger.error(f"构建图片消息链时发生严重错误: {e}")
             return event.plain_result(f"❌ 机器人构建图片组件失败: {e}")
 
-# 智能全局事件拦截器
+    # 智能全局事件拦截器
     @event_message_type(EventMessageType.ALL)
     async def intercept_text_at(self, event: AstrMessageEvent):
         msg = event.message_str
@@ -95,7 +95,7 @@ class OverstatsPlugin(Star):
         is_at_me = False
         clean_msg = msg.strip()
         
-        # 1. 检查底层组件是否真的艾特了本机器人
+        # 1. 检查平台底层组件是否真的艾特了本机器人
         if event.message_obj and event.message_obj.message:
             for comp in event.message_obj.message:
                 if comp.__class__.__name__ == "At":
@@ -106,23 +106,34 @@ class OverstatsPlugin(Star):
                 if is_at_me:
                     break
         
-        # 2. 修复误触的核心逻辑
-        if clean_msg.startswith("@"):
+        # 2. 检查是否包含纯文本开头的 “@电子路灯”
+        is_text_at_lampion = False
+        if clean_msg.startswith("@电子路灯"):
+            is_text_at_lampion = True
+            # 剥离纯文本前缀，提取后面的指令
+            clean_msg = clean_msg[len("@电子路灯"):].strip()
+        
+        # 3. 如果是真正的 At 组件触发，提取出 @ 之后的纯净指令文本
+        if is_at_me and clean_msg.startswith("@"):
             match_at_text = re.match(r'^@\S+\s+(.*)$', clean_msg)
             if match_at_text:
-                if not is_at_me:
-                    # 如果文本以 @ 开头，但底层的 At 组件不是 @ 自己
-                    # 说明是在艾特其他用户或机器人（比如 @HesosIA），直接略过
-                    return
-                else:
-                    # 如果确实是艾特了自己，提取出 @ 之后的纯净指令文本
-                    clean_msg = match_at_text.group(1).strip()
+                clean_msg = match_at_text.group(1).strip()
+            else:
+                clean_msg = re.sub(r'^@\S+', '', clean_msg).strip()
         
+        # 允许私聊直接触发（不需要艾特）
         is_private = event.message_obj and not event.message_obj.group_id
-        is_triggered = is_at_me or is_private
         
+        # 核心触发判定：必须满足【真艾特】或【纯文本@电子路灯】或【私聊】
+        is_triggered = is_at_me or is_text_at_lampion or is_private
+        
+        # 如果均不满足，直接拦截并跳过，不再向下匹配指令
+        if not is_triggered:
+            return
+        
+        # 自动关联战网账号逻辑
         bnet_pattern = r'^[\w\u4e00-\u9fa5\-\_\.]+#\d+$'
-        if is_triggered and re.match(bnet_pattern, clean_msg):
+        if re.match(bnet_pattern, clean_msg):
             user_id = event.get_sender_id()
             old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
             new_bind_id = clean_msg
@@ -199,12 +210,8 @@ class OverstatsPlugin(Star):
             "mappick": (self.map_pick_stats, 0),
             "皮肤搜索": (self.skin_search, 1)
         }
-        
-        if not is_triggered and not clean_msg.startswith('/'):
-            has_keyword = any(clean_msg.startswith(k) for k in cmd_map.keys())
-            if not has_keyword:
-                return
 
+        # 清洗可能存在的斜杠前缀
         clean_msg = clean_msg.lstrip('/')
         
         cmd = None
@@ -295,7 +302,6 @@ class OverstatsPlugin(Star):
                 yield result
         else:
             err_msg = error_data.get("message", "未知错误") if error_data else "未知错误"
-            # 判断如果是后端未能正确解析 token 的底层报错，转换为前端友好的提示
             if "Could not resolve customerToken" in err_msg:
                 yield event.plain_result("❌ 获取今日总结失败：未查询到id或者id错误")
             else:
