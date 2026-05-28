@@ -248,15 +248,18 @@ class OverstatsPlugin(Star):
             
             event.stop_event()
 
-    @command("owhelp", alias=["ow菜单", "ow帮助", "OW帮助", "ow菜单"])
+    @command("owhelp", alias=["ow菜单", "ow帮助", "OW帮助"])
     async def ow_help(self, event: AstrMessageEvent):
         help_text = (
-            "✦Overstats 查询菜单\n"
-            "账号关联：/绑定 [战网ID] ｜ @机器人 [战网ID]\n"
-            "个人战绩：/今日 ｜ /昨日 ｜ /本周 ｜ /大神数据 ｜ /大神对局 ｜ /历史段位\n"
-            "强度评估：/快速强度 ｜ /竞技强度\n"
-            "英雄数据：/威能 [英雄名] ｜ /ow英雄 [英雄名] ｜ /banpick\n"
-            "综合查询：/同玩查询 [ID1] [ID2] ｜ /商店 ｜ /ow赛事 ｜ /ow活动\n"
+            "📌 Overstats 查询菜单\n"
+            "🔗 ➤ 绑定「战网 ID」\n"
+            "   ➤ @机器人「战网 ID」\n"
+            "📋 ➤ 今日     ➤ 昨日     ➤ 本周\n"
+            "📊 ➤ 大神数据 ➤ 大神对局 ➤ 历史段位\n"
+            "📈 ➤ 快速强度 ➤ 竞技强度\n"
+            "⚔️ ➤ 威能「英雄名」   ➤ ow 英雄「英雄名」   ➤ banpick\n"
+            "🌍 ➤ 同玩查询「ID1」「ID2」   ➤ 商店   ➤ ow 赛事   ➤ ow 活动\n"
+            "💡 提示：个人战绩与强度类指令后加战网 ID 可查他人，省略则默认查绑定账号。"
         )
         yield event.plain_result(help_text)
 
