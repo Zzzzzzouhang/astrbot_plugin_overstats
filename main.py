@@ -499,7 +499,7 @@ class OverstatsPlugin(Star):
             
         yield event.plain_result(f"⏳ 正在拉取 {target_id} 第 {index + 1} 局的单局多图详细战绩...")
         
-        # 封装并发请求，一并获取所有可能发送的详情图
+        # 封装请求参数
         payload = {
             "bnet_id": target_id,
             "index": str(index),
@@ -518,41 +518,52 @@ class OverstatsPlugin(Star):
                 async with session.post(url, json=payload) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        # 从返回的 json 列表中拿到对应的图片名或直连链接
-                        # 这里我们并发请求后台详情多图内容
                         img_urls = data.get("replies", [])
                         if not img_urls:
                             yield event.plain_result("❌ 未能生成该单局的详细图片链接")
                             return
                             
-                        # 并发请求列表里的全部图片数据
-                        tasks = []
-                        for u in img_urls:
-                            # 判断是否已经是完整url，如果不是拼上基础路径
-                            full_img_url = u if u.startswith("http") else f"{self.base_url.removesuffix('/api/v2')}{u}"
-                            tasks.append(session.get(full_img_url))
-                            
-                        responses = await asyncio.gather(*tasks, return_exceptions=True)
-                        imgs_bytes_list = []
-                        for r in responses:
-                            if isinstance(r, aiohttp.ClientResponse) and r.status == 200:
-                                imgs_bytes_list.append(await r.read())
+                        # 导入 AstrBot 富媒体组件
+                        import astrbot.api.message_components as Comp
                         
-                        if imgs_bytes_list:
-                            yield self._send_multiple_images_result(event, imgs_bytes_list)
+                        # 初始化消息链，可以先加个文本抬头
+                        chain = [Comp.Plain(f"📊 {target_id} 第 {index + 1} 局详细战绩面板：\n")]
+                        
+                        # 遍历并解析后端返回的图片数据
+                        for u in img_urls:
+                            # 🎯 修复修复 'dict' object has no attribute 'startswith' 报错
+                            # 如果后端返回的是字典，提取其中的 url 字符串；如果是串则直接用
+                            if isinstance(u, dict):
+                                img_str = u.get("url", "")  # ⚠️ 这里的 "url" 请根据后端实际 key 修改（如 "image"/"src"）
+                            else:
+                                img_str = str(u)
+                                
+                            if not img_str:
+                                continue
+                                
+                            # 拼接完整 URL 路径
+                            full_img_url = img_str if img_str.startswith("http") else f"{self.base_url.removesuffix('/api/v2')}{img_str}"
+                            
+                            # 🎯 遵循新文档：直接使用统一的从 URL 发送图片组件
+                            chain.append(Comp.Image.fromURL(full_img_url))
+                        
+                        # 发送构建好的富媒体消息链
+                        if len(chain) > 1:  # 说明除了抬头文本外，成功添加了图片组件
+                            yield event.chain_result(chain)
                         else:
-                            yield event.plain_result("❌ 下载详细单局战绩图片失败。")
+                            yield event.plain_result("❌ 未能提取到有效的战绩图片地址。")
+                            
                     else:
                         try:
                             error_data = await resp.json()
-                            err_msg = error_data.get("message", "未知后端服务错误")
+                            err_msg = error_data.get("message", "未知后端 service 错误")
                             yield event.plain_result(f"❌ 获取单局详细失败：{err_msg}")
                         except:
                             yield event.plain_result(f"❌ 后端接口响应异常，状态码: {resp.status}")
         except Exception as e:
             logger.error(f"单局详细网络请求异常: {e}")
             yield event.plain_result(f"❌ 请求失败，网络或配置异常: {e}")
-
+            
     @command("历史段位", alias=["历届段位"])
     async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
