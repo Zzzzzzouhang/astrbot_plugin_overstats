@@ -70,7 +70,15 @@ class OverstatsPlugin(Star):
             with tempfile.NamedTemporaryFile(dir=str(self.plugin_data_dir), delete=False, suffix=".png") as f:
                 f.write(img_bytes)
                 temp_file_path = f.name
-            chain = [Comp.Image.fromFileSystem(temp_file_path)]
+            
+            # 获取指令发送者的 ID，并在图片前加上 At 组件和换行
+            user_id = event.get_sender_id()
+            chain = [
+                Comp.At(user_id=user_id),
+                Comp.Plain("\n"),
+                Comp.Image.fromFileSystem(temp_file_path)
+            ]
+            
             asyncio.create_task(self._delayed_remove(temp_file_path, 1800))
             return event.chain_result(chain)
         except Exception as e:
@@ -91,7 +99,6 @@ class OverstatsPlugin(Star):
         if event.message_obj and event.message_obj.message:
             for comp in event.message_obj.message:
                 if comp.__class__.__name__ == "At":
-                    # 遍历可能存在的属性名（如 qq, user_id, target 等），匹配当前机器人ID
                     for attr in ['qq', 'user_id', 'id', 'target', 'self_id']:
                         if hasattr(comp, attr) and str(getattr(comp, attr)) == str(event.message_obj.self_id):
                             is_at_me = True
@@ -99,14 +106,14 @@ class OverstatsPlugin(Star):
                 if is_at_me:
                     break
             
-        # 2. 备用兼容：如果是纯文本类型的 "@机器人" 开头（处理某些平台适配器未转化为 At 组件的情况）
+        # 2. 备用兼容：如果是纯文本类型的 "@机器人" 开头
         if not is_at_me and clean_msg.startswith("@"):
             match_at_text = re.match(r'^@\S+\s+(.*)$', clean_msg)
             if match_at_text:
                 is_at_me = True
                 clean_msg = match_at_text.group(1).strip()
         
-        # 判断是否为私聊环境（私聊本身自带触发性质，群聊则需要被 At）
+        # 判断是否为私聊环境
         is_private = event.message_obj and not event.message_obj.group_id
         is_triggered = is_at_me or is_private
         
@@ -360,7 +367,7 @@ class OverstatsPlugin(Star):
             err_msg = error_data.get("message") if error_data else "获取快速强度指数失败。"
             yield event.plain_result(f"❌ {err_msg}")
 
-    @command("競技强度指数", alias=["竞技强度"])
+    @command("竞技强度指数", alias=["竞技强度"])
     async def competitive_strength(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
