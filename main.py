@@ -85,7 +85,7 @@ class OverstatsPlugin(Star):
             logger.error(f"构建图片消息链时发生严重错误: {e}")
             return event.plain_result(f"❌ 机器人构建图片组件失败: {e}")
 
-    # 智能全局事件拦截器
+# 智能全局事件拦截器
     @event_message_type(EventMessageType.ALL)
     async def intercept_text_at(self, event: AstrMessageEvent):
         msg = event.message_str
@@ -95,6 +95,7 @@ class OverstatsPlugin(Star):
         is_at_me = False
         clean_msg = msg.strip()
         
+        # 1. 检查底层组件是否真的艾特了本机器人
         if event.message_obj and event.message_obj.message:
             for comp in event.message_obj.message:
                 if comp.__class__.__name__ == "At":
@@ -104,12 +105,18 @@ class OverstatsPlugin(Star):
                             break
                 if is_at_me:
                     break
-            
-        if not is_at_me and clean_msg.startswith("@"):
+        
+        # 2. 修复误触的核心逻辑
+        if clean_msg.startswith("@"):
             match_at_text = re.match(r'^@\S+\s+(.*)$', clean_msg)
             if match_at_text:
-                is_at_me = True
-                clean_msg = match_at_text.group(1).strip()
+                if not is_at_me:
+                    # 如果文本以 @ 开头，但底层的 At 组件不是 @ 自己
+                    # 说明是在艾特其他用户或机器人（比如 @HesosIA），直接略过
+                    return
+                else:
+                    # 如果确实是艾特了自己，提取出 @ 之后的纯净指令文本
+                    clean_msg = match_at_text.group(1).strip()
         
         is_private = event.message_obj and not event.message_obj.group_id
         is_triggered = is_at_me or is_private
