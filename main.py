@@ -71,17 +71,14 @@ class OverstatsPlugin(Star):
                 f.write(img_bytes)
                 temp_file_path = f.name
             
-            # 获取指令发送者的 ID
             user_id = event.get_sender_id()
             
-            # 修复了 At 组件报错问题，由 user_id= 改为 qq=
             chain = [
                 Comp.At(qq=user_id),
                 Comp.Plain("\n"),
                 Comp.Image.fromFileSystem(temp_file_path)
             ]
             
-            # 清理图片时间为30分钟 (1800秒)
             asyncio.create_task(self._delayed_remove(temp_file_path, 1800))
             return event.chain_result(chain)
         except Exception as e:
@@ -98,7 +95,6 @@ class OverstatsPlugin(Star):
         is_at_me = False
         clean_msg = msg.strip()
         
-        # 1. 解析消息链中的真实 At 组件 (动态匹配当前机器人的 self_id)
         if event.message_obj and event.message_obj.message:
             for comp in event.message_obj.message:
                 if comp.__class__.__name__ == "At":
@@ -109,18 +105,15 @@ class OverstatsPlugin(Star):
                 if is_at_me:
                     break
             
-        # 2. 备用兼容：如果是纯文本类型的 "@机器人" 开头
         if not is_at_me and clean_msg.startswith("@"):
             match_at_text = re.match(r'^@\S+\s+(.*)$', clean_msg)
             if match_at_text:
                 is_at_me = True
                 clean_msg = match_at_text.group(1).strip()
         
-        # 判断是否为私聊环境
         is_private = event.message_obj and not event.message_obj.group_id
         is_triggered = is_at_me or is_private
         
-        # 3. 核心功能：当明确艾特了机器人（或私聊）且剩余纯文本为标准战网ID时，执行快捷绑定
         bnet_pattern = r'^[\w\u4e00-\u9fa5\-\_\.]+#\d+$'
         if is_triggered and re.match(bnet_pattern, clean_msg):
             user_id = event.get_sender_id()
@@ -136,7 +129,6 @@ class OverstatsPlugin(Star):
             event.stop_event()
             return
         
-        # 指令路由字典 (已全面同步下方各指令的所有原生名及 alias 别名)
         cmd_map = {
             "owhelp": (self.ow_help, 0),
             "ow帮助": (self.ow_help, 0),
@@ -201,19 +193,16 @@ class OverstatsPlugin(Star):
             "皮肤搜索": (self.skin_search, 1)
         }
         
-        # 如果既没有被艾特、也不是私聊、也没有以 / 开头，则过滤掉非指令文本
         if not is_triggered and not clean_msg.startswith('/'):
             has_keyword = any(clean_msg.startswith(k) for k in cmd_map.keys())
             if not has_keyword:
                 return
 
-        # 剥离可能存在的开头斜杠
         clean_msg = clean_msg.lstrip('/')
         
         cmd = None
         cmd_args = []
         
-        # 优先使用完整的公共前缀匹配（按长度从大到小排序，防止“今日”误拦截“今日数据”）
         for k in sorted(cmd_map.keys(), key=len, reverse=True):
             if clean_msg.startswith(k):
                 cmd = k
@@ -221,14 +210,12 @@ class OverstatsPlugin(Star):
                 cmd_args = remain.split() if remain else []
                 break
                 
-        # 如果未能通过前缀法分切出来，再退回使用原有的空格分切法
         if not cmd:
             parts = clean_msg.split(maxsplit=1)
             if parts and parts[0] in cmd_map:
                 cmd = parts[0]
                 cmd_args = parts[1].split() if len(parts) > 1 else []
         
-        # 执行指令分发
         if cmd in cmd_map:
             func, arg_count = cmd_map[cmd]
             try:
@@ -300,8 +287,12 @@ class OverstatsPlugin(Star):
             async for result in self.dashen_yesterday(event, target_id):
                 yield result
         else:
-            err_msg = error_data.get("message") if error_data else "未知错误"
-            yield event.plain_result(f"❌ 获取今日总结失败：{err_msg}")
+            err_msg = error_data.get("message", "未知错误") if error_data else "未知错误"
+            # 判断如果是后端未能正确解析 token 的底层报错，转换为前端友好的提示
+            if "Could not resolve customerToken" in err_msg:
+                yield event.plain_result("❌ 获取今日总结失败：未查询到id或者id错误")
+            else:
+                yield event.plain_result(f"❌ 获取今日总结失败：{err_msg}")
 
     @command("昨日总结", alias=["昨日", "昨日数据", "昨天数据", "昨天"])
     async def dashen_yesterday(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -315,7 +306,10 @@ class OverstatsPlugin(Star):
             yield self._send_image_result(event, img_bytes)
         else:
             err_msg = error_data.get("message") if error_data else "获取昨日总结失败，可能昨日未登录游戏。"
-            yield event.plain_result(f"❌ {err_msg}")
+            if err_msg and "Could not resolve customerToken" in err_msg:
+                yield event.plain_result("❌ 获取昨日总结失败：未查询到id或者id错误")
+            else:
+                yield event.plain_result(f"❌ {err_msg}")
 
     @command("周度总结", alias=["本周总结", "本周数据", "本周"])
     async def dashen_week(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -329,7 +323,10 @@ class OverstatsPlugin(Star):
             yield self._send_image_result(event, img_bytes)
         else:
             err_msg = error_data.get("message") if error_data else "获取周度总结失败，请检查服务日志或是否请求超时。"
-            yield event.plain_result(f"❌ {err_msg}")
+            if err_msg and "Could not resolve customerToken" in err_msg:
+                yield event.plain_result("❌ 获取周度总结失败：未查询到id或者id错误")
+            else:
+                yield event.plain_result(f"❌ {err_msg}")
 
     @command("大神数据", alias=["详情卡片", "战绩查询"])
     async def dashen_profile(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -343,7 +340,10 @@ class OverstatsPlugin(Star):
             yield self._send_image_result(event, img_bytes)
         else:
             err_msg = error_data.get("message") if error_data else "获取玩家详情卡片失败。"
-            yield event.plain_result(f"❌ {err_msg}")
+            if err_msg and "Could not resolve customerToken" in err_msg:
+                yield event.plain_result("❌ 获取玩家详情失败：未查询到id或者id错误")
+            else:
+                yield event.plain_result(f"❌ {err_msg}")
 
     @command("大神对局", alias=["最近对局"])
     async def dashen_match(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -357,7 +357,10 @@ class OverstatsPlugin(Star):
             yield self._send_image_result(event, img_bytes)
         else:
             err_msg = error_data.get("message") if error_data else "获取最近对局列表失败。"
-            yield event.plain_result(f"❌ {err_msg}")
+            if err_msg and "Could not resolve customerToken" in err_msg:
+                yield event.plain_result("❌ 获取最近对局失败：未查询到id或者id错误")
+            else:
+                yield event.plain_result(f"❌ {err_msg}")
 
     @command("历史段位", alias=["历届段位"])
     async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -371,7 +374,10 @@ class OverstatsPlugin(Star):
             yield self._send_image_result(event, img_bytes)
         else:
             err_msg = error_data.get("message") if error_data else "获取历史段位失败。"
-            yield event.plain_result(f"❌ {err_msg}")
+            if err_msg and "Could not resolve customerToken" in err_msg:
+                yield event.plain_result("❌ 获取历史段位失败：未查询到id或者id错误")
+            else:
+                yield event.plain_result(f"❌ {err_msg}")
 
     @command("同玩查询", alias=["开黑胜率"])
     async def dashen_sameplay(self, event: AstrMessageEvent, p1: str, p2: str):
@@ -382,7 +388,10 @@ class OverstatsPlugin(Star):
             yield self._send_image_result(event, img_bytes)
         else:
             err_msg = error_data.get("message") if error_data else "无法获取同玩查询数据，请检查两个ID是否输入正确。"
-            yield event.plain_result(f"❌ {err_msg}")
+            if err_msg and "Could not resolve customerToken" in err_msg:
+                yield event.plain_result("❌ 同玩查询失败：未查询到id或者id错误")
+            else:
+                yield event.plain_result(f"❌ {err_msg}")
 
     @command("快速强度", alias=["快速强度指数"])
     async def quick_strength(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -396,7 +405,10 @@ class OverstatsPlugin(Star):
             yield self._send_image_result(event, img_bytes)
         else:
             err_msg = error_data.get("message") if error_data else "获取快速强度指数失败。"
-            yield event.plain_result(f"❌ {err_msg}")
+            if err_msg and "Could not resolve customerToken" in err_msg:
+                yield event.plain_result("❌ 获取快速强度指数失败：未查询到id或者id错误")
+            else:
+                yield event.plain_result(f"❌ {err_msg}")
 
     @command("竞技强度", alias=["竞技强度指数"])
     async def competitive_strength(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -410,7 +422,10 @@ class OverstatsPlugin(Star):
             yield self._send_image_result(event, img_bytes)
         else:
             err_msg = error_data.get("message") if error_data else "获取竞技强度指数失败。"
-            yield event.plain_result(f"❌ {err_msg}")
+            if err_msg and "Could not resolve customerToken" in err_msg:
+                yield event.plain_result("❌ 获取竞技强度指数失败：未查询到id或者id错误")
+            else:
+                yield event.plain_result(f"❌ {err_msg}")
 
     @command("威能")
     async def ow_hero_perk(self, event: AstrMessageEvent, hero_name: str):
