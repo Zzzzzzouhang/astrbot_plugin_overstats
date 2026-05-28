@@ -287,7 +287,7 @@ class OverstatsPlugin(Star):
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：今日总结 Player#12345 或先使用 /绑定 指令")
             return
         
         yield event.plain_result(f"⏳ 正在计算 {target_id} 的今日战绩总结...")
@@ -307,7 +307,7 @@ class OverstatsPlugin(Star):
     async def dashen_yesterday(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：昨日总结 Player#12345 或先使用 /绑定 指令")
             return
         yield event.plain_result(f"⏳ 正在统计 {target_id} 的昨日战绩数据...")
         img_bytes, error_data = await self._fetch_image("/dashen-summary/yesterday/image", {"bnet_id": target_id})
@@ -321,7 +321,7 @@ class OverstatsPlugin(Star):
     async def dashen_week(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：周度总结 Player#12345 或先使用 /绑定 指令")
             return
         yield event.plain_result(f"📊 正在生成 {target_id} 的本周战绩大数据总结，耗时较长（约30-60秒），请稍候...")
         img_bytes, error_data = await self._fetch_image("/dashen-summary/week/image", {"bnet_id": target_id}, timeout=900)
@@ -335,7 +335,7 @@ class OverstatsPlugin(Star):
     async def dashen_profile(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：大神数据 Player#12345 或先使用 /绑定 指令")
             return
         yield event.plain_result(f"🔍 正在生成 {target_id} 的玩家详情...")
         img_bytes, error_data = await self._fetch_image("/dashen-profile/image", {"bnet_id": target_id})
@@ -349,7 +349,7 @@ class OverstatsPlugin(Star):
     async def dashen_match(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：大神对局 Player#12345 或先使用 /绑定 指令")
             return
         yield event.plain_result(f"📊 正在拉取 {target_id} 的最近对局...")
         img_bytes, error_data = await self._fetch_image("/dashen-match/image", {"bnet_id": target_id})
@@ -363,7 +363,7 @@ class OverstatsPlugin(Star):
     async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：历史段位 Player#12345 或先使用 /绑定 指令")
             return
         yield event.plain_result(f"📜 正在追溯 {target_id} 的历史段位记录...")
         img_bytes, error_data = await self._fetch_image("/dashen-rank-history/image", {"bnet_id": target_id})
@@ -388,7 +388,7 @@ class OverstatsPlugin(Star):
     async def quick_strength(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：快速强度 Player#12345 或先使用 /绑定 指令")
             return
         yield event.plain_result(f"⚡ 正在评估 {target_id} 的快速强度指数...")
         img_bytes, error_data = await self._fetch_image("/dashen-quick-strength/image", {"bnet_id": target_id})
@@ -402,7 +402,7 @@ class OverstatsPlugin(Star):
     async def competitive_strength(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：竞技强度 Player#12345 或先使用 /绑定 指令")
             return
         yield event.plain_result(f"🏆 正在评估 {target_id} 的竞技天梯强度指数...")
         img_bytes, error_data = await self._fetch_image("/dashen-competitive-strength/image", {"bnet_id": target_id})
