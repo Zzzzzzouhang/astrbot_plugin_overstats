@@ -21,9 +21,16 @@ class OverstatsPlugin(Star):
             plugin_name = getattr(self, "name", "overstats_full")
             self.plugin_data_dir = Path(get_astrbot_data_path()) / "plugin_data" / plugin_name
             self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
+            
+            # --- 新增：专属临时图片存放目录 ---
+            self.temp_image_dir = self.plugin_data_dir / "temp"
+            self.temp_image_dir.mkdir(parents=True, exist_ok=True)
+            
         except Exception as e:
             logger.warning(f"初始化插件专属数据目录失败: {e}")
             self.plugin_data_dir = Path(tempfile.gettempdir())
+            self.temp_image_dir = self.plugin_data_dir / "temp"
+            self.temp_image_dir.mkdir(parents=True, exist_ok=True)
 
     async def _get_bnet_id(self, event: AstrMessageEvent, input_id: str = None) -> str:
         if input_id and input_id.strip():
@@ -90,46 +97,62 @@ class OverstatsPlugin(Star):
                 os.remove(path)
                 logger.debug(f"临时战绩图片已成功自动清理: {path}")
             except Exception as e:
-                warning(f"自动清理临时战绩图片失败: {e}")
+                logger.warning(f"自动清理临时战绩图片失败: {e}")
 
     async def _delayed_remove(self, path: str, delay: int):
         await asyncio.sleep(delay)
         self._safe_remove(path)
 
-    def _send_image_result(self, event: AstrMessageEvent, img_bytes: bytes):
+    def _send_image_result(self, event: AstrMessageEvent, img_bytes: bytes, fallback_text: str = ""):
+        """单图发送组件，采用 hash 命名和独立目录"""
+        if not img_bytes:
+            if fallback_text:
+                return event.plain_result(fallback_text)
+            return event.plain_result("❌ 图片生成失败，且未提供备用文本。")
+
         try:
-            with tempfile.NamedTemporaryFile(dir=str(self.plugin_data_dir), delete=False, suffix=".png") as f:
-                f.write(img_bytes)
-                temp_file_path = f.name
+            # 确保目录存在
+            self.temp_image_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 使用内容 hash 作为文件名，避免重复和临时文件堆积
+            img_hash = abs(hash(img_bytes))
+            img_path = self.temp_image_dir / f"{img_hash}.png"
+            img_path.write_bytes(img_bytes)
             
             user_id = event.get_sender_id()
             
             chain = [
                 Comp.At(qq=user_id),
-                Comp.Plain("\n"),
-                Comp.Image.fromFileSystem(temp_file_path)
+                Comp.Plain("\n" if not fallback_text else f"\n{fallback_text}\n"),
+                Comp.Image.fromFileSystem(str(img_path))
             ]
             
-            asyncio.create_task(self._delayed_remove(temp_file_path, 1800))
+            # 延迟 30 分钟清理
+            asyncio.create_task(self._delayed_remove(str(img_path), 1800))
             return event.chain_result(chain)
         except Exception as e:
             logger.error(f"构建图片消息链时发生严重错误: {e}")
+            if fallback_text:
+                return event.plain_result(fallback_text)
             return event.plain_result(f"❌ 机器人构建图片组件失败: {e}")
 
     def _send_multiple_images_result(self, event: AstrMessageEvent, imgs_list: list[bytes]):
-        """多张图片一起发送的组件"""
+        """多图发送组件，采用 hash 命名和独立目录"""
         try:
+            self.temp_image_dir.mkdir(parents=True, exist_ok=True)
             user_id = event.get_sender_id()
             chain = [Comp.At(qq=user_id), Comp.Plain("\n")]
             
             for img_bytes in imgs_list:
                 if not img_bytes:
                     continue
-                with tempfile.NamedTemporaryFile(dir=str(self.plugin_data_dir), delete=False, suffix=".png") as f:
-                    f.write(img_bytes)
-                    temp_file_path = f.name
-                chain.append(Comp.Image.fromFileSystem(temp_file_path))
-                asyncio.create_task(self._delayed_remove(temp_file_path, 1800))
+                
+                img_hash = abs(hash(img_bytes))
+                img_path = self.temp_image_dir / f"{img_hash}.png"
+                img_path.write_bytes(img_bytes)
+                
+                chain.append(Comp.Image.fromFileSystem(str(img_path)))
+                asyncio.create_task(self._delayed_remove(str(img_path), 1800))
                 
             return event.chain_result(chain)
         except Exception as e:
@@ -462,8 +485,6 @@ class OverstatsPlugin(Star):
             else:
                 yield event.plain_result(f"❌ {err_msg}")
 
-    # --- 新增扩展功能：单局详细 ---
-# --- 新增扩展功能：单局详细 ---
     @command("单局详细", alias=["单局"])
     async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = None, arg2: str = None):
         """
