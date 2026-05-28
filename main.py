@@ -4,6 +4,7 @@ import logging
 import tempfile
 import asyncio
 import re
+import base64
 from pathlib import Path
 from astrbot.api.all import *
 import astrbot.api.message_components as Comp
@@ -226,16 +227,14 @@ class OverstatsPlugin(Star):
             if num_match:
                 digit = int(num_match.group())
                 if digit < 0:
-                    index = 0
+                    digit = 0
                 elif digit > 20:
                     yield event.plain_result("❌ 错误：单局详细的数字索引不能大于 20！")
                     event.stop_event()
                     return
-                else:
-                    index = max(0, digit - 1)
                 
-                # 路由到单局详细处理
-                async for r in self.dashen_match_detail(event, str(index)):
+                # 路由到单局详细处理 (此处修改：直接传入原始数字，不再减 1)
+                async for r in self.dashen_match_detail(event, str(digit)):
                     yield r
                 event.stop_event()
                 return
@@ -360,6 +359,7 @@ class OverstatsPlugin(Star):
             
             event.stop_event()
 
+    # ... (后续所有函数逻辑保持不变，因为它们都已经正确处理了减 1 逻辑)
     @command("owhelp", alias=["ow菜单", "ow帮助", "OW帮助"])
     async def ow_help(self, event: AstrMessageEvent):
         help_text = (
@@ -503,6 +503,7 @@ class OverstatsPlugin(Star):
                 if digit > 20:
                     yield event.plain_result("❌ 错误：单局详细的数字索引不能大于 20！")
                     return
+                # 这里进行了 1-based 到 0-based 的转换
                 index = max(0, digit - 1) if digit > 0 else 0
                 bnet_id = arg2
             else:
@@ -621,6 +622,7 @@ class OverstatsPlugin(Star):
         except Exception as e:
             logger.error(f"处理单局详细图片异常: {e}")
             yield event.plain_result("❌ 处理图片请求时发生系统错误")
+
     @command("历史段位", alias=["历届段位"])
     async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
