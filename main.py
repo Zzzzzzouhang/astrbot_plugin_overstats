@@ -77,76 +77,33 @@ class OverstatsPlugin(Star):
             logger.error(f"构建图片消息链时发生严重错误: {e}")
             return event.plain_result(f"❌ 机器人构建图片组件失败: {e}")
 
-    # 增强后的全局拦截器：完美兼容带斜杠、无空格连写、带@等复杂输入
+    # 增强后的全局拦截器
     @event_message_type(EventMessageType.ALL)
     async def intercept_text_at(self, event: AstrMessageEvent):
         msg = event.message_str
         if not msg:
             return
         
-        # 修复1：严格限制战网ID格式，去掉内部的 \s，两端允许有空白但核心段绝不能有空格
-        bnet_pattern = r'^\s*[\w\u4e00-\u9fa5\-\_\.]+#\d+\s*$'
-        
-        # 1. 独立发送纯战网 ID 的快捷绑定逻辑
-        if re.match(bnet_pattern, msg):
-            user_id = event.get_sender_id()
-            old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
-            new_bind_id = msg.strip()
-            
-            await self.put_kv_data(f"bind_{user_id}", new_bind_id)
-            if not old_bind_id:
-                yield event.plain_result(f"✅ 自动绑定成功！已为您关联战网账号【{new_bind_id}】")
-            else:
-                yield event.plain_result(f"✅ 自动更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
-            
-            event.stop_event()
-            return
-        
-        # 2. 判断是否包含触发前缀（@群机器人 或者 纯文字指令）
-        # 如果是群聊里艾特机器人，清洗掉前缀
-        is_at = "@电子路灯" in msg
-        clean_msg = msg.replace("@电子路灯", "").strip() if is_at else msg.strip()
-        
-        # 如果既没有被艾特，也不是以斜杠开头，且不是下面字典里的前缀，就不属于文本拦截的指令，交还系统自带 command 处理器
-        if not is_at and not clean_msg.startswith('/'):
-            # 检查非斜杠开头的纯文字开头是否命中任何已知核心指令
-            has_keyword = any(clean_msg.startswith(k) for k in ["今日总结", "昨日总结", "周度总结", "本周总结", "历史段位", "大神数据", "大神对局"])
-            if not has_keyword:
-                return
-
-        # 剥离可能存在的开头斜杠
-        clean_msg = clean_msg.lstrip('/')
-        
-        # 3. 如果去掉@或/之后，剩下的是个纯粹的战网 ID，则也视为绑定请求
-        if re.match(bnet_pattern, clean_msg):
-            user_id = event.get_sender_id()
-            old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
-            new_bind_id = clean_msg.strip()
-            
-            await self.put_kv_data(f"bind_{user_id}", new_bind_id)
-            if not old_bind_id:
-                yield event.plain_result(f"✅ 自动绑定成功！已为您关联战网账号【{new_bind_id}】")
-            else:
-                yield event.plain_result(f"✅ 自动更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
-            
-            event.stop_event()
-            return
-            
-        # 4. 指令路由字典
+        # 指令路由字典 (增加所有简写别名)
         cmd_map = {
             "今日总结": (self.dashen_today, 1),
+            "今日": (self.dashen_today, 1),
             "昨日总结": (self.dashen_yesterday, 1),
+            "昨日": (self.dashen_yesterday, 1),
             "周度总结": (self.dashen_week, 1),
             "本周总结": (self.dashen_week, 1),
             "大神数据": (self.dashen_profile, 1),
             "大神对局": (self.dashen_match, 1),
             "历史段位": (self.dashen_rank_history, 1),
             "快速强度指数": (self.quick_strength, 1),
+            "快速强度": (self.quick_strength, 1),
             "竞技强度指数": (self.competitive_strength, 1),
+            "竞技强度": (self.competitive_strength, 1),
             "威能": (self.ow_hero_perk, 1),
             "ow英雄": (self.ow_hero_pick, 1),
             "皮肤搜索": (self.skin_search, 1),
             "大神绑定": (self.dashen_bind, 1),
+            "绑定": (self.dashen_bind, 1),
             "同玩查询": (self.dashen_sameplay, 2),
             "商店": (self.ow_shop, 0),
             "ow赛事": (self.ow_esports, 0),
@@ -156,8 +113,20 @@ class OverstatsPlugin(Star):
             "owhelp": (self.ow_help, 0),
             "获取段位分布": (self.get_rank_distribution, 0)
         }
+
+        # 判断是否包含触发前缀（@群机器人 或者 纯文字指令）
+        is_at = "@电子路灯" in msg
+        clean_msg = msg.replace("@电子路灯", "").strip() if is_at else msg.strip()
         
-        # 修复2：智能切割文本。支持 “今日总结 海盐冰淇淋#5911” 和 “今日总结海盐冰淇淋#5911”
+        # 检查非斜杠开头的纯文字开头是否命中任何已知核心指令（通过 cmd_map 动态读取）
+        if not is_at and not clean_msg.startswith('/'):
+            has_keyword = any(clean_msg.startswith(k) for k in cmd_map.keys())
+            if not has_keyword:
+                return
+
+        # 剥离可能存在的开头斜杠
+        clean_msg = clean_msg.lstrip('/')
+        
         cmd = None
         cmd_args = []
         
@@ -165,7 +134,6 @@ class OverstatsPlugin(Star):
         for k in cmd_map.keys():
             if clean_msg.startswith(k):
                 cmd = k
-                # 裁切掉指令本身，把剩下的部分当作参数
                 remain = clean_msg[len(k):].strip()
                 cmd_args = remain.split() if remain else []
                 break
@@ -200,32 +168,28 @@ class OverstatsPlugin(Star):
     @command("owhelp")
     async def ow_help(self, event: AstrMessageEvent):
         help_text = (
-            "📌 守望先锋 Overstats 查询菜单：\n"
-            "=======================\n"
-            "👉【数据/战绩总结】\n"
-            "   /大神绑定 [战网ID] - 绑定QQ与战网账号\n"
-            "   直接发送战网ID - 快速自动绑定/更新战网账号\n"
-            "   @电子路灯 [战网ID] - 快速自动绑定/更新战网账号\n"
-            "   /大神数据 (战网ID) - 查询玩家详情卡片\n"
-            "   /大神对局 (战网ID) - 查询最近对局列表\n"
-            "   /今日总结 (战网ID) - 查询今日战绩总结（无记录自动查昨日）\n"
-            "   /昨日总结 (战网ID) - 查询昨日战绩数据\n"
-            "   /周度总结 (战网ID) - 查询本周数据总结\n"
-            "   /历史段位 (战网ID) - 查询历届赛季段位\n"
-            "   /同玩查询 [战网ID1] [战网ID2] - 查询两人开黑胜率\n"
-            "👉【指数/英雄分析】\n"
-            "   /快速强度指数 (战网ID)\n"
-            "   /竞技强度指数 (战网ID)\n"
-            "   /威能 [英雄名]\n"
-            "   /ow英雄 [英雄名]\n"
-            "👉【综合/赛事】\n"
-            "   /商店 /ow赛事 /ow活动 /皮肤搜索\n"
-            "=======================\n"
-            "💡 带()可省略，需先绑定账号。"
+            "📌 Overstats 查询菜单\n"
+            "✦【战绩查询】\n"
+            "  /绑定 [战网ID] - 关联账号\n"
+            "  /大神数据 (战网ID) - 详情卡片\n"
+            "  /今日 (战网ID) - 今日总结\n"
+            "  /昨日 (战网ID) - 昨日数据\n"
+            "  /本周总结 (战网ID) - 本周数据\n"
+            "  /大神对局 (战网ID) - 最近对局\n"
+            "  /历史段位 (战网ID) - 历届段位\n"
+            "  /同玩查询 [ID1] [ID2] - 开黑胜率\n"
+            "✦【指数分析】\n"
+            "  /快速强度 (战网ID)\n"
+            "  /竞技强度 (战网ID)\n"
+            "  /威能 [英雄名]\n"
+            "  /ow英雄 [英雄名]\n"
+            "✦【综合】\n"
+            "  /商店 /ow赛事 /ow活动 /banpick\n"
+            "💡 提示：带()的参数可省略，默认查绑定账号"
         )
         yield event.plain_result(help_text)
 
-    @command("大神绑定")
+    @command("大神绑定", alias=["绑定"])
     async def dashen_bind(self, event: AstrMessageEvent, bnet_id: str):
         user_id = event.get_sender_id()
         if not bnet_id or "#" not in bnet_id:
@@ -242,11 +206,11 @@ class OverstatsPlugin(Star):
         else:
             yield event.plain_result(f"✅ 更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
 
-    @command("今日总结")
+    @command("今日总结", alias=["今日"])
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定 或 直接发送战网ID")
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
             return
         
         yield event.plain_result(f"⏳ 正在计算 {target_id} 的今日战绩总结...")
@@ -262,11 +226,11 @@ class OverstatsPlugin(Star):
             err_msg = error_data.get("message") if error_data else "未知错误"
             yield event.plain_result(f"❌ 获取今日总结失败：{err_msg}")
 
-    @command("昨日总结")
+    @command("昨日总结", alias=["昨日"])
     async def dashen_yesterday(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
             return
         yield event.plain_result(f"⏳ 正在统计 {target_id} 的昨日战绩数据...")
         img_bytes, error_data = await self._fetch_image("/dashen-summary/yesterday/image", {"bnet_id": target_id})
@@ -280,7 +244,7 @@ class OverstatsPlugin(Star):
     async def dashen_week(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
             return
         yield event.plain_result(f"📊 正在生成 {target_id} 的本周战绩大数据总结，耗时较长（约30-60秒），请稍候...")
         img_bytes, error_data = await self._fetch_image("/dashen-summary/week/image", {"bnet_id": target_id}, timeout=900)
@@ -294,7 +258,7 @@ class OverstatsPlugin(Star):
     async def dashen_profile(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
             return
         yield event.plain_result(f"🔍 正在生成 {target_id} 的玩家详情...")
         img_bytes, error_data = await self._fetch_image("/dashen-profile/image", {"bnet_id": target_id})
@@ -308,7 +272,7 @@ class OverstatsPlugin(Star):
     async def dashen_match(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
             return
         yield event.plain_result(f"📊 正在拉取 {target_id} 的最近对局...")
         img_bytes, error_data = await self._fetch_image("/dashen-match/image", {"bnet_id": target_id})
@@ -322,7 +286,7 @@ class OverstatsPlugin(Star):
     async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
             return
         yield event.plain_result(f"📜 正在追溯 {target_id} 的历史段位记录...")
         img_bytes, error_data = await self._fetch_image("/dashen-rank-history/image", {"bnet_id": target_id})
@@ -343,11 +307,11 @@ class OverstatsPlugin(Star):
             err_msg = error_data.get("message") if error_data else "无法获取同玩查询数据，请检查两个ID是否输入正确。"
             yield event.plain_result(f"❌ {err_msg}")
 
-    @command("快速强度指数")
+    @command("快速强度指数", alias=["快速强度"])
     async def quick_strength(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
             return
         yield event.plain_result(f"⚡ 正在评估 {target_id} 的快速强度指数...")
         img_bytes, error_data = await self._fetch_image("/dashen-quick-strength/image", {"bnet_id": target_id})
@@ -357,11 +321,11 @@ class OverstatsPlugin(Star):
             err_msg = error_data.get("message") if error_data else "获取快速强度指数失败。"
             yield event.plain_result(f"❌ {err_msg}")
 
-    @command("竞技强度指数")
+    @command("竞技强度指数", alias=["竞技强度"])
     async def competitive_strength(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，或先使用 /大神绑定")
+            yield event.plain_result("❌ 请输入战网ID，或先使用 /绑定 指令")
             return
         yield event.plain_result(f"🏆 正在评估 {target_id} 的竞技天梯强度指数...")
         img_bytes, error_data = await self._fetch_image("/dashen-competitive-strength/image", {"bnet_id": target_id})
