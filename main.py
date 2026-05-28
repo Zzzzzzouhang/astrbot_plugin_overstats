@@ -77,14 +77,56 @@ class OverstatsPlugin(Star):
             logger.error(f"构建图片消息链时发生严重错误: {e}")
             return event.plain_result(f"❌ 机器人构建图片组件失败: {e}")
 
-    # 增强后的全局拦截器
+    # 智能全局事件拦截器
     @event_message_type(EventMessageType.ALL)
     async def intercept_text_at(self, event: AstrMessageEvent):
         msg = event.message_str
         if not msg:
             return
+            
+        is_at_me = False
+        clean_msg = msg.strip()
         
-        # 指令路由字典 (增加所有简写别名)
+        # 1. 解析消息链中的真实 At 组件 (动态匹配当前机器人的 self_id)
+        if event.message_obj and event.message_obj.message:
+            for comp in event.message_obj.message:
+                if comp.__class__.__name__ == "At":
+                    # 遍历可能存在的属性名（如 qq, user_id, target 等），匹配当前机器人ID
+                    for attr in ['qq', 'user_id', 'id', 'target', 'self_id']:
+                        if hasattr(comp, attr) and str(getattr(comp, attr)) == str(event.message_obj.self_id):
+                            is_at_me = True
+                            break
+                if is_at_me:
+                    break
+            
+        # 2. 备用兼容：如果是纯文本类型的 "@机器人" 开头（处理某些平台适配器未转化为 At 组件的情况）
+        if not is_at_me and clean_msg.startswith("@"):
+            match_at_text = re.match(r'^@\S+\s+(.*)$', clean_msg)
+            if match_at_text:
+                is_at_me = True
+                clean_msg = match_at_text.group(1).strip()
+        
+        # 判断是否为私聊环境（私聊本身自带触发性质，群聊则需要被 At）
+        is_private = event.message_obj and not event.message_obj.group_id
+        is_triggered = is_at_me or is_private
+        
+        # 3. 核心功能：当明确艾特了机器人（或私聊）且剩余纯文本为标准战网ID时，执行快捷绑定
+        bnet_pattern = r'^[\w\u4e00-\u9fa5\-\_\.]+#\d+$'
+        if is_triggered and re.match(bnet_pattern, clean_msg):
+            user_id = event.get_sender_id()
+            old_bind_id = await self.get_kv_data(f"bind_{user_id}", None)
+            new_bind_id = clean_msg
+            
+            await self.put_kv_data(f"bind_{user_id}", new_bind_id)
+            if not old_bind_id:
+                yield event.plain_result(f"✅ 自动绑定成功！已为您关联战网账号【{new_bind_id}】")
+            else:
+                yield event.plain_result(f"✅ 自动更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
+            
+            event.stop_event()
+            return
+        
+        # 指令路由字典 (包含所有简写别名)
         cmd_map = {
             "今日总结": (self.dashen_today, 1),
             "今日": (self.dashen_today, 1),
@@ -113,13 +155,9 @@ class OverstatsPlugin(Star):
             "owhelp": (self.ow_help, 0),
             "获取段位分布": (self.get_rank_distribution, 0)
         }
-
-        # 判断是否包含触发前缀（@群机器人 或者 纯文字指令）
-        is_at = "@电子路灯" in msg
-        clean_msg = msg.replace("@电子路灯", "").strip() if is_at else msg.strip()
         
-        # 检查非斜杠开头的纯文字开头是否命中任何已知核心指令（通过 cmd_map 动态读取）
-        if not is_at and not clean_msg.startswith('/'):
+        # 如果既没有被艾特、也不是私聊、也没有以 / 开头，则过滤掉非指令文本
+        if not is_triggered and not clean_msg.startswith('/'):
             has_keyword = any(clean_msg.startswith(k) for k in cmd_map.keys())
             if not has_keyword:
                 return
@@ -171,6 +209,7 @@ class OverstatsPlugin(Star):
             "📌 Overstats 查询菜单\n"
             "✦【战绩查询】\n"
             "  /绑定 [战网ID] - 关联账号\n"
+            "  @机器人 [战网ID] - 快捷关联账号\n"
             "  /大神数据 (战网ID) - 详情卡片\n"
             "  /今日 (战网ID) - 今日总结\n"
             "  /昨日 (战网ID) - 昨日数据\n"
@@ -321,7 +360,7 @@ class OverstatsPlugin(Star):
             err_msg = error_data.get("message") if error_data else "获取快速强度指数失败。"
             yield event.plain_result(f"❌ {err_msg}")
 
-    @command("竞技强度指数", alias=["竞技强度"])
+    @command("競技强度指数", alias=["竞技强度"])
     async def competitive_strength(self, event: AstrMessageEvent, bnet_id: str = None):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
