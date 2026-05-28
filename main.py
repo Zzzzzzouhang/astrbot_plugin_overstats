@@ -262,8 +262,7 @@ class OverstatsPlugin(Star):
             "      ➤ banpick\n"
             "🌍 ➤ 同玩查询「ID1」「ID2」\n"
             "      ➤ 商店 ➤ ow 赛事 ➤ ow 活动\n"
-            "💡 提示：战绩与强度类指令后加\n"
-            "   战网 ID 查他人。"
+            "💡 提示：战绩与强度类指令后加战网 ID 查他人"
         )
         yield event.plain_result(help_text)
 
