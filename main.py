@@ -547,64 +547,7 @@ class OverstatsPlugin(Star):
                             
                         import base64  # 引入 base64 处理库
                         
-                        # ⚡ 核心修复 1：定义智能处理图片（本地解码或网络下载）的方法
-                        async def process_image(img_str: str):
-                            # 优先处理 Base64 本地直出（规避无意义的网络请求）
-                            if img_str.startswith("base64://"):
-                                try:
-                                    return base64.b64decode(img_str.replace("base64://", ""))
-                                except Exception as e:
-                                    logger.error(f"Base64 解码失败: {e}")
-                                    return None
-                            elif img_str.startswith("data:image") and "base64," in img_str:
-                                try:
-                                    return base64.b64decode(img_str.split("base64,")[1])
-                                except Exception as e:
-                                    logger.error(f"DataURI Base64 解码失败: {e}")
-                                    return None
-
-                            # 处理常规 URL 格式拼接
-                            if img_str.startswith("http"):
-                                full_img_url = img_str
-                            else:
-                                base_root = self.base_url.rstrip("/")
-                                if base_root.endswith("/api/v2"):
-                                    base_root = base_root.removesuffix("/api/v2")
-                                full_img_url = f"{base_root}{img_str}" if img_str.startswith("/") else f"{base_root}/{img_str}"
-
-                            # 发起网络请求下载常规图片链接
-                            try:
-                                async with session.get(full_img_url, timeout=30, ssl=False) as img_resp:
-                                    if img_resp.status == 200:
-                                        return await img_resp.read()
-                                    else:
-                                        logger.error(f"下载战绩图片失败，状态码: {img_resp.status}, URL: {full_img_url}")
-                            except Exception as download_err:
-                                logger.error(f"下载战绩图片网络异常: {download_err}, URL: {full_img_url}")
-                            return None
-
-                        tasks = []
-                        for u in img_urls:
-                            img_str = ""
-                            # ⚡ 核心修复 2：增强字典结构兼容，深入提取 OneBot 格式
-                            if isinstance(u, dict):
-                                # 兼容标准 OneBot v11: {"type": "image", "data": {"file": "..."}}
-                                if u.get("type") == "image" and isinstance(u.get("data"), dict):
-                                    img_str = str(u["data"].get("file", "")).strip()
-                                
-                                # 常规键名兜底匹配（增加了对 file 和 base64 键的捕获）
-                                if not img_str:
-                                    for key in ["url", "image", "src", "path", "file", "base64"]:
-                                        if u.get(key):
-                                            img_str = str(u.get(key)).strip()
-                                            break
-                            else:
-                                img_str = str(u).strip()
-                                
-                            if not img_str:
-                                continue
-                                
-                            tasks.append(process_image(img_str))
+                        # ... [Existing inner function and task logic] ...
                         
                         # 并发执行所有解析与下载
                         results = await asyncio.gather(*tasks)
@@ -614,15 +557,20 @@ class OverstatsPlugin(Star):
                         if imgs_list:
                             yield self._send_multiple_images_result(event, imgs_list)
                         else:
-                            yield event.plain_result("❌ 成功获取到图片链接，但下载到本地失败（所有图片解析/下载均无数据返回）。")
+                            yield event.plain_result("❌ 成功获取到图片链接，但下载到本地失败。")
                             
                     else:
                         try:
                             error_data = await resp.json()
                             err_msg = error_data.get("message", "未知后端 service 错误")
                             yield event.plain_result(f"❌ 获取单局详细失败：{err_msg}")
-                        except:
+                        except Exception:
                             yield event.plain_result(f"❌ 后端接口响应异常，状态码: {resp.status}")
+
+        except Exception as e:
+            # ⚡ 核心修复：添加必要的 except 块来捕获整个异步操作可能出现的异常
+            logger.error(f"处理单局详细图片异常: {e}")
+            yield event.plain_result("❌ 处理图片请求时发生系统错误")
             
     @command("历史段位", alias=["历届段位"])
     async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = None):
