@@ -22,10 +22,10 @@ class OverstatsPlugin(Star):
         super().__init__(context)
         self.config = config
         self.base_url = self.config.get("overstats_api_url", "http://127.0.0.1:18080/api/v2")
-        
+
         self.last_match_bnet_id = {}
         self.file_lock = asyncio.Lock()
-        
+
         try:
             plugin_name = getattr(self, "name", "overstats_full")
             self.plugin_data_dir = Path(get_astrbot_data_path()) / "plugin_data" / plugin_name
@@ -60,7 +60,7 @@ class OverstatsPlugin(Star):
                 text_val = urllib.parse.quote(match.group(1))
                 show_val = urllib.parse.quote(match.group(2))
                 return f'<qqbot-cmd-input text="{text_val}" show="{show_val}" reference="false" />'
-            
+
             pattern = r'<qqbot-cmd-input\s+text="([^"]+)"\s+show="([^"]+)"\s+reference="false"\s*/>'
             return re.sub(pattern, replacer, text)
         else:
@@ -72,7 +72,7 @@ class OverstatsPlugin(Star):
                 if text_val.startswith("/") and not show_val.startswith("/"):
                     return f"{text_val}" # 统一还原为标准的带斜杠指令展示
                 return f"{text_val}"
-            
+
             pattern = r'<qqbot-cmd-input\s+text="([^"]+)"\s+show="([^"]+)"\s+reference="false"\s*/>'
             return re.sub(pattern, strip_replacer, text)
 
@@ -85,9 +85,9 @@ class OverstatsPlugin(Star):
                     bot_id = str(bot_identity)
         except Exception:
             pass
-        
+
         file_path = self.plugin_data_dir / f"binds_{bot_id}.json"
-        
+
         if not file_path.exists():
             try:
                 with open(file_path, "w", encoding="utf-8") as f:
@@ -148,6 +148,7 @@ class OverstatsPlugin(Star):
         return f"u_{event.get_sender_id()}"
 
     async def _get_bnet_id(self, event: AstrMessageEvent, input_id: str = None) -> str:
+        """解析 bnet_id：优先取显式传入的 input_id，否则查发送者自己的绑定"""
         if input_id and input_id.strip():
             return input_id.strip()
         user_id = event.get_sender_id()
@@ -231,7 +232,7 @@ class OverstatsPlugin(Star):
         try:
             self.temp_image_dir.mkdir(parents=True, exist_ok=True)
             user_id = event.get_sender_id()
-            
+
             valid_images = [img for img in imgs_list if img]
             if not valid_images:
                 yield event.plain_result("❌ 未能获取到有效的图片数据")
@@ -242,12 +243,12 @@ class OverstatsPlugin(Star):
                 for i, img_bytes in enumerate(valid_images):
                     img_path = self.temp_image_dir / f"{abs(hash(img_bytes))}_{time.time_ns()}.png"
                     img_path.write_bytes(img_bytes)
-                    
+
                     if i == 0:
                         chain = [Comp.At(qq=user_id), Comp.Plain("\n"), Comp.Image.fromFileSystem(str(img_path))]
                     else:
                         chain = [Comp.Image.fromFileSystem(str(img_path))]
-                        
+
                     yield event.chain_result(chain)
                     asyncio.create_task(self._delayed_remove(str(img_path), 2592000))
                     await asyncio.sleep(0.5)
@@ -260,21 +261,135 @@ class OverstatsPlugin(Star):
                     chain.append(Comp.Image.fromFileSystem(str(img_path)))
                     asyncio.create_task(self._delayed_remove(str(img_path), 2592000))
                 yield event.chain_result(chain)
-                
+
         except Exception as e:
             logger.error(f"多图发送逻辑错误: {e}")
-            yield event.plain_result("❌ 多图发送失败")  
-            
-            
+            yield event.plain_result("❌ 多图发送失败")
+
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 核心：单局详细的底层实现（供 reply 数字 & 主动指令复用）
+    # ═══════════════════════════════════════════════════════════════════
+    async def _do_match_detail(self, event: AstrMessageEvent, digit_str: str, explicit_bnet_id: str = None):
+        """
+        统一的单局详细图片拉取逻辑。
+        - digit_str: 用户指定的数字索引（1-based）
+        - explicit_bnet_id: 如果传了则直接用；否则用发送者自己的绑定账号
+        """
+        digit = int(digit_str)
+        if digit < 0:
+            digit = 0
+        elif digit > 20:
+            yield event.plain_result("❌ 错误：单局详细的数字索引不能大于 20！")
+            return
+
+        index = max(0, digit - 1) if digit > 0 else 0
+
+        target_id = await self._get_bnet_id(event, explicit_bnet_id)
+        if not target_id:
+            yield event.plain_result("❌ 请输入战网ID，如：单局详细 3 Player#12345 或先使用 /绑定 指令")
+            return
+
+        yield event.plain_result(f"⏳ 正在拉取 {target_id} 第 {index + 1} 局的单局多图详细战绩...")
+
+        payload = {
+            "bnet_id": target_id,
+            "index": str(index),
+            "limit": "20",
+            "include_fight": True,
+            "include_previous_season": True,
+            "show_all_heroes": True,
+            "analyze": True
+        }
+
+        url = f"{self.base_url}/dashen-match/detail/replies"
+
+        try:
+            client_timeout = aiohttp.ClientTimeout(total=600)
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                async with session.post(url, json=payload) as resp:
+                    if resp.status != 200:
+                        try:
+                            error_data = await resp.json()
+                            err_msg = error_data.get("message", "未知后端 service 错误")
+                            yield event.plain_result(f"❌ 获取单局详细失败：{err_msg}")
+                        except Exception:
+                            yield event.plain_result(f"❌ 后端接口响应异常，状态码: {resp.status}")
+                        return
+
+                    data = await resp.json()
+                    raw_img_list = data.get("replies", [])
+
+                    if not raw_img_list:
+                        yield event.plain_result("❌ 未能生成该单局的详细图片链接")
+                        return
+
+                    imgs_list = []
+                    for u in raw_img_list:
+                        img_str = ""
+                        if isinstance(u, dict):
+                            if u.get("type") == "image":
+                                img_str = str(u.get("base64", "")).strip()
+                            if not img_str:
+                                for key in ["url", "image", "src", "path", "file"]:
+                                    if u.get(key):
+                                        img_str = str(u.get(key)).strip()
+                                        break
+                        else:
+                            img_str = str(u).strip()
+
+                        if not img_str:
+                            continue
+
+                        img_data = None
+                        try:
+                            if img_str.startswith("base64://"):
+                                img_data = base64.b64decode(img_str.replace("base64://", ""))
+                            elif img_str.startswith("data:image") and "base64," in img_str:
+                                img_data = base64.b64decode(img_str.split("base64,")[1])
+                            elif len(img_str) > 100 and not img_str.startswith("http") and not img_str.startswith("/"):
+                                padding = len(img_str) % 4
+                                if padding: img_str += '=' * (4 - padding)
+                                try: img_data = base64.b64decode(img_str)
+                                except Exception: pass
+
+                            if not img_data:
+                                full_img_url = img_str if img_str.startswith("http") else f"{self.base_url.rstrip('/').removesuffix('/api/v2')}{img_str if img_str.startswith('/') else '/' + img_str}"
+                                async with session.get(full_img_url, timeout=30, ssl=False) as img_resp:
+                                    if img_resp.status == 200:
+                                        img_data = await img_resp.read()
+                        except Exception as e:
+                            logger.error(f"处理图片失败: {e}")
+                            continue
+
+                        if img_data:
+                            imgs_list.append(img_data)
+
+                    if imgs_list:
+                        async for r in self._send_multiple_images_result(event, imgs_list):
+                            yield r
+                    else:
+                        yield event.plain_result("❌ 未能获取到有效的图片数据")
+        except Exception as e:
+            logger.error(f"处理单局详细图片异常: {e}")
+            yield event.plain_result("❌ 处理图片请求时发生 system 错误")
+
     @event_message_type(EventMessageType.ALL)
     async def intercept_text_at(self, event: AstrMessageEvent):
+        """
+        消息入口分发：
+          1. 绑定（纯 bnet_id 或 "绑定" + bnet_id）
+          2. 裸纯数字 → 回复查单局（用上次大神对局的请求者 bnet_id）
+          3. "单局详细"/"单局" + 数字 [+ bnet_id] → 主动查自己的单局
+          4. 其余指令走 cmd_map 前缀匹配
+        """
         msg = event.message_str
         if not msg:
             return
-            
+
         is_at_me = False
         clean_msg = msg.strip()
-        
+
         if event.message_obj and event.message_obj.message:
             for comp in event.message_obj.message:
                 if comp.__class__.__name__ == "At":
@@ -284,61 +399,98 @@ class OverstatsPlugin(Star):
                             break
                 if is_at_me:
                     break
-        
+
         is_text_at_lampion = False
         if clean_msg.startswith("@电子路灯"):
             is_text_at_lampion = True
             clean_msg = clean_msg[len("@电子路灯"):].strip()
-        
+
         if is_at_me and clean_msg.startswith("@"):
             match_at_text = re.match(r'^@\S+\s+(.*)$', clean_msg)
             if match_at_text:
                 clean_msg = match_at_text.group(1).strip()
             else:
                 clean_msg = re.sub(r'^@\S+', '', clean_msg).strip()
-        
+
         is_private = event.message_obj and not event.message_obj.group_id
         is_triggered = is_at_me or is_text_at_lampion or is_private
-        
+
         if not is_triggered:
             return
-        
-        bnet_id_pattern = r'([\w\u4e00-\u9fa5\-\_\.]+#\d+)'
+
+        # ── 去掉前导斜杠（统一处理）──
+        if clean_msg.startswith('/'):
+            clean_msg = clean_msg.lstrip('/')
+
+        # ── 1. 绑定识别（纯 bnet_id 或 "绑定" + bnet_id）──
+        bnet_id_pattern = r'([\w一-龥\-\_\.]+#\d+)'
         match = re.search(bnet_id_pattern, clean_msg)
-        
+
         if match and ("绑定" in clean_msg or re.fullmatch(bnet_id_pattern, clean_msg)):
             new_bind_id = match.group(1)
             if new_bind_id.startswith("绑定"):
                 new_bind_id = new_bind_id[2:]
-                
+
             user_id = event.get_sender_id()
             old_bind_id = await self._get_user_bind_id(user_id)
             await self._set_user_bind_id(user_id, new_bind_id)
-            
+
             if not old_bind_id:
                 yield event.plain_result(f"✅ 自动绑定成功！已为您关联战网账号【{new_bind_id}】")
             else:
                 yield event.plain_result(f"✅ 自动更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
-            
+
             event.stop_event()
             return
 
-        if clean_msg.isdigit() or (clean_msg.startswith("单局") and any(char.isdigit() for char in clean_msg)):
-            num_match = re.search(r'\d+', clean_msg)
-            if num_match:
-                digit = int(num_match.group())
-                if digit < 0:
-                    digit = 0
-                elif digit > 20:
-                    yield event.plain_result("❌ 错误：单局详细的数字索引不能大于 20！")
-                    event.stop_event()
-                    return
-                
-                async for r in self.dashen_match_detail(event, str(digit)):
-                    yield r
+        # ── 2. 裸纯数字 → 回复查单局（使用上次"大神对局"请求者的 bnet_id）──
+        if clean_msg.isdigit():
+            digit = int(clean_msg)
+            if digit > 20:
+                yield event.plain_result("❌ 错误：单局详细的数字索引不能大于 20！")
                 event.stop_event()
                 return
-        
+            session_id = self._get_session_id(event)
+            cached_bnet_id = self.last_match_bnet_id.get(session_id)
+            if not cached_bnet_id:
+                yield event.plain_result(
+                    "❌ 未找到最近的大神对局请求记录，请先使用 /大神对局 查询。\n"
+                    "💡 如需查询自己的单局详细，请使用：单局详细 [数字]"
+                )
+                event.stop_event()
+                return
+            async for r in self._do_match_detail(event, clean_msg, cached_bnet_id):
+                yield r
+            event.stop_event()
+            return
+
+        # ── 3. "单局详细" / "单局" 主动指令 → 查发送者自己的绑定 ──
+        if clean_msg.startswith("单局详细") or clean_msg.startswith("单局"):
+            # 去掉前缀关键字
+            prefix = "单局详细" if clean_msg.startswith("单局详细") else "单局"
+            remain = clean_msg[len(prefix):].strip()
+            args = remain.split() if remain else []
+
+            digit = None
+            explicit_bnet_id = None
+            for arg in args:
+                if arg.isdigit():
+                    digit = arg
+                elif '#' in arg:
+                    explicit_bnet_id = arg
+
+            if digit is None:
+                yield event.plain_result("❌ 请输入数字索引，如：单局详细 3 或 单局 3 Player#12345")
+                event.stop_event()
+                return
+
+            # 有显式 bnet_id 就用它；否则用自己的绑定
+            async for r in self._do_match_detail(event, digit, explicit_bnet_id):
+                yield r
+            event.stop_event()
+            return
+
+        # ── 4. 其他指令 → cmd_map 前缀匹配 ──
         cmd_map = {
             "owhelp": (self.ow_help, 0),
             "ow帮助": (self.ow_help, 0),
@@ -369,8 +521,6 @@ class OverstatsPlugin(Star):
             "大神对局": (self.dashen_match, 1),
             "最近对局": (self.dashen_match, 1),
             "战绩": (self.dashen_match, 1),
-            "单局详细": (self.dashen_match_detail, 'var'),
-            "单局": (self.dashen_match_detail, 'var'),
             "历史段位": (self.dashen_rank_history, 1),
             "历届段位": (self.dashen_rank_history, 1),
             "同玩查询": (self.dashen_sameplay, 2),
@@ -404,27 +554,23 @@ class OverstatsPlugin(Star):
             "英雄省榜": (self.ow_hero_leaderboard, 2)
         }
 
-        if clean_msg.startswith('/'):
-            clean_msg = clean_msg.lstrip('/')
-        elif self._is_qq_official(event):
-            pass # QQ 官方按原样匹配
-            
         cmd = None
         cmd_args = []
-        
+
+        # 按 key 长度降序匹配，防止 "单局" 吞掉 "单局详细"
         for k in sorted(cmd_map.keys(), key=len, reverse=True):
             if clean_msg.startswith(k):
                 cmd = k
                 remain = clean_msg[len(k):].strip()
                 cmd_args = remain.split() if remain else []
                 break
-                
+
         if not cmd:
             parts = clean_msg.split(maxsplit=1)
             if parts and parts[0] in cmd_map:
                 cmd = parts[0]
                 cmd_args = parts[1].split() if len(parts) > 1 else []
-        
+
         if cmd in cmd_map:
             func, arg_count = cmd_map[cmd]
             try:
@@ -445,7 +591,7 @@ class OverstatsPlugin(Star):
             except Exception as e:
                 logger.error(f"快捷指令分发执行失败 ({cmd}): {e}")
                 yield event.plain_result(f"❌ 执行指令失败: {str(e)}")
-            
+
             event.stop_event()
 
     @command("所有指令", alias=["别称"])
@@ -485,7 +631,7 @@ class OverstatsPlugin(Star):
 • <qqbot-cmd-input text="/ow赛事 " show="ow赛事" reference="false" /> (别称：<qqbot-cmd-input text="/赛事 " show="赛事" reference="false" />)
 • <qqbot-cmd-input text="/ow活动 " show="ow活动" reference="false" /> (别称：<qqbot-cmd-input text="/活动 " show="活动" reference="false" />)
 • <qqbot-cmd-input text="/ow更新 " show="ow更新" reference="false" /> (别称：<qqbot-cmd-input text="/版本更新 " show="版本更新" reference="false" />)"""
-        
+
         yield event.plain_result(self._format_markdown_by_platform(event, text))
 
     @command("多图测试")
@@ -499,11 +645,11 @@ class OverstatsPlugin(Star):
                         imgs_list.append(f.read())
                 except Exception as e:
                     logger.error(f"读取测试图片 {img_name} 失败: {e}")
-        
+
         if not imgs_list:
             yield event.plain_result("❌ 未能读取到测试图片。")
             return
-            
+
         async for r in self._send_multiple_images_result(event, imgs_list):
             yield r
 
@@ -521,7 +667,7 @@ class OverstatsPlugin(Star):
 📰 ➤ <qqbot-cmd-input text="/ow更新 " show="ow更新" reference="false" />「latest/small/big」
 💡 提示：在「大神对局」图片发出来后，直接回复数字即可看单局详细。
 发送 <qqbot-cmd-input text="/别称 " show="别称" reference="false" /> 可查看所有指令对应别称列表。"""
-        
+
         yield event.plain_result(self._format_markdown_by_platform(event, help_text))
 
     @command("大神绑定", alias=["绑定"])
@@ -530,11 +676,11 @@ class OverstatsPlugin(Star):
         if not bnet_id or "#" not in bnet_id:
             yield event.plain_result("❌ 绑定失败！请输入规范战网ID，如：Player#12345")
             return
-        
+
         old_bind_id = await self._get_user_bind_id(user_id)
         new_bind_id = bnet_id.strip()
         await self._set_user_bind_id(user_id, new_bind_id)
-        
+
         if not old_bind_id:
             yield event.plain_result(f"✅ 绑定成功！关联战网账号【{new_bind_id}】")
         else:
@@ -546,10 +692,10 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield event.plain_result("❌ 请输入战网ID，如：今日总结 Player#12345 或先使用 /绑定 指令")
             return
-        
+
         yield event.plain_result(f"⏳ 正在计算 {target_id} 的今日战绩总结...")
         img_bytes, error_data = await self._fetch_image("/dashen-summary/today/image", {"bnet_id": target_id})
-        
+
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         elif error_data and error_data.get("error") == "summary_empty" and error_data.get("details", {}).get("scope") == "today":
@@ -621,7 +767,8 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield event.plain_result("❌ 请输入战网ID，如：大神对局 Player#12345 或先使用 /绑定 指令")
             return
-            
+
+        # 记录本次"大神对局"的请求者 bnet_id，供后续回复数字时使用
         session_id = self._get_session_id(event)
         self.last_match_bnet_id[session_id] = target_id
 
@@ -638,113 +785,26 @@ class OverstatsPlugin(Star):
 
     @command("单局详细", alias=["单局"])
     async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = None, arg2: str = None):
-        index = 0
-        bnet_id = None
-        
+        """
+        @command 装饰器入口（通过 cmd_map 分发抵达）。
+        解析数字索引和可选的显式 bnet_id，然后委托给 _do_match_detail。
+        """
+        digit = None
+        explicit_bnet_id = None
+
         for arg in [arg1, arg2]:
             if not arg:
                 continue
-            if arg.isdigit(): 
-                digit = int(arg)
-                if digit > 20:
-                    yield event.plain_result("❌ 错误：单局详细的数字索引不能大于 20！")
-                    return
-                index = max(0, digit - 1) if digit > 0 else 0
-            else: 
-                bnet_id = arg
+            if arg.isdigit():
+                digit = arg
+            else:
+                explicit_bnet_id = arg
 
-        if not bnet_id:
-            session_id = self._get_session_id(event)
-            bnet_id = self.last_match_bnet_id.get(session_id)
+        if digit is None:
+            digit = "1"  # 默认第一局
 
-        target_id = await self._get_bnet_id(event, bnet_id)
-        if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，如：/单局详细 1 Player#12345 或先使用 /绑定 指令")
-            return
-            
-        yield event.plain_result(f"⏳ 正在拉取 {target_id} 第 {index + 1} 局的单局多图详细战绩...")
-        
-        payload = {
-            "bnet_id": target_id,
-            "index": str(index),
-            "limit": "20",
-            "include_fight": True,
-            "include_previous_season": True,
-            "show_all_heroes": True,
-            "analyze": True
-        }
-        
-        url = f"{self.base_url}/dashen-match/detail/replies"
-        
-        try:
-            client_timeout = aiohttp.ClientTimeout(total=600)
-            async with aiohttp.ClientSession(timeout=client_timeout) as session:
-                async with session.post(url, json=payload) as resp:
-                    if resp.status != 200:
-                        try:
-                            error_data = await resp.json()
-                            err_msg = error_data.get("message", "未知后端 service 错误")
-                            yield event.plain_result(f"❌ 获取单局详细失败：{err_msg}")
-                        except Exception:
-                            yield event.plain_result(f"❌ 后端接口响应异常，状态码: {resp.status}")
-                        return
-
-                    data = await resp.json()
-                    raw_img_list = data.get("replies", [])
-                    
-                    if not raw_img_list:
-                        yield event.plain_result("❌ 未能生成该单局的详细图片链接")
-                        return
-
-                    imgs_list = []
-                    for u in raw_img_list:
-                        img_str = ""
-                        if isinstance(u, dict):
-                            if u.get("type") == "image":
-                                img_str = str(u.get("base64", "")).strip()
-                            if not img_str:
-                                for key in ["url", "image", "src", "path", "file"]:
-                                    if u.get(key):
-                                        img_str = str(u.get(key)).strip()
-                                        break
-                        else:
-                            img_str = str(u).strip()
-
-                        if not img_str:
-                            continue
-
-                        img_data = None
-                        try:
-                            if img_str.startswith("base64://"):
-                                img_data = base64.b64decode(img_str.replace("base64://", ""))
-                            elif img_str.startswith("data:image") and "base64," in img_str:
-                                img_data = base64.b64decode(img_str.split("base64,")[1])
-                            elif len(img_str) > 100 and not img_str.startswith("http") and not img_str.startswith("/"):
-                                padding = len(img_str) % 4
-                                if padding: img_str += '=' * (4 - padding)
-                                try: img_data = base64.b64decode(img_str)
-                                except Exception: pass
-                            
-                            if not img_data:
-                                full_img_url = img_str if img_str.startswith("http") else f"{self.base_url.rstrip('/').removesuffix('/api/v2')}{img_str if img_str.startswith('/') else '/' + img_str}"
-                                async with session.get(full_img_url, timeout=30, ssl=False) as img_resp:
-                                    if img_resp.status == 200:
-                                        img_data = await img_resp.read()
-                        except Exception as e:
-                            logger.error(f"处理图片失败: {e}")
-                            continue
-
-                        if img_data:
-                            imgs_list.append(img_data)
-                    
-                    if imgs_list:
-                        async for r in self._send_multiple_images_result(event, imgs_list):
-                            yield r
-                    else:
-                        yield event.plain_result("❌ 未能获取到有效的图片数据")
-        except Exception as e:
-            logger.error(f"处理单局详细图片异常: {e}")
-            yield event.plain_result("❌ 处理图片请求时发生 system 错误")
+        async for r in self._do_match_detail(event, digit, explicit_bnet_id):
+            yield r
 
     @command("历史段位", alias=["历届段位"])
     async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = None):
@@ -818,11 +878,11 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield event.plain_result("❌ 请输入战网ID，如：快速英雄云图 Player#12345 或先使用 /绑定 指令")
             return
-        
+
         yield event.plain_result(f"📊 正在获取 {target_id} 的快速模式英雄云图...")
         payload = {"bnet_id": target_id, "mode": "quick", "include_previous_season": True}
         if season: payload["season"] = str(season)
-            
+
         img_bytes, error_data = await self._fetch_image("/dashen-hero-treemap/image", payload)
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
@@ -840,11 +900,11 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield event.plain_result("❌ 请输入战网ID，如：竞技英雄云图 Player#12345 或先使用 /绑定 指令")
             return
-        
+
         yield event.plain_result(f"🏆 正在获取 {target_id} 的竞技模式英雄云图...")
         payload = {"bnet_id": target_id, "mode": "competitive", "include_previous_season": True}
         if season: payload["season"] = str(season)
-            
+
         img_bytes, error_data = await self._fetch_image("/dashen-hero-treemap/image", payload)
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
@@ -963,7 +1023,7 @@ class OverstatsPlugin(Star):
         if kind not in valid_kinds:
             yield event.plain_result("❌ 参数错误。支持的日志类型：latest, small, big\n例如：/ow更新 small")
             return
-            
+
         yield event.plain_result(f"📰 正在拉取外服 {kind} 更新日志卡片...")
         img_bytes, error_data = await self._fetch_image("/patch-notes/image", {"patch_kind": kind})
         if img_bytes:
@@ -977,7 +1037,7 @@ class OverstatsPlugin(Star):
         if not province or not role:
             yield event.plain_result("❌ 请输入省份名称 and 职责位置，例如：/省榜 北京 tank\n(支持的位置: tank / dps / healer / open)")
             return
-            
+
         yield event.plain_result(f"🏆 正在获取 {province} 地区 【{role}】 位置的大神天梯省榜...")
         payload = {"province": province, "role": role}
         img_bytes, error_data = await self._fetch_image("/dashen-rank-leaderboard/image", payload)
@@ -992,7 +1052,7 @@ class OverstatsPlugin(Star):
         if not province or not hero:
             yield event.plain_result("❌ 请输入省份和英雄名称，例如：/绝活榜 北京 猎空")
             return
-            
+
         yield event.plain_result(f"🎖️ 正在获取 {province} 地区 【{hero}】 的大神英雄专精绝活榜...")
         payload = {"province": province, "hero": hero, "mode": "preset"}
         img_bytes, error_data = await self._fetch_image("/dashen-hero-leaderboard/image", payload)
