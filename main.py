@@ -39,7 +39,6 @@ class OverstatsPlugin(Star):
             self.temp_image_dir.mkdir(parents=True, exist_ok=True)
 
     def _is_qq_official(self, event: AstrMessageEvent) -> bool:
-        """判断当前消息是否来自 QQ 官方机器人平台"""
         umo = event.unified_msg_origin
         if "qq_official" in str(umo).lower():
             return True
@@ -48,28 +47,29 @@ class OverstatsPlugin(Star):
                 return True
         return False
 
+    def _is_reply_bot_msg(self, event: AstrMessageEvent) -> bool:
+        """判断本条消息是否【回复引用了机器人发送的消息】"""
+        msg_obj = event.message_obj
+        if not msg_obj:
+            return False
+        # 存在回复对象，且回复消息发送者是机器人自身
+        if hasattr(msg_obj, "reply") and msg_obj.reply:
+            return str(msg_obj.reply.sender_id) == str(msg_obj.self_id)
+        return False
+
     def _format_markdown_by_platform(self, event: AstrMessageEvent, text: str) -> str:
-        """
-        根据平台环境动态处理文本：
-        如果是 QQ 官方机器人：保留标签并对 text 和 show 属性进行 urlencode
-        如果是其他机器人：剥离 <qqbot-cmd-input> 标签，将其转化为普通文本格式
-        """
         if self._is_qq_official(event):
             def replacer(match):
                 text_val = urllib.parse.quote(match.group(1))
                 show_val = urllib.parse.quote(match.group(2))
                 return f'<qqbot-cmd-input text="{text_val}" show="{show_val}" reference="false" />'
-            
             pattern = r'<qqbot-cmd-input\s+text="([^"]+)"\s+show="([^"]+)"\s+reference="false"\s*/>'
             return re.sub(pattern, replacer, text)
         else:
             def strip_replacer(match):
                 text_val = match.group(1).strip()
                 show_val = match.group(2).strip()
-                if text_val.startswith("/") and not show_val.startswith("/"):
-                    return f"{text_val}"
                 return f"{text_val}"
-            
             pattern = r'<qqbot-cmd-input\s+text="([^"]+)"\s+show="([^"]+)"\s+reference="false"\s*/>'
             return re.sub(pattern, strip_replacer, text)
 
@@ -82,9 +82,7 @@ class OverstatsPlugin(Star):
                     bot_id = str(bot_identity)
         except Exception:
             pass
-        
         file_path = self.plugin_data_dir / f"binds_{bot_id}.json"
-        
         if not file_path.exists():
             try:
                 with open(file_path, "w", encoding="utf-8") as f:
@@ -228,22 +226,18 @@ class OverstatsPlugin(Star):
         try:
             self.temp_image_dir.mkdir(parents=True, exist_ok=True)
             user_id = event.get_sender_id()
-            
             valid_images = [img for img in imgs_list if img]
             if not valid_images:
                 yield event.plain_result("❌ 未能获取到有效的图片数据")
                 return
-
             if self._is_qq_official(event):
                 for i, img_bytes in enumerate(valid_images):
                     img_path = self.temp_image_dir / f"{abs(hash(img_bytes))}_{time.time_ns()}.png"
                     img_path.write_bytes(img_bytes)
-                    
                     if i == 0:
                         chain = [Comp.At(qq=user_id), Comp.Plain("\n"), Comp.Image.fromFileSystem(str(img_path))]
                     else:
                         chain = [Comp.Image.fromFileSystem(str(img_path))]
-                        
                     yield event.chain_result(chain)
                     asyncio.create_task(self._delayed_remove(str(img_path), 2592000))
                     await asyncio.sleep(0.5)
@@ -255,12 +249,10 @@ class OverstatsPlugin(Star):
                     chain.append(Comp.Image.fromFileSystem(str(img_path)))
                     asyncio.create_task(self._delayed_remove(str(img_path), 2592000))
                 yield event.chain_result(chain)
-                
         except Exception as e:
             logger.error(f"多图发送逻辑错误: {e}")
-            yield event.plain_result("❌ 多图发送失败")  
-    
-    # 单局详细核心逻辑抽取，复用代码
+            yield event.plain_result("❌ 多图发送失败")
+
     async def _do_match_detail(self, event: AstrMessageEvent, target_id: str, index: int):
         if index < 0 or index >= 20:
             yield event.plain_result("❌ 错误：单局详细的数字索引范围是 1-20！")
@@ -268,7 +260,6 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield event.plain_result("❌ 未找到有效的战网ID，请先使用 /绑定 指令绑定账号或提供显式的战网ID")
             return
-
         yield event.plain_result(f"📊 正在拉取 {target_id} 的第 {index + 1} 局详细数据...")
         payload = {
             "bnet_id": target_id,
@@ -279,7 +270,6 @@ class OverstatsPlugin(Star):
             "show_all_heroes": True,
             "analyze": True
         }
-        
         url = f"{self.base_url}/dashen-match/detail/replies"
         try:
             client_timeout = aiohttp.ClientTimeout(total=600)
@@ -295,7 +285,6 @@ class OverstatsPlugin(Star):
                         return
                     data = await resp.json()
                     raw_img_list = data.get("replies", [])
-                    
                     if not raw_img_list:
                         yield event.plain_result("❌ 未能生成该单局的详细图片链接")
                         return
@@ -325,7 +314,6 @@ class OverstatsPlugin(Star):
                                 if padding: img_str += '=' * (4 - padding)
                                 try: img_data = base64.b64decode(img_str)
                                 except Exception: pass
-                            
                             if not img_data:
                                 full_img_url = img_str if img_str.startswith("http") else f"{self.base_url.rstrip('/').removesuffix('/api/v2')}{img_str if img_str.startswith('/') else '/' + img_str}"
                                 async with session.get(full_img_url, timeout=30, ssl=False) as img_resp:
@@ -336,7 +324,6 @@ class OverstatsPlugin(Star):
                             continue
                         if img_data:
                             imgs_list.append(img_data)
-                    
                     if imgs_list:
                         async for r in self._send_multiple_images_result(event, imgs_list):
                             yield r
@@ -346,16 +333,13 @@ class OverstatsPlugin(Star):
             logger.error(f"处理单局详细图片异常: {e}")
             yield event.plain_result("❌ 处理图片请求时发生 system 错误")
 
-    # 四层优先级拦截逻辑
     @event_message_type(EventMessageType.ALL)
     async def intercept_text_at(self, event: AstrMessageEvent):
         msg = event.message_str
         if not msg:
             return
-            
         is_at_me = False
         clean_msg = msg.strip()
-        
         if event.message_obj and event.message_obj.message:
             for comp in event.message_obj.message:
                 if comp.__class__.__name__ == "At":
@@ -363,87 +347,81 @@ class OverstatsPlugin(Star):
                         if hasattr(comp, attr) and str(getattr(comp, attr)) == str(event.message_obj.self_id):
                             is_at_me = True
                             break
-                if is_at_me:
-                    break
-        
+                    if is_at_me: break
         is_text_at_lampion = False
         if clean_msg.startswith("@电子路灯"):
             is_text_at_lampion = True
             clean_msg = clean_msg[len("@电子路灯"):].strip()
-        
         if is_at_me and clean_msg.startswith("@"):
             match_at_text = re.match(r'^@\S+\s+(.*)$', clean_msg)
             if match_at_text:
                 clean_msg = match_at_text.group(1).strip()
             else:
                 clean_msg = re.sub(r'^@\S+', '', clean_msg).strip()
-        
         is_private = event.message_obj and not event.message_obj.group_id
         is_triggered = is_at_me or is_text_at_lampion or is_private
-        
         if not is_triggered:
             return
 
-        # 第一层：纯战网ID / 绑定+战网ID（无空格/有空格，兼容#/＃）→ 绑定账号
+        # 第一层：绑定
         bnet_id_pattern = r'[\w\u4e00-\u9fa5\-\_\.]+[#＃]\d{1,6}'
         bind_full_pattern = rf'^({bnet_id_pattern})$|^绑定\s*({bnet_id_pattern})$'
         bind_match = re.fullmatch(bind_full_pattern, clean_msg)
-
         if bind_match:
             new_bind_id = bind_match.group(1) or bind_match.group(2)
             new_bind_id = new_bind_id.strip()
-            
             user_id = event.get_sender_id()
             old_bind_id = await self._get_user_bind_id(user_id)
             await self._set_user_bind_id(user_id, new_bind_id)
-            
             if not old_bind_id:
                 yield event.plain_result(f"✅ 自动绑定成功！已为您关联战网账号【{new_bind_id}】")
             else:
                 yield event.plain_result(f"✅ 自动更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
-            
             event.stop_event()
             return
 
-        # 第二层：裸纯数字 → 回复查单局（取上次大神对局的bnet_id）
+        # 第二层：裸数字核心改动
         if clean_msg.isdigit():
             digit = int(clean_msg)
             if digit < 1 or digit > 20:
                 yield event.plain_result("❌ 错误：单局详细的数字索引范围是 1-20！")
                 event.stop_event()
                 return
-            
             session_id = self._get_session_id(event)
-            last_bnet_id = self.last_match_bnet_id.get(session_id)
-            if not last_bnet_id:
-                yield event.plain_result("❌ 未查询到最近的大神对局记录，请先使用 `/大神对局` 指令获取对局列表后再回复数字！")
-                event.stop_event()
-                return
-            
-            async for r in self._do_match_detail(event, last_bnet_id, digit - 1):
-                yield r
+            # 分支1：回复机器人消息 → 查询A(上次对局人)
+            if self._is_reply_bot_msg(event):
+                last_bnet_id = self.last_match_bnet_id.get(session_id)
+                if not last_bnet_id:
+                    yield event.plain_result("❌ 未查询到最近的大神对局记录，请先使用 `/大神对局` 获取对局列表！")
+                    event.stop_event()
+                    return
+                async for r in self._do_match_detail(event, last_bnet_id, digit - 1):
+                    yield r
+            # 分支2：没有回复 → 查发送人自己
+            else:
+                self_id = event.get_sender_id()
+                own_bnet = await self._get_user_bind_id(event, None)
+                async for r in self._do_match_detail(event, own_bnet, digit - 1):
+                    yield r
             event.stop_event()
             return
 
-        # 第三层：单局详细/单局 + 数字 [bnet_id] → 主动查单局（兼容#/＃）
+        # 第三层：单局详细/单局 +数字 [ID] → 永远优先自己，指定ID除外
         match_detail = re.match(r'^(单局详细|单局)\s+(\d+)(?:\s+([\w\u4e00-\u9fa5\-\_\.]+[#＃]\d{1,6}))?$', clean_msg)
         if match_detail:
-            cmd_type = match_detail.group(1)
             digit = int(match_detail.group(2))
             explicit_bnet_id = match_detail.group(3)
-            
             if digit < 1 or digit > 20:
                 yield event.plain_result("❌ 错误：单局详细的数字索引范围是 1-20！")
                 event.stop_event()
                 return
-            
             target_id = explicit_bnet_id or await self._get_user_bind_id(event.get_sender_id())
             async for r in self._do_match_detail(event, target_id, digit - 1):
                 yield r
             event.stop_event()
             return
 
-        # 第四层：其余指令 → cmd_map前缀匹配（已移除单局相关，无冲突）
+        # 第四层 普通指令
         cmd_map = {
             "owhelp": (self.ow_help, 0),
             "ow帮助": (self.ow_help, 0),
@@ -507,28 +485,21 @@ class OverstatsPlugin(Star):
             "绝活榜": (self.ow_hero_leaderboard, 2),
             "英雄省榜": (self.ow_hero_leaderboard, 2)
         }
-
         if clean_msg.startswith('/'):
             clean_msg = clean_msg.lstrip('/')
-        elif self._is_qq_official(event):
-            pass
-            
         cmd = None
         cmd_args = []
-        
         for k in sorted(cmd_map.keys(), key=len, reverse=True):
             if clean_msg.startswith(k):
                 cmd = k
                 remain = clean_msg[len(k):].strip()
                 cmd_args = remain.split() if remain else []
                 break
-                
         if not cmd:
             parts = clean_msg.split(maxsplit=1)
             if parts and parts[0] in cmd_map:
                 cmd = parts[0]
                 cmd_args = parts[1].split() if len(parts) > 1 else []
-        
         if cmd in cmd_map:
             func, arg_count = cmd_map[cmd]
             try:
@@ -549,7 +520,6 @@ class OverstatsPlugin(Star):
             except Exception as e:
                 logger.error(f"快捷指令分发执行失败 ({cmd}): {e}")
                 yield event.plain_result(f"❌ 执行指令失败: {str(e)}")
-            
             event.stop_event()
 
     @command("所有指令", alias=["别称"])
@@ -559,18 +529,15 @@ class OverstatsPlugin(Star):
 • <qqbot-cmd-input text="/owhelp " show="owhelp" reference="false" /> (别称：<qqbot-cmd-input text="/ow菜单 " show="ow菜单" reference="false" />, <qqbot-cmd-input text="/ow帮助 " show="ow帮助" reference="false" />, <qqbot-cmd-input text="/OW帮助 " show="OW帮助" reference="false" />, <qqbot-cmd-input text="/help " show="help" reference="false" />)
 • <qqbot-cmd-input text="/所有指令 " show="所有指令" reference="false" /> (别称：<qqbot-cmd-input text="/别称 " show="别称" reference="false" />)
 • <qqbot-cmd-input text="/大神绑定 " show="大神绑定" reference="false" /> (别称：<qqbot-cmd-input text="/绑定 " show="绑定" reference="false" />)
-
 🔹 **数据查询类：**
 • <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> (别称：<qqbot-cmd-input text="/详情卡片 " show="详情卡片" reference="false" />, <qqbot-cmd-input text="/战绩查询 " show="战绩查询" reference="false" />, <qqbot-cmd-input text="/数据 " show="数据" reference="false" />)
 • <qqbot-cmd-input text="/大神对局 " show="大神对局" reference="false" /> (别称：<qqbot-cmd-input text="/最近对局 " show="最近对局" reference="false" />, <qqbot-cmd-input text="/战绩 " show="战绩" reference="false" />, <qqbot-cmd-input text="/对局 " show="对局" reference="false" />)
 • <qqbot-cmd-input text="/单局详细 " show="单局详细" reference="false" /> (别称：<qqbot-cmd-input text="/单局 " show="单局" reference="false" />)
 • <qqbot-cmd-input text="/同玩查询 " show="同玩查询" reference="false" /> (别称：<qqbot-cmd-input text="/开黑胜率 " show="开黑胜率" reference="false" />)
-
 🔹 **总结类：**
 • <qqbot-cmd-input text="/今日总结 " show="今日总结" reference="false" /> (别称：<qqbot-cmd-input text="/今日 " show="今日" reference="false" />, <qqbot-cmd-input text="/今日数据 " show="今日数据" reference="false" />)
 • <qqbot-cmd-input text="/昨日总结 " show="昨日总结" reference="false" /> (别称：<qqbot-cmd-input text="/昨日 " show="昨日" reference="false" />, <qqbot-cmd-input text="/昨日数据 " show="昨日数据" reference="false" />, <qqbot-cmd-input text="/昨天数据 " show="昨天数据" reference="false" />, <qqbot-cmd-input text="/昨天 " show="昨天" reference="false" />)
 • <qqbot-cmd-input text="/周度总结 " show="周度总结" reference="false" /> (别称：<qqbot-cmd-input text="/本周总结 " show="本周总结" reference="false" />, <qqbot-cmd-input text="/本周数据 " show="本周数据" reference="false" />, <qqbot-cmd-input text="/本周 " show="本周" reference="false" />)
-
 🔹 **图表与排行类：**
 • <qqbot-cmd-input text="/历史段位 " show="历史段位" reference="false" /> (别称：<qqbot-cmd-input text="/历届段位 " show="历届段位" reference="false" />)
 • <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" /> (别称：<qqbot-cmd-input text="/快速强度指数 " show="快速强度指数" reference="false" />)
@@ -580,14 +547,12 @@ class OverstatsPlugin(Star):
 • <qqbot-cmd-input text="/省榜 " show="省榜" reference="false" /> (别称：<qqbot-cmd-input text="/排行 " show="排行" reference="false" />)
 • <qqbot-cmd-input text="/绝活榜 " show="绝活榜" reference="false" /> (别称：<qqbot-cmd-input text="/英雄省榜 " show="英雄省榜" reference="false" />)
 • <qqbot-cmd-input text="/banpick " show="banpick" reference="false" /> (别称：<qqbot-cmd-input text="/全英雄排行 " show="全英雄排行" reference="false" />)
-
 🔹 **游戏资讯类：**
 • <qqbot-cmd-input text="/威能 " show="威能" reference="false" />, <qqbot-cmd-input text="/ow英雄 " show="ow英雄" reference="false" />, <qqbot-cmd-input text="/获取段位分布 " show="获取段位分布" reference="false" />, <qqbot-cmd-input text="/mappick " show="mappick" reference="false" />, <qqbot-cmd-input text="/皮肤搜索 " show="皮肤搜索" reference="false" />
 • <qqbot-cmd-input text="/商店 " show="商店" reference="false" /> (别称：<qqbot-cmd-input text="/ow商店 " show="ow商店" reference="false" />)
 • <qqbot-cmd-input text="/ow赛事 " show="ow赛事" reference="false" /> (别称：<qqbot-cmd-input text="/赛事 " show="赛事" reference="false" />)
 • <qqbot-cmd-input text="/ow活动 " show="ow活动" reference="false" /> (别称：<qqbot-cmd-input text="/活动 " show="活动" reference="false" />)
 • <qqbot-cmd-input text="/ow更新 " show="ow更新" reference="false" /> (别称：<qqbot-cmd-input text="/版本更新 " show="版本更新" reference="false" />)"""
-        
         yield event.plain_result(self._format_markdown_by_platform(event, text))
 
     @command("多图测试")
@@ -601,11 +566,9 @@ class OverstatsPlugin(Star):
                         imgs_list.append(f.read())
                 except Exception as e:
                     logger.error(f"读取测试图片 {img_name} 失败: {e}")
-        
         if not imgs_list:
             yield event.plain_result("❌ 未能读取到测试图片。")
             return
-            
         async for r in self._send_multiple_images_result(event, imgs_list):
             yield r
 
@@ -621,12 +584,10 @@ class OverstatsPlugin(Star):
 ⚔️ ➤ <qqbot-cmd-input text="/威能 " show="威能" reference="false" />「英雄名」 ➤ <qqbot-cmd-input text="/ow英雄 " show="ow 英雄" reference="false" />「英雄名」 ➤ <qqbot-cmd-input text="/banpick " show="banpick" reference="false" /> ➤ <qqbot-cmd-input text="/mappick " show="mappick" reference="false" />
 🌍 ➤ <qqbot-cmd-input text="/同玩查询 " show="同玩查询" reference="false" />「ID1」「ID2」 ➤ <qqbot-cmd-input text="/商店 " show="商店" reference="false" /> ➤ <qqbot-cmd-input text="/皮肤搜索 " show="皮肤搜索" reference="false" /> ➤ <qqbot-cmd-input text="/ow赛事 " show="ow 赛事" reference="false" />
 📰 ➤ <qqbot-cmd-input text="/ow更新 " show="ow更新" reference="false" />「latest/small/big」
-💡 提示：在「大神对局」图片发出来后，直接回复数字即可看单局详细。
+💡 提示：回复对局图片直接发数字=查询原发送人对局；直接单局详细/裸数字=查询自己
 发送 <qqbot-cmd-input text="/别称 " show="别称" reference="false" /> 可查看所有指令对应别称列表。"""
-        
         yield event.plain_result(self._format_markdown_by_platform(event, help_text))
 
-    # 优化绑定指令：兼容#/＃ + 无空格 + 清晰报错
     @command("大神绑定", alias=["绑定"])
     async def dashen_bind(self, event: AstrMessageEvent, bnet_id: str):
         user_id = event.get_sender_id()
@@ -634,11 +595,9 @@ class OverstatsPlugin(Star):
         if not bnet_id or not re.fullmatch(bnet_id_pattern, bnet_id.strip()):
             yield event.plain_result("❌ 绑定失败！请输入规范战网ID\n✅ 支持格式：绑定 战网ID / 绑定战网ID（可无空格）\n✅ 支持符号：# / ＃\n示例：绑定 Player#12345 或 绑定Player＃12345")
             return
-        
         old_bind_id = await self._get_user_bind_id(user_id)
         new_bind_id = bnet_id.strip()
         await self._set_user_bind_id(user_id, new_bind_id)
-        
         if not old_bind_id:
             yield event.plain_result(f"✅ 绑定成功！关联战网账号【{new_bind_id}】")
         else:
@@ -650,10 +609,8 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield event.plain_result("❌ 请输入战网ID，如：今日总结 Player#12345 或先使用 /绑定 指令")
             return
-        
         yield event.plain_result(f"⏳ 正在计算 {target_id} 的今日战绩总结...")
         img_bytes, error_data = await self._fetch_image("/dashen-summary/today/image", {"bnet_id": target_id})
-        
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         elif error_data and error_data.get("error") == "summary_empty" and error_data.get("details", {}).get("scope") == "today":
@@ -725,10 +682,8 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield event.plain_result("❌ 请输入战网ID，如：大神对局 Player#12345 或先使用 /绑定 指令")
             return
-            
         session_id = self._get_session_id(event)
         self.last_match_bnet_id[session_id] = target_id
-
         yield event.plain_result(f"📊 正在拉取 {target_id} 的最近对局...")
         img_bytes, error_data = await self._fetch_image("/dashen-match/image", {"bnet_id": target_id})
         if img_bytes:
@@ -744,24 +699,19 @@ class OverstatsPlugin(Star):
     async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = None, arg2: str = None):
         index = 0
         bnet_id = None
-        
         for arg in [arg1, arg2]:
             if not arg:
                 continue
-            if arg.isdigit(): 
+            if arg.isdigit():
                 digit = int(arg)
                 if digit > 20:
                     yield event.plain_result("❌ 错误：单局详细的数字索引不能大于 20！")
                     return
                 index = max(0, digit - 1) if digit > 0 else 0
-            else: 
+            else:
                 bnet_id = arg
-
-        if not bnet_id:
-            session_id = self._get_session_id(event)
-            bnet_id = self.last_match_bnet_id.get(session_id) or await self._get_user_bind_id(event.get_sender_id())
-
-        async for r in self._do_match_detail(event, bnet_id, index):
+        target_id = bnet_id or await self._get_user_bind_id(event.get_sender_id())
+        async for r in self._do_match_detail(event, target_id, index):
             yield r
 
     @command("历史段位", alias=["历届段位"])
@@ -836,11 +786,9 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield event.plain_result("❌ 请输入战网ID，如：快速英雄云图 Player#12345 或先使用 /绑定 指令")
             return
-        
         yield event.plain_result(f"📊 正在获取 {target_id} 的快速模式英雄云图...")
         payload = {"bnet_id": target_id, "mode": "quick", "include_previous_season": True}
         if season: payload["season"] = str(season)
-            
         img_bytes, error_data = await self._fetch_image("/dashen-hero-treemap/image", payload)
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
@@ -858,11 +806,9 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield event.plain_result("❌ 请输入战网ID，如：竞技英雄云图 Player#12345 或先使用 /绑定 指令")
             return
-        
         yield event.plain_result(f"🏆 正在获取 {target_id} 的竞技模式英雄云图...")
         payload = {"bnet_id": target_id, "mode": "competitive", "include_previous_season": True}
         if season: payload["season"] = str(season)
-            
         img_bytes, error_data = await self._fetch_image("/dashen-hero-treemap/image", payload)
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
@@ -981,7 +927,6 @@ class OverstatsPlugin(Star):
         if kind not in valid_kinds:
             yield event.plain_result("❌ 参数错误。支持的日志类型：latest, small, big\n例如：/ow更新 small")
             return
-            
         yield event.plain_result(f"📰 正在拉取外服 {kind} 更新日志卡片...")
         img_bytes, error_data = await self._fetch_image("/patch-notes/image", {"patch_kind": kind})
         if img_bytes:
@@ -995,7 +940,6 @@ class OverstatsPlugin(Star):
         if not province or not role:
             yield event.plain_result("❌ 请输入省份名称 and 职责位置，例如：/省榜 北京 tank\n(支持的位置: tank / dps / healer / open)")
             return
-            
         yield event.plain_result(f"🏆 正在获取 {province} 地区 【{role}】 位置的大神天梯省榜...")
         payload = {"province": province, "role": role}
         img_bytes, error_data = await self._fetch_image("/dashen-rank-leaderboard/image", payload)
@@ -1010,7 +954,6 @@ class OverstatsPlugin(Star):
         if not province or not hero:
             yield event.plain_result("❌ 请输入省份和英雄名称，例如：/绝活榜 北京 猎空")
             return
-            
         yield event.plain_result(f"🎖️ 正在获取 {province} 地区 【{hero}】 的大神英雄专精绝活榜...")
         payload = {"province": province, "hero": hero, "mode": "preset"}
         img_bytes, error_data = await self._fetch_image("/dashen-hero-leaderboard/image", payload)
