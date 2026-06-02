@@ -7,6 +7,7 @@ import re
 import base64
 import json
 import time
+import urllib.parse
 from pathlib import Path
 from astrbot.api.all import *
 import astrbot.api.message_components as Comp
@@ -15,7 +16,7 @@ from astrbot.api.event import MessageChain
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.6.1")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.19")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -36,6 +37,44 @@ class OverstatsPlugin(Star):
             self.plugin_data_dir = Path(tempfile.gettempdir())
             self.temp_image_dir = self.plugin_data_dir / "temp"
             self.temp_image_dir.mkdir(parents=True, exist_ok=True)
+
+    def _is_qq_official(self, event: AstrMessageEvent) -> bool:
+        """判断当前消息是否来自 QQ 官方机器人平台"""
+        umo = event.unified_msg_origin
+        if "qq_official" in str(umo).lower():
+            return True
+        if hasattr(event, "message_obj") and event.message_obj:
+            if "qq_official" in str(event.message_obj).lower():
+                return True
+        return False
+
+    def _format_markdown_by_platform(self, event: AstrMessageEvent, text: str) -> str:
+        """
+        根据平台环境动态处理文本：
+        如果是 QQ 官方机器人：保留标签并对 text 和 show 属性进行 urlencode
+        如果是其他机器人：剥离 <qqbot-cmd-input> 标签，将其转化为普通文本格式
+        """
+        if self._is_qq_official(event):
+            # QQ 官方：自动 urlencode 参数指令标签
+            def replacer(match):
+                text_val = urllib.parse.quote(match.group(1))
+                show_val = urllib.parse.quote(match.group(2))
+                return f'<qqbot-cmd-input text="{text_val}" show="{show_val}" reference="false" />'
+            
+            pattern = r'<qqbot-cmd-input\s+text="([^"]+)"\s+show="([^"]+)"\s+reference="false"\s*/>'
+            return re.sub(pattern, replacer, text)
+        else:
+            # 其他机器人：将 <qqbot-cmd-input text="/xxx " show="yyy" ... /> 替换为 "yyy(/xxx)" 或直接显示 show 名
+            # 为了排版美观，这里我们直接将其还原为最干净的纯文本指令形式（取 show 属性的值或 text 属性的值）
+            def strip_replacer(match):
+                text_val = match.group(1).strip()
+                show_val = match.group(2).strip()
+                if text_val.startswith("/") and not show_val.startswith("/"):
+                    return f"{text_val}" # 统一还原为标准的带斜杠指令展示
+                return f"{text_val}"
+            
+            pattern = r'<qqbot-cmd-input\s+text="([^"]+)"\s+show="([^"]+)"\s+reference="false"\s*/>'
+            return re.sub(pattern, strip_replacer, text)
 
     def _get_binds_file_path(self) -> Path:
         bot_id = "default"
@@ -182,70 +221,44 @@ class OverstatsPlugin(Star):
             img_path.write_bytes(img_bytes)
             user_id = event.get_sender_id()
             chain = [Comp.At(qq=user_id), Comp.Plain("\n" if not fallback_text else f"\n{fallback_text}\n"), Comp.Image.fromFileSystem(str(img_path))]
-            # 缓存 30 天 (2592000 秒)
             asyncio.create_task(self._delayed_remove(str(img_path), 2592000))
             return event.chain_result(chain)
         except Exception as e:
             logger.error(f"构建图片消息链时发生错误: {e}")
             return event.plain_result(fallback_text or "❌ 机器人构建图片组件失败")
+
     async def _send_multiple_images_result(self, event: AstrMessageEvent, imgs_list: list[bytes]):
-        """
-        彻底优化版多图发送：
-        统一使用 yield 返回，让 AstrBot 框架和适配器自行处理多条消息的发送和排队。
-        避免直接调用 send_message 导致的 msg_id 过期问题。
-        """
         try:
             self.temp_image_dir.mkdir(parents=True, exist_ok=True)
             user_id = event.get_sender_id()
-            umo = event.unified_msg_origin
             
             valid_images = [img for img in imgs_list if img]
             if not valid_images:
                 yield event.plain_result("❌ 未能获取到有效的图片数据")
                 return
 
-            # 判断当前环境是否为 QQ 官方机器人
-            is_qq_official = False
-            if "qq_official" in str(umo).lower():
-                is_qq_official = True
-            elif hasattr(event, "message_obj") and event.message_obj:
-                if "qq_official" in str(event.message_obj).lower():
-                    is_qq_official = True
-            
-            if is_qq_official:
+            if self._is_qq_official(event):
                 # ====== QQ官方机器人多图逻辑 ======
                 for i, img_bytes in enumerate(valid_images):
                     img_path = self.temp_image_dir / f"{abs(hash(img_bytes))}_{time.time_ns()}.png"
                     img_path.write_bytes(img_bytes)
                     
                     if i == 0:
-                        # 第一张图片：带上 At
                         chain = [Comp.At(qq=user_id), Comp.Plain("\n"), Comp.Image.fromFileSystem(str(img_path))]
                     else:
-                        # 后续图片：只发图，避免过多 At 打扰
                         chain = [Comp.Image.fromFileSystem(str(img_path))]
                         
-                    # 统一使用 yield 交给框架处理，避免 msg_id 过期报错
                     yield event.chain_result(chain)
-                    
-                    # 异步清理临时文件 缓存 30 天 (2592000 秒)
                     asyncio.create_task(self._delayed_remove(str(img_path), 2592000))
-                    # 稍微增加延迟，防止触发 QQ 官方的高频消息风控
                     await asyncio.sleep(0.5)
             else:
                 # ====== 非QQ官方机器人多图逻辑 ======
-                # 构建一个同时包含 At 和 所有图片组件 的完整消息链一次性发出
                 chain = [Comp.At(qq=user_id), Comp.Plain("\n")]
-                
                 for img_bytes in valid_images:
                     img_path = self.temp_image_dir / f"{abs(hash(img_bytes))}_{time.time_ns()}.png"
                     img_path.write_bytes(img_bytes)
-                    
                     chain.append(Comp.Image.fromFileSystem(str(img_path)))
-                    # 异步清理临时文件 缓存 30 天 (2592000 秒)
                     asyncio.create_task(self._delayed_remove(str(img_path), 2592000))
-                
-                # 一次性完整发出
                 yield event.chain_result(chain)
                 
         except Exception as e:
@@ -295,7 +308,6 @@ class OverstatsPlugin(Star):
         
         if match and ("绑定" in clean_msg or re.fullmatch(bnet_id_pattern, clean_msg)):
             new_bind_id = match.group(1)
-            
             if new_bind_id.startswith("绑定"):
                 new_bind_id = new_bind_id[2:]
                 
@@ -392,7 +404,11 @@ class OverstatsPlugin(Star):
             "英雄省榜": (self.ow_hero_leaderboard, 2)
         }
 
-        clean_msg = clean_msg.lstrip('/')
+        if clean_msg.startswith('/'):
+            clean_msg = clean_msg.lstrip('/')
+        elif self._is_qq_official(event):
+            pass # QQ 官方按原样匹配
+            
         cmd = None
         cmd_args = []
         
@@ -427,7 +443,7 @@ class OverstatsPlugin(Star):
                     arg2 = cmd_args[1] if len(cmd_args) > 1 else None
                     async for r in func(event, arg1, arg2): yield r
             except Exception as e:
-                logger.error(f"纯文本快捷指令分发执行失败 ({cmd}): {e}")
+                logger.error(f"快捷指令分发执行失败 ({cmd}): {e}")
                 yield event.plain_result(f"❌ 执行指令失败: {str(e)}")
             
             event.stop_event()
@@ -435,42 +451,45 @@ class OverstatsPlugin(Star):
     @command("所有指令", alias=["别称"])
     async def show_aliases(self, event: AstrMessageEvent):
         """展示所有插件指令及其别称"""
-        text = (
-            "📋 **【Overstats 指令及别称大全】**\n\n"
-            "🔹 **基础与绑定类：**\n"
-            "• `owhelp` (别称：ow菜单, ow帮助, OW帮助, help)\n"
-            "• `所有指令` (别称：别称)\n"
-            "• `大神绑定` (别称：绑定)\n\n"
-            "🔹 **数据查询类：**\n"
-            "• `大神数据` (别称：详情卡片, 战绩查询, 数据)\n"
-            "• `大神对局` (别称：最近对局, 战绩)\n"
-            "• `单局详细` (别称：单局)\n"
-            "• `同玩查询` (别称：开黑胜率)\n\n"
-            "🔹 **总结类：**\n"
-            "• `今日总结` (别称：今日, 今日数据)\n"
-            "• `昨日总结` (别称：昨日, 昨日数据, 昨天数据, 昨天)\n"
-            "• `周度总结` (别称：本周总结, 本周数据, 本周)\n\n"
-            "🔹 **图表与排行类：**\n"
-            "• `历史段位` (别称：历届段位)\n"
-            "• `快速强度` (别称：快速强度指数)\n"
-            "• `竞技强度` (别称：竞技强度指数)\n"
-            "• `快速英雄云图` (别称：快速云图)\n"
-            "• `竞技英雄云图` (别称：竞技云图)\n"
-            "• `省榜` (别称：排行)\n"
-            "• `绝活榜` (别称：英雄省榜)\n"
-            "• `banpick` (别称：全英雄排行)\n\n"
-            "🔹 **游戏资讯类：**\n"
-            "• `威能`, `ow英雄`, `获取段位分布`, `mappick`, `皮肤搜索`\n"
-            "• `商店` (别称：ow商店)\n"
-            "• `ow赛事` (别称：赛事)\n"
-            "• `ow活动` (别称：活动)\n"
-            "• `ow更新` (别称：版本更新)"
-        )
-        yield event.plain_result(text)
+        text = """📋 **【Overstats 指令及别称大全】**
+
+🔹 **基础与绑定类：**
+• <qqbot-cmd-input text="/owhelp " show="owhelp" reference="false" /> (别称：<qqbot-cmd-input text="/ow菜单 " show="ow菜单" reference="false" />, <qqbot-cmd-input text="/ow帮助 " show="ow帮助" reference="false" />, <qqbot-cmd-input text="/OW帮助 " show="OW帮助" reference="false" />, <qqbot-cmd-input text="/help " show="help" reference="false" />)
+• <qqbot-cmd-input text="/所有指令 " show="所有指令" reference="false" /> (别称：<qqbot-cmd-input text="/别称 " show="别称" reference="false" />)
+• <qqbot-cmd-input text="/大神绑定 " show="大神绑定" reference="false" /> (别称：<qqbot-cmd-input text="/绑定 " show="绑定" reference="false" />)
+
+🔹 **数据查询类：**
+• <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> (别称：<qqbot-cmd-input text="/详情卡片 " show="详情卡片" reference="false" />, <qqbot-cmd-input text="/战绩查询 " show="战绩查询" reference="false" />, <qqbot-cmd-input text="/数据 " show="数据" reference="false" />)
+• <qqbot-cmd-input text="/大神对局 " show="大神对局" reference="false" /> (别称：<qqbot-cmd-input text="/最近对局 " show="最近对局" reference="false" />, <qqbot-cmd-input text="/战绩 " show="战绩" reference="false" />)
+• <qqbot-cmd-input text="/单局详细 " show="单局详细" reference="false" /> (别称：<qqbot-cmd-input text="/单局 " show="单局" reference="false" />)
+• <qqbot-cmd-input text="/同玩查询 " show="同玩查询" reference="false" /> (别称：<qqbot-cmd-input text="/开黑胜率 " show="开黑胜率" reference="false" />)
+
+🔹 **总结类：**
+• <qqbot-cmd-input text="/今日总结 " show="今日总结" reference="false" /> (别称：<qqbot-cmd-input text="/今日 " show="今日" reference="false" />, <qqbot-cmd-input text="/今日数据 " show="今日数据" reference="false" />)
+• <qqbot-cmd-input text="/昨日总结 " show="昨日总结" reference="false" /> (别称：<qqbot-cmd-input text="/昨日 " show="昨日" reference="false" />, <qqbot-cmd-input text="/昨日数据 " show="昨日数据" reference="false" />, <qqbot-cmd-input text="/昨天数据 " show="昨天数据" reference="false" />, <qqbot-cmd-input text="/昨天 " show="昨天" reference="false" />)
+• <qqbot-cmd-input text="/周度总结 " show="周度总结" reference="false" /> (别称：<qqbot-cmd-input text="/本周总结 " show="本周总结" reference="false" />, <qqbot-cmd-input text="/本周数据 " show="本周数据" reference="false" />, <qqbot-cmd-input text="/本周 " show="本周" reference="false" />)
+
+🔹 **图表与排行类：**
+• <qqbot-cmd-input text="/历史段位 " show="历史段位" reference="false" /> (别称：<qqbot-cmd-input text="/历届段位 " show="历届段位" reference="false" />)
+• <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" /> (别称：<qqbot-cmd-input text="/快速强度指数 " show="快速强度指数" reference="false" />)
+• <qqbot-cmd-input text="/竞技强度 " show="竞技强度" reference="false" /> (别称：<qqbot-cmd-input text="/竞技强度指数 " show="竞技强度指数" reference="false" />)
+• <qqbot-cmd-input text="/快速英雄云图 " show="快速英雄云图" reference="false" /> (别称：<qqbot-cmd-input text="/快速云图 " show="快速云图" reference="false" />)
+• <qqbot-cmd-input text="/竞技英雄云图 " show="竞技英雄云图" reference="false" /> (别称：<qqbot-cmd-input text="/竞技云图 " show="竞技云图" reference="false" />)
+• <qqbot-cmd-input text="/省榜 " show="省榜" reference="false" /> (别称：<qqbot-cmd-input text="/排行 " show="排行" reference="false" />)
+• <qqbot-cmd-input text="/绝活榜 " show="绝活榜" reference="false" /> (别称：<qqbot-cmd-input text="/英雄省榜 " show="英雄省榜" reference="false" />)
+• <qqbot-cmd-input text="/banpick " show="banpick" reference="false" /> (别称：<qqbot-cmd-input text="/全英雄排行 " show="全英雄排行" reference="false" />)
+
+🔹 **游戏资讯类：**
+• <qqbot-cmd-input text="/威能 " show="威能" reference="false" />, <qqbot-cmd-input text="/ow英雄 " show="ow英雄" reference="false" />, <qqbot-cmd-input text="/获取段位分布 " show="获取段位分布" reference="false" />, <qqbot-cmd-input text="/mappick " show="mappick" reference="false" />, <qqbot-cmd-input text="/皮肤搜索 " show="皮肤搜索" reference="false" />
+• <qqbot-cmd-input text="/商店 " show="商店" reference="false" /> (别称：<qqbot-cmd-input text="/ow商店 " show="ow商店" reference="false" />)
+• <qqbot-cmd-input text="/ow赛事 " show="ow赛事" reference="false" /> (别称：<qqbot-cmd-input text="/赛事 " show="赛事" reference="false" />)
+• <qqbot-cmd-input text="/ow活动 " show="ow活动" reference="false" /> (别称：<qqbot-cmd-input text="/活动 " show="活动" reference="false" />)
+• <qqbot-cmd-input text="/ow更新 " show="ow更新" reference="false" /> (别称：<qqbot-cmd-input text="/版本更新 " show="版本更新" reference="false" />)"""
+        
+        yield event.plain_result(self._format_markdown_by_platform(event, text))
 
     @command("多图测试")
     async def multi_image_test(self, event: AstrMessageEvent):
-        """测试多图发送功能（不在帮助菜单显示）"""
         imgs_list = []
         for img_name in ["test1.png", "test2.png", "test3.png"]:
             img_path = self.plugin_data_dir / img_name
@@ -482,7 +501,7 @@ class OverstatsPlugin(Star):
                     logger.error(f"读取测试图片 {img_name} 失败: {e}")
         
         if not imgs_list:
-            yield event.plain_result("❌ 未能读取到测试图片。请确认 test1.png, test2.png, test3.png 已放入 plugin_data/overstats_full 目录中。")
+            yield event.plain_result("❌ 未能读取到测试图片。")
             return
             
         async for r in self._send_multiple_images_result(event, imgs_list):
@@ -490,21 +509,20 @@ class OverstatsPlugin(Star):
 
     @command("owhelp", alias=["ow菜单", "ow帮助", "OW帮助", "help"])
     async def ow_help(self, event: AstrMessageEvent):
-        help_text = (
-            "📌 Overstats 查询菜单\n"
-            "🔗 ➤ 绑定「战网 ID」\n"
-            "📋 ➤ 今日 ➤ 昨日 ➤ 本周\n"
-            "📊 ➤ 大神数据 ➤ 大神对局 ➤ 单局详细「数字」\n"
-            "📈 ➤ 快速强度 ➤ 竞技强度 ➤ 获取段位分布\n"
-            "🗺️ ➤ 快速云图 ➤ 竞技云图\n"
-            "🏆 ➤ 省榜「省份」「位置」 ➤ 绝活榜「省份」「英雄」\n"
-            "⚔️ ➤ 威能「英雄名」 ➤ ow 英雄「英雄名」 ➤ banpick ➤ mappick\n"
-            "🌍 ➤ 同玩查询「ID1」「ID2」 ➤ 商店 ➤ 皮肤搜索 ➤ ow 赛事\n"
-            "📰 ➤ ow更新「latest/small/big」\n"
-            "💡 提示：在「大神对局」图片发出来后，直接回复数字即可看单局详细。\n"
-            "发送「别称」可查看所有指令对应别称列表。"
-        )
-        yield event.plain_result(help_text)
+        help_text = """📌 Overstats 查询菜单
+🔗 ➤ <qqbot-cmd-input text="/绑定 " show="绑定" reference="false" />「战网 ID」
+📋 ➤ <qqbot-cmd-input text="/今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="/昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="/周度总结 " show="本周" reference="false" />
+📊 ➤ <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="/大神对局 " show="大神对局" reference="false" /> ➤ <qqbot-cmd-input text="/单局详细 " show="单局详细" reference="false" />「数字」
+📈 ➤ <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" /> ➤ <qqbot-cmd-input text="/竞技强度 " show="竞技强度" reference="false" /> ➤ <qqbot-cmd-input text="/获取段位分布 " show="获取段位分布" reference="false" />
+🗺️ ➤ <qqbot-cmd-input text="/快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="/竞技英雄云图 " show="竞技云图" reference="false" />
+🏆 ➤ <qqbot-cmd-input text="/省榜 " show="省榜" reference="false" />「省份」「位置」 ➤ <qqbot-cmd-input text="/绝活榜 " show="绝活榜" reference="false" />「省份」「英雄」
+⚔️ ➤ <qqbot-cmd-input text="/威能 " show="威能" reference="false" />「英雄名」 ➤ <qqbot-cmd-input text="/ow英雄 " show="ow 英雄" reference="false" />「英雄名」 ➤ <qqbot-cmd-input text="/banpick " show="banpick" reference="false" /> ➤ <qqbot-cmd-input text="/mappick " show="mappick" reference="false" />
+🌍 ➤ <qqbot-cmd-input text="/同玩查询 " show="同玩查询" reference="false" />「ID1」「ID2」 ➤ <qqbot-cmd-input text="/商店 " show="商店" reference="false" /> ➤ <qqbot-cmd-input text="/皮肤搜索 " show="皮肤搜索" reference="false" /> ➤ <qqbot-cmd-input text="/ow赛事 " show="ow 赛事" reference="false" />
+📰 ➤ <qqbot-cmd-input text="/ow更新 " show="ow更新" reference="false" />「latest/small/big」
+💡 提示：在「大神对局」图片发出来后，直接回复数字即可看单局详细。
+发送 <qqbot-cmd-input text="/别称 " show="别称" reference="false" /> 可查看所有指令对应别称列表。"""
+        
+        yield event.plain_result(self._format_markdown_by_platform(event, help_text))
 
     @command("大神绑定", alias=["绑定"])
     async def dashen_bind(self, event: AstrMessageEvent, bnet_id: str):
@@ -679,7 +697,6 @@ class OverstatsPlugin(Star):
                         return
 
                     imgs_list = []
-                    
                     for u in raw_img_list:
                         img_str = ""
                         if isinstance(u, dict):
@@ -705,19 +722,14 @@ class OverstatsPlugin(Star):
                             elif len(img_str) > 100 and not img_str.startswith("http") and not img_str.startswith("/"):
                                 padding = len(img_str) % 4
                                 if padding: img_str += '=' * (4 - padding)
-                                try:
-                                    img_data = base64.b64decode(img_str)
-                                except Exception:
-                                    pass
+                                try: img_data = base64.b64decode(img_str)
+                                except Exception: pass
                             
                             if not img_data:
                                 full_img_url = img_str if img_str.startswith("http") else f"{self.base_url.rstrip('/').removesuffix('/api/v2')}{img_str if img_str.startswith('/') else '/' + img_str}"
                                 async with session.get(full_img_url, timeout=30, ssl=False) as img_resp:
                                     if img_resp.status == 200:
                                         img_data = await img_resp.read()
-                                    else:
-                                        logger.error(f"下载战绩图片失败: {img_resp.status}, URL: {full_img_url}")
-
                         except Exception as e:
                             logger.error(f"处理图片失败: {e}")
                             continue
@@ -730,7 +742,6 @@ class OverstatsPlugin(Star):
                             yield r
                     else:
                         yield event.plain_result("❌ 未能获取到有效的图片数据")
-
         except Exception as e:
             logger.error(f"处理单局详细图片异常: {e}")
             yield event.plain_result("❌ 处理图片请求时发生 system 错误")
@@ -809,13 +820,8 @@ class OverstatsPlugin(Star):
             return
         
         yield event.plain_result(f"📊 正在获取 {target_id} 的快速模式英雄云图...")
-        payload = {
-            "bnet_id": target_id,
-            "mode": "quick",
-            "include_previous_season": True
-        }
-        if season:
-            payload["season"] = str(season)
+        payload = {"bnet_id": target_id, "mode": "quick", "include_previous_season": True}
+        if season: payload["season"] = str(season)
             
         img_bytes, error_data = await self._fetch_image("/dashen-hero-treemap/image", payload)
         if img_bytes:
@@ -836,13 +842,8 @@ class OverstatsPlugin(Star):
             return
         
         yield event.plain_result(f"🏆 正在获取 {target_id} 的竞技模式英雄云图...")
-        payload = {
-            "bnet_id": target_id,
-            "mode": "competitive",
-            "include_previous_season": True
-        }
-        if season:
-            payload["season"] = str(season)
+        payload = {"bnet_id": target_id, "mode": "competitive", "include_previous_season": True}
+        if season: payload["season"] = str(season)
             
         img_bytes, error_data = await self._fetch_image("/dashen-hero-treemap/image", payload)
         if img_bytes:
@@ -918,7 +919,6 @@ class OverstatsPlugin(Star):
         img_bytes, error_data = await self._fetch_image("/patch-notes/image", {"patch_kind": "big"})
         if not img_bytes:
             img_bytes, error_data = await self._fetch_image("/patch-notes/image", {"patch_kind": "latest"})
-        
         if img_bytes:
             yield self._send_image_result(event, img_bytes)
         else:
