@@ -16,7 +16,7 @@ from astrbot.api.event import MessageChain
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.1.19")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.6.3")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
