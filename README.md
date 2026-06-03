@@ -4,6 +4,7 @@
 
 > ⚠️ **声明**：本插件的大部分代码并非人类编写（由 AI 协作完成），如有未能预料的异常，欢迎提交 Issue。
 
+
 ---
 
 ## 🌟 核心特性
@@ -22,6 +23,7 @@
 ## 🛠️ 前置准备
 
 本插件**仅用于 AstrBot 与 Overstats 后端通讯**。在安装本插件之前，您**必须先在服务器上部署原项目服务**。
+如不想独立部署后端推荐使用另一款插件https://github.com/singularity2000/astrbot_plugin_ow_dashen
 
 1. 请前往 [AddOneSecondL/Overstats](https://github.com/AddOneSecondL/Overstats) 仓库，按照其说明文档完成服务部署。
 2. 确保 Overstats 后端的 API 端口（默认 `18080`）可以被 AstrBot 所在的服务器正常访问。
