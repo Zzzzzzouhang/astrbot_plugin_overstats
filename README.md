@@ -49,7 +49,7 @@
 | 配置项 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `overstats_api_url` | String | `http://127.0.0.1:18080/api/v2` | Overstats 服务 API  |
-> ⚠️ 
+> ⚠️ 监听全部端口需要在Overstats/config/config.py，改API_HOST = "0.0.0.0"，外网访问需要服务器开放对应端口防火墙
 ---
 
 ## 📋 指令大全
