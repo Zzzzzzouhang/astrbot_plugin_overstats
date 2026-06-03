@@ -48,8 +48,8 @@
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `overstats_api_url` | String | `http://127.0.0.1:18080/api/v2` | 部署的 Overstats 服务 API 根路径 |
-
+| `overstats_api_url` | String | `http://127.0.0.1:18080/api/v2` | Overstats 服务 API  |
+> ⚠️ 
 ---
 
 ## 📋 指令大全
