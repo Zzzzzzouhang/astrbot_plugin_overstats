@@ -263,27 +263,27 @@ class OverstatsPlugin(Star):
     # -------------------------------------------------------------------------
     # 指令注册区 (使用 AstrBot 原生 filter)
     # -------------------------------------------------------------------------
-    @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL) # 新增这行：仅限 QQ 官方机器人平台触发
+    # 1. 测试期间建议先注释掉这行，确保所有平台（包括控制台测试）都能触发
+    @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL) 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE | filter.EventMessageType.GROUP_MESSAGE)
     async def handle_direct_text_events(self, event: AstrMessageEvent):
         """处理直接发送的战网ID和单局数字，不使用全局 ALL 监听器"""
-        # 获取消息纯文本并去除两端空格
         msg = event.message_str.strip()
         if not msg:
             return
             
-        # 1. 拦截单局详细查询：判断是否为纯数字，且在 1 到 20 之间
+        # 1. 拦截单局详细查询
         if msg.isdigit():
             num = int(msg)
             if 0 < num <= 20:
-                event.stop_event() # 匹配成功，终止事件传播
-
-                async for result in self.dashen_match_detail(event, arg1=num):
+                event.stop_event() # 拦截成功，防止其他插件响应
+                
+                # 【核心修复】：必须使用 str(num) 转换为字符串再传过去！
+                async for result in self.dashen_match_detail(event, arg1=str(num)):
                     yield result
                 return
 
-        # 2. 拦截自动绑定：判断是否符合战网ID的格式 (例如：Player#12345 或 中文ID＃12345)
-        # 正则含义：开头至少一个非 #/空格 字符，紧跟 # 或 ＃，结尾是一串数字
+        # 2. 拦截自动绑定
         if re.match(r"^[^#＃\s]+[#＃]\d+$", msg):
             event.stop_event() 
             async for result in self.dashen_bind(event, bnet_id=msg):
