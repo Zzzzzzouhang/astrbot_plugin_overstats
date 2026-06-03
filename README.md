@@ -1,6 +1,6 @@
 # astrbot_plugin_overstats
 
-一款为 [AstrBot (阿斯特拉机器人)](https://github.com/Soulter/AstrBot) 打造的守望先锋数据查询插件。本插件作为桥梁，连接了由网易大神接口驱动的 [Overstats](https://github.com/AddOneSecondL/Overstats) 后端服务，为您的群聊带来全方位的守望先锋战绩与资讯查询体验。
+一款为 [AstrBot](https://github.com/Soulter/AstrBot) 打造的守望先锋数据查询插件。本插件作为桥梁，连接了由网易大神接口驱动的 [Overstats](https://github.com/AddOneSecondL/Overstats) 后端服务，为您的群聊带来全方位的守望先锋战绩与资讯查询体验。
 
 > ⚠️ **声明**：本插件的大部分代码并非人类编写（由 AI 协作完成），如有未能预料的异常，欢迎提交 Issue。
 
