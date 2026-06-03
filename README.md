@@ -36,7 +36,7 @@
 2. 进入 **插件市场** -> **通过 GitHub 仓库安装**。
 3. 输入以下仓库地址并点击安装：
    ```text
-   Zzzzzzouhang/astrbot_plugin_overstats
+   https://github.com/Zzzzzzouhang/astrbot_plugin_overstats
    ```
 4. 重启 AstrBot。
 
