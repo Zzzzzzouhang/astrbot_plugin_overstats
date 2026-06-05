@@ -228,27 +228,13 @@ class OverstatsPlugin(Star):
                 yield event.plain_result("❌ 未能获取到有效的图片数据")
                 return
 
-            if self._is_qq_official(event):
-                for i, img_bytes in enumerate(valid_images):
-                    img_path = self.temp_image_dir / f"{abs(hash(img_bytes))}_{time.time_ns()}.png"
-                    img_path.write_bytes(img_bytes)
-                    
-                    if i == 0:
-                        chain = [Comp.At(qq=user_id), Comp.Plain("\n"), Comp.Image.fromFileSystem(str(img_path))]
-                    else:
-                        chain = [Comp.Image.fromFileSystem(str(img_path))]
-                        
-                    yield event.chain_result(chain)
-                    asyncio.create_task(self._delayed_remove(str(img_path), 2592000))
-                    await asyncio.sleep(0.5)
-            else:
-                chain = [Comp.At(qq=user_id), Comp.Plain("\n")]
-                for img_bytes in valid_images:
-                    img_path = self.temp_image_dir / f"{abs(hash(img_bytes))}_{time.time_ns()}.png"
-                    img_path.write_bytes(img_bytes)
-                    chain.append(Comp.Image.fromFileSystem(str(img_path)))
-                    asyncio.create_task(self._delayed_remove(str(img_path), 2592000))
-                yield event.chain_result(chain)
+            chain = [Comp.At(qq=user_id), Comp.Plain("\n")]
+            for img_bytes in valid_images:
+                img_path = self.temp_image_dir / f"{abs(hash(img_bytes))}_{time.time_ns()}.png"
+                img_path.write_bytes(img_bytes)
+                chain.append(Comp.Image.fromFileSystem(str(img_path)))
+                asyncio.create_task(self._delayed_remove(str(img_path), 2592000))
+            yield event.chain_result(chain)
                 
         except Exception as e:
             logger.error(f"多图发送逻辑错误: {e}")
