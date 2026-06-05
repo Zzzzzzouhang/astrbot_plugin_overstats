@@ -23,7 +23,6 @@ class OverstatsPlugin(Star):
         self.config = config
         self.base_url = self.config.get("overstats_api_url", "http://127.0.0.1:18080/api/v2")
         
-        self.last_match_bnet_id = {}
         self.file_lock = asyncio.Lock()
         
         try:
@@ -138,11 +137,6 @@ class OverstatsPlugin(Star):
                 await self.delete_kv_data(old_kv_key)
             except Exception:
                 pass
-
-    def _get_session_id(self, event: AstrMessageEvent) -> str:
-        if event.message_obj and event.message_obj.group_id:
-            return f"g_{event.message_obj.group_id}"
-        return f"u_{event.get_sender_id()}"
 
     async def _get_bnet_id(self, event: AstrMessageEvent, input_id: str = "") -> str:
         if input_id and input_id.strip():
@@ -260,10 +254,6 @@ class OverstatsPlugin(Star):
             logger.error(f"多图发送逻辑错误: {e}")
             yield event.plain_result("❌ 多图发送失败")  
 
-    # -------------------------------------------------------------------------
-    # 指令注册区 (使用 AstrBot 原生 filter)
-    # -------------------------------------------------------------------------
-    # 1. 测试期间建议先注释掉这行，确保所有平台（包括控制台测试）都能触发
     @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL) 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE | filter.EventMessageType.GROUP_MESSAGE)
     async def handle_direct_text_events(self, event: AstrMessageEvent):
@@ -272,22 +262,20 @@ class OverstatsPlugin(Star):
         if not msg:
             return
             
-        # 1. 拦截单局详细查询
         if msg.isdigit():
             num = int(msg)
             if 0 < num <= 20:
-                event.stop_event() # 拦截成功，防止其他插件响应
-                
-                # 【核心修复】：必须使用 str(num) 转换为字符串再传过去！
                 async for result in self.dashen_match_detail(event, arg1=str(num)):
                     yield result
+                event.stop_event() 
                 return
 
-        # 2. 拦截自动绑定
-        if re.match(r"^[^#＃\s]+[#＃]\d+$", msg):
-            event.stop_event() 
-            async for result in self.dashen_bind(event, bnet_id=msg):
+        bind_match = re.match(r"^(?:/?(?:大神)?绑定\s+)?(?:/?(?:大神)?绑定)?\s*([^#＃\s]+[#＃]\d+)$", msg)
+        if bind_match:
+            clean_bnet_id = bind_match.group(1) # 极其精准地提取真正的战网ID
+            async for result in self.dashen_bind(event, bnet_id=clean_bnet_id):
                 yield result
+            event.stop_event() 
             return
         
     @filter.command("所有指令", alias={'别称'})
@@ -368,12 +356,14 @@ class OverstatsPlugin(Star):
     @filter.command("大神绑定", alias={'绑定'})
     async def dashen_bind(self, event: AstrMessageEvent, bnet_id: str):
         user_id = event.get_sender_id()
-        if not bnet_id or ("#" not in bnet_id and "＃" not in bnet_id):
-            yield event.plain_result("❌ 绑定失败！请输入规范战网ID\n格式：/绑定 战网ID（中间必须加空格）\n示例：/绑定 Player#12345")
+        
+        new_bind_id = bnet_id.strip()
+        
+        if not new_bind_id or ("#" not in new_bind_id and "＃" not in new_bind_id):
+            yield event.plain_result("❌ 绑定失败！请输入规范战网ID\n格式：/绑定 战网ID\n示例：/绑定 Player#12345")
             return
         
         old_bind_id = await self._get_user_bind_id(user_id)
-        new_bind_id = bnet_id.strip()
         await self._set_user_bind_id(user_id, new_bind_id)
         
         if not old_bind_id:
@@ -463,9 +453,6 @@ class OverstatsPlugin(Star):
             yield event.plain_result("❌ 请输入战网ID，如：/大神对局 Player#12345 或先使用 /绑定 指令")
             return
             
-        session_id = self._get_session_id(event)
-        self.last_match_bnet_id[session_id] = target_id
-
         yield event.plain_result(f"📊 正在拉取 {target_id} 的最近对局...")
         img_bytes, error_data = await self._fetch_image("/dashen-match/image", {"bnet_id": target_id})
         if img_bytes:
@@ -495,8 +482,9 @@ class OverstatsPlugin(Star):
                 bnet_id = arg
 
         if not bnet_id:
-            session_id = self._get_session_id(event)
-            bnet_id = self.last_match_bnet_id.get(session_id)
+            # 使用用户绑定的战网ID
+            user_id = event.get_sender_id()
+            bnet_id = await self._get_user_bind_id(user_id)
 
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
