@@ -140,7 +140,11 @@ class OverstatsPlugin(Star):
 
     async def _get_bnet_id(self, event: AstrMessageEvent, input_id: str = "") -> str:
         if input_id and input_id.strip():
-            return input_id.strip()
+            clean_id = input_id.strip()
+            # 战网ID格式校验：必须包含 # 或 ＃
+            if "#" not in clean_id and "＃" not in clean_id:
+                return None
+            return clean_id
         user_id = event.get_sender_id()
         bind_id = await self._get_user_bind_id(user_id)
         return bind_id
@@ -243,8 +247,17 @@ class OverstatsPlugin(Star):
     @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL) 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE | filter.EventMessageType.GROUP_MESSAGE)
     async def handle_direct_text_events(self, event: AstrMessageEvent):
-        """处理直接发送的战网ID和单局数字，不使用全局 ALL 监听器"""
-        msg = event.message_str.strip()
+        """处理直接发送的战网 ID、单局数字、绑定指令，以及纯@时返回快速指南"""
+        msg = event.message_str.strip() if event.message_str else ""
+
+        # 纯@时返回快速指南
+        if hasattr(event, "is_at_or_wake_command") and event.is_at_or_wake_command:
+            if not msg or msg.isspace():
+                quick_guide = self._get_quick_guide(event)
+                yield event.plain_result(quick_guide)
+                event.stop_event()
+                return
+
         if not msg:
             return
             
@@ -258,11 +271,25 @@ class OverstatsPlugin(Star):
 
         bind_match = re.match(r"^(?:/?(?:大神)?绑定\s+)?(?:/?(?:大神)?绑定)?\s*([^#＃\s]+[#＃]\d+)$", msg)
         if bind_match:
-            clean_bnet_id = bind_match.group(1) # 极其精准地提取真正的战网ID
+            clean_bnet_id = bind_match.group(1) # 极其精准地提取真正的战网 ID
             async for result in self.dashen_bind(event, bnet_id=clean_bnet_id):
                 yield result
             event.stop_event() 
             return
+    
+    def _get_quick_guide(self, event: AstrMessageEvent) -> str:
+        """根据平台返回快速指南"""
+        text = """📌 Overstats 快速指南
+
+🔗 ➤ <qqbot-cmd-input text="/绑定 战网ID（区分大小写）" show="绑定" reference="false" />示例：/绑定 Player#12345
+📊 ➤ <qqbot-cmd-input text="/今日总结 " show="今日总结" reference="false" /> ➤ <qqbot-cmd-input text="/本周总结 " show="本周总结" reference="false" />
+📈 ➤ <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="/大神对局 " show="对局" reference="false" />
+💪 ➤ <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" /> ➤ <qqbot-cmd-input text="/竞技强度 " show="竞技强度" reference="false" />
+☁️ ➤ <qqbot-cmd-input text="/快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="/竞技英雄云图 " show="竞技云图" reference="false" />
+📋 全部功能 <qqbot-cmd-input text="/owhelp " show="owhelp" reference="false" />
+
+💡 必须@机器人，不能复制纯文本识别不到"""
+        return self._format_markdown_by_platform(event, text)
         
     @filter.command("所有指令", alias={'别称'})
     async def show_aliases(self, event: AstrMessageEvent):
@@ -326,7 +353,7 @@ class OverstatsPlugin(Star):
     @filter.command("owhelp", alias={'ow菜单', 'ow帮助', 'OW帮助', 'help'})
     async def ow_help(self, event: AstrMessageEvent):
         help_text = """📌 Overstats 查询菜单
-🔗 ➤ <qqbot-cmd-input text="/绑定 " show="绑定" reference="false" />「战网 ID」
+🔗 ➤ <qqbot-cmd-input text="/绑定 战网ID（区分大小写）" show="绑定" reference="false" />示例：/绑定 Player#12345
 📋 ➤ <qqbot-cmd-input text="/今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="/昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="/周度总结 " show="本周" reference="false" />
 📊 ➤ <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="/大神对局 " show="大神对局" reference="false" /> ➤ <qqbot-cmd-input text="/单局详细 " show="单局详细" reference="false" />「数字」
 📈 ➤ <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" /> ➤ <qqbot-cmd-input text="/竞技强度 " show="竞技强度" reference="false" /> ➤ <qqbot-cmd-input text="/获取段位分布 " show="获取段位分布" reference="false" />
@@ -346,7 +373,7 @@ class OverstatsPlugin(Star):
         new_bind_id = bnet_id.strip()
         
         if not new_bind_id or ("#" not in new_bind_id and "＃" not in new_bind_id):
-            yield event.plain_result("❌ 绑定失败！请输入规范战网ID\n格式：/绑定 战网ID\n示例：/绑定 Player#12345")
+            yield event.plain_result("❌ 绑定失败！请输入规范战网 ID，严格区分大小写\n格式：/绑定 战网ID，示例：/绑定 Player#12345")
             return
         
         old_bind_id = await self._get_user_bind_id(user_id)
@@ -361,7 +388,7 @@ class OverstatsPlugin(Star):
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = ""):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，如：/今日总结 Player#12345 或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：/今日总结 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
         
         yield event.plain_result(f"⏳ 正在计算 {target_id} 的今日战绩总结...")
@@ -384,7 +411,7 @@ class OverstatsPlugin(Star):
     async def dashen_yesterday(self, event: AstrMessageEvent, bnet_id: str = ""):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，如：/昨日总结 Player#12345 或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：/昨日总结 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
         yield event.plain_result(f"⏳ 正在统计 {target_id} 的昨日战绩数据...")
         img_bytes, error_data = await self._fetch_image("/dashen-summary/yesterday/image", {"bnet_id": target_id})
@@ -401,7 +428,7 @@ class OverstatsPlugin(Star):
     async def dashen_week(self, event: AstrMessageEvent, bnet_id: str = ""):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，如：/周度总结 Player#12345 或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：/周度总结 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
         yield event.plain_result(f"📊 正在生成 {target_id} 的本周战绩大数据总结，耗时较长（约30-60秒），请稍候...")
         img_bytes, error_data = await self._fetch_image("/dashen-summary/week/image", {"bnet_id": target_id}, timeout=900)
@@ -419,7 +446,7 @@ class OverstatsPlugin(Star):
         bnet_id, mode = self._parse_profile_args(arg1, arg2)
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，如：/大神数据 Player#12345 或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：/大神数据 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
         yield event.plain_result(f"🔍 正在生成 {target_id} 的玩家详情...")
         img_bytes, error_data = await self._fetch_image("/dashen-profile/image", {"bnet_id": target_id, "mode": mode})
@@ -436,7 +463,7 @@ class OverstatsPlugin(Star):
     async def dashen_match(self, event: AstrMessageEvent, bnet_id: str = ""):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，如：/大神对局 Player#12345 或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：/大神对局 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
             
         yield event.plain_result(f"📊 正在拉取 {target_id} 的最近对局...")
@@ -474,7 +501,7 @@ class OverstatsPlugin(Star):
 
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，如：/单局详细 1 Player#12345 或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：/单局详细 1 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
             
         yield event.plain_result(f"⏳ 正在拉取 {target_id} 第 {index + 1} 局的单局多图详细战绩...")
@@ -511,7 +538,7 @@ class OverstatsPlugin(Star):
                         yield event.plain_result("❌ 未能生成该单局的详细图片链接")
                         return
 
-                    imgs_list = []
+                    # 逐张发送，复用 _send_image_result
                     for u in raw_img_list:
                         img_str = ""
                         if isinstance(u, dict):
@@ -546,26 +573,20 @@ class OverstatsPlugin(Star):
                                     if img_resp.status == 200:
                                         img_data = await img_resp.read()
                         except Exception as e:
-                            logger.error(f"处理图片失败: {e}")
+                            logger.error(f"处理图片失败：{e}")
                             continue
 
                         if img_data:
-                            imgs_list.append(img_data)
-                    
-                    if imgs_list:
-                        async for r in self._send_multiple_images_result(event, imgs_list):
-                            yield r
-                    else:
-                        yield event.plain_result("❌ 未能获取到有效的图片数据")
+                            yield self._send_image_result(event, img_data)
         except Exception as e:
-            logger.error(f"处理单局详细图片异常: {e}")
+            logger.error(f"处理单局详细图片异常：{e}")
             yield event.plain_result("❌ 处理图片请求时发生 system 错误")
 
     @filter.command("历史段位", alias={'历届段位'})
     async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = ""):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，如：/历史段位 Player#12345 或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：/历史段位 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
         yield event.plain_result(f"📜 正在追溯 {target_id} 的历史段位记录...")
         img_bytes, error_data = await self._fetch_image("/dashen-rank-history/image", {"bnet_id": target_id})
@@ -596,7 +617,7 @@ class OverstatsPlugin(Star):
     async def quick_strength(self, event: AstrMessageEvent, bnet_id: str = ""):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，如：/快速强度 Player#12345 或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：/快速强度 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
         yield event.plain_result(f"⚡ 正在评估 {target_id} 的快速强度指数...")
         img_bytes, error_data = await self._fetch_image("/dashen-quick-strength/image", {"bnet_id": target_id})
@@ -613,7 +634,7 @@ class OverstatsPlugin(Star):
     async def competitive_strength(self, event: AstrMessageEvent, bnet_id: str = ""):
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，如：/竞技强度 Player#12345 或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：/竞技强度 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
         yield event.plain_result(f"🏆 正在评估 {target_id} 的竞技天梯强度指数...")
         img_bytes, error_data = await self._fetch_image("/dashen-competitive-strength/image", {"bnet_id": target_id})
@@ -631,7 +652,7 @@ class OverstatsPlugin(Star):
         bnet_id, season = self._parse_treemap_args(arg1, arg2)
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，如：/快速英雄云图 Player#12345 或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：/快速英雄云图 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
         
         yield event.plain_result(f"📊 正在获取 {target_id} 的快速模式英雄云图...")
@@ -653,7 +674,7 @@ class OverstatsPlugin(Star):
         bnet_id, season = self._parse_treemap_args(arg1, arg2)
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield event.plain_result("❌ 请输入战网ID，如：/竞技英雄云图 Player#12345 或先使用 /绑定 指令")
+            yield event.plain_result("❌ 请输入战网ID，如：/竞技英雄云图 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
         
         yield event.plain_result(f"🏆 正在获取 {target_id} 的竞技模式英雄云图...")
@@ -673,7 +694,7 @@ class OverstatsPlugin(Star):
     @filter.command("威能")
     async def ow_hero_perk(self, event: AstrMessageEvent, hero_name: str):
         if not hero_name:
-            yield event.plain_result("❌ 请输入英雄名称，如：/威能 源氏")
+            yield event.plain_result("❌ 请输入英雄名称，如：/威能 闪光")
             return
         yield event.plain_result(f"🔮 正在提取 {hero_name} 的核心威能数据...")
         img_bytes, error_data = await self._fetch_image("/ow-hero-perk/image", {"hero": hero_name})
@@ -686,7 +707,7 @@ class OverstatsPlugin(Star):
     @filter.command("ow英雄")
     async def ow_hero_pick(self, event: AstrMessageEvent, hero_name: str):
         if not hero_name:
-            yield event.plain_result("❌ 请输入英雄名称，如：/ow英雄 源氏")
+            yield event.plain_result("❌ 请输入英雄名称，如：/ow英雄 闪光")
             return
         yield event.plain_result(f"🔥 正在读取 {hero_name} 的天梯 Pick 率走势图...")
         payload = {"view": "history", "game_mode": "competitive", "mmr": "all", "hero": hero_name}
