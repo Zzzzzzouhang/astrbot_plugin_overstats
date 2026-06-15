@@ -17,7 +17,7 @@ from astrbot.api.event import filter, AstrMessageEvent  # 引入原生消息与�
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.6.3")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.7.3")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -46,6 +46,15 @@ class OverstatsPlugin(Star):
         self.daily_prompt_state_file = self.plugin_data_dir / "daily_group_prompt_state.json"
         self.daily_prompt_state = self._load_daily_prompt_state()
         self.daily_prompt_reset_task = asyncio.create_task(self._daily_prompt_reset_loop())
+
+        # 复用 aiohttp.ClientSession（懒加载，首次请求时创建）
+        self._http_session: aiohttp.ClientSession | None = None
+
+        # 定时清理临时图片（每天凌晨执行一次，替代逐张延迟删除）
+        self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop())
+
+        # 群组级别配置（使用 AstrBot KV 存储持久化，内存缓存加速读取）
+        self.group_config: dict | None = None  # None 表示尚未从 KV 加载
 
     def _current_prompt_cycle_date(self, now: datetime | None = None) -> str:
         now = now or datetime.now()
@@ -113,6 +122,103 @@ class OverstatsPlugin(Star):
         except Exception as e:
             logger.error(f"群聊每日首次提示重置任务异常: {e}")
 
+    _GROUP_CONFIG_KV_KEY = "group_feature_config"
+
+    async def _ensure_group_config_loaded(self):
+        """确保群组配置已从 KV 存储加载到内存（惰性加载，仅在首次调用时读取）"""
+        if self.group_config is not None:
+            return
+        try:
+            data = await self.get_kv_data(self._GROUP_CONFIG_KV_KEY, None)
+            if isinstance(data, dict):
+                self.group_config = data
+            else:
+                self.group_config = {}
+        except Exception as e:
+            logger.error(f"从 KV 读取群组功能配置失败: {e}")
+            self.group_config = {}
+
+    async def _save_group_config(self):
+        """将内存中的群组配置持久化到 KV 存储"""
+        try:
+            await self.put_kv_data(self._GROUP_CONFIG_KV_KEY, self.group_config)
+        except Exception as e:
+            logger.error(f"保存群组功能配置到 KV 失败: {e}")
+
+    def _get_group_id(self, event: AstrMessageEvent) -> str | None:
+        """从事件中获取群组ID"""
+        try:
+            if getattr(event, "message_obj", None) and getattr(event.message_obj, "group_id", ""):
+                return str(event.message_obj.group_id)
+        except Exception:
+            pass
+        return None
+
+    def _is_group_admin(self, event: AstrMessageEvent) -> bool:
+        """检查发送者是否为群管理员/群主 或 AstrBot 管理员"""
+        sender_id = ""
+        # 1. 检查 AstrBot 管理员列表
+        try:
+            sender_id = str(event.get_sender_id())
+            admin_ids = []
+            if hasattr(self.context, "get_config"):
+                cfg = self.context.get_config()
+                admin_ids = [str(uid) for uid in getattr(cfg, "admins_id", [])]
+            if sender_id in admin_ids:
+                return True
+        except Exception:
+            pass
+
+        # 2. 检查 QQ 群角色（OneBot raw_message 格式）
+        try:
+            raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+            if raw:
+                # OneBot/aiocqhttp: raw_message 是 dict，含 sender.role
+                if isinstance(raw, dict):
+                    sender_data = raw.get("sender", {})
+                    role = str(sender_data.get("role", "")).lower()
+                    logger.debug(f"群管理员检查(OneBot dict): sender_id={sender_id}, role={role}")
+                    if role in ("owner", "admin"):
+                        return True
+                # QQ Official 等平台: raw_message 可能有不同结构
+                elif hasattr(raw, "sender"):
+                    role = str(getattr(raw.sender, "role", "")).lower()
+                    logger.debug(f"群管理员检查(raw.sender): role={role}")
+                    if role in ("owner", "admin", "群主", "管理员"):
+                        return True
+                else:
+                    logger.debug(f"群管理员检查: raw_message 类型={type(raw).__name__}, 无法提取角色")
+        except Exception as e:
+            logger.debug(f"群管理员检查 raw_message 异常: {e}")
+
+        # 3. 检查 AstrMessageEvent 是否携带 admin 标记
+        try:
+            if getattr(event, "is_admin", False):
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def _get_group_feature_config(self, group_id: str) -> dict:
+        """获取指定群组的功能配置（从内存缓存读取），未配置时返回默认值"""
+        if self.group_config is None:
+            # 尚未加载，返回默认值（后续 async 方法会触发加载）
+            return {"daily_prompt_skip": False, "append_notice": True}
+        return self.group_config.get(str(group_id), {
+            "daily_prompt_skip": False,
+            "append_notice": True
+        })
+
+    async def _set_group_feature_config(self, group_id: str, feature: str, enabled: bool):
+        """设置指定群组的某个功能开关并持久化"""
+        await self._ensure_group_config_loaded()
+        gid = str(group_id)
+        if gid not in self.group_config:
+            self.group_config[gid] = {"daily_prompt_skip": False, "append_notice": True}
+        self.group_config[gid][feature] = enabled
+        await self._save_group_config()
+
     def _is_group_message(self, event: AstrMessageEvent) -> bool:
         try:
             if getattr(event, "message_obj", None) and getattr(event.message_obj, "group_id", ""):
@@ -137,6 +243,12 @@ class OverstatsPlugin(Star):
     def _append_group_interaction_notice(self, event: AstrMessageEvent, text: str) -> str:
         if not self._is_qq_group_message(event):
             return text
+        # 检查群组级别 append_notice 配置（从内存缓存读取，若未加载则使用默认值 True）
+        group_id = self._get_group_id(event)
+        if group_id and self.group_config is not None:
+            cfg = self._get_group_feature_config(group_id)
+            if not cfg.get("append_notice", True):
+                return text
         notice = self._format_markdown_by_platform(event, self.error_append_notice)
         if notice in text:
             return text
@@ -153,19 +265,43 @@ class OverstatsPlugin(Star):
         if not self._is_group_message(event):
             return base_text, None
 
-        user_id = str(event.get_sender_id())
-        async with self.file_lock:
-            self._ensure_daily_prompt_state_current_unlocked()
-            prompted_users = self.daily_prompt_state.setdefault("prompted_users", {})
-            if prompted_users.get(user_id) or user_id in self.daily_prompt_pending_users:
-                return None, None
-            self.daily_prompt_pending_users.add(user_id)
+        # 确保群组配置已加载
+        await self._ensure_group_config_loaded()
+        group_id = self._get_group_id(event)
+        cfg = self._get_group_feature_config(group_id) if group_id else {"daily_prompt_skip": False, "append_notice": True}
 
-        prompt_text = f"{base_text}\n{self.daily_group_prompt_suffix}"
-        if self._is_qq_group_message(event):
-            notice = self._format_markdown_by_platform(event, self.daily_group_prompt_notice)
-            return f"{prompt_text}\n💡 {notice}", user_id
-        return prompt_text, user_id
+        daily_prompt_enabled = cfg.get("daily_prompt_skip", False)
+        append_notice_enabled = cfg.get("append_notice", True)
+
+        # 首次提示后不再提示 功能
+        user_id = None
+        if daily_prompt_enabled:
+            user_id = str(event.get_sender_id())
+            async with self.file_lock:
+                self._ensure_daily_prompt_state_current_unlocked()
+                prompted_users = self.daily_prompt_state.setdefault("prompted_users", {})
+                if prompted_users.get(user_id) or user_id in self.daily_prompt_pending_users:
+                    user_id = None  # 已提示过，不再追加首次提示
+                else:
+                    self.daily_prompt_pending_users.add(user_id)
+
+        # 构建状态提示文本
+        prompt_text = base_text
+
+        # 追加「首次提示后不再提示」文案
+        if daily_prompt_enabled and user_id:
+            prompt_text = f"{prompt_text}\n{self.daily_group_prompt_suffix}"
+            if self._is_qq_group_message(event):
+                notice = self._format_markdown_by_platform(event, self.daily_group_prompt_notice)
+                prompt_text = f"{prompt_text}\n💡 {notice}"
+
+        # 追加「交互提示」文案（独立于首次提示功能，始终可追加）
+        if append_notice_enabled and self._is_qq_group_message(event):
+            append = self._format_markdown_by_platform(event, self.error_append_notice)
+            if append not in prompt_text:
+                prompt_text = f"{prompt_text}\n💡 {append}"
+
+        return prompt_text, user_id if (daily_prompt_enabled and user_id) else None
 
     async def _finalize_business_status_prompt(self, reservation_user_id: str | None, success: bool):
         if not reservation_user_id:
@@ -179,13 +315,29 @@ class OverstatsPlugin(Star):
                 prompted_users[reservation_user_id] = True
                 self._save_daily_prompt_state()
 
+    async def _get_http_session(self) -> aiohttp.ClientSession:
+        """获取复用的 aiohttp.ClientSession（懒加载，自动重建已关闭的会话）"""
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=600),
+                connector=aiohttp.TCPConnector(limit=10, ttl_dns_cache=300)
+            )
+        return self._http_session
+
     async def terminate(self):
-        if getattr(self, "daily_prompt_reset_task", None):
-            self.daily_prompt_reset_task.cancel()
-            try:
-                await self.daily_prompt_reset_task
-            except asyncio.CancelledError:
-                pass
+        """插件卸载/停用时清理资源（AstrBot 生命周期方法）"""
+        # 取消后台任务
+        for task_attr in ("daily_prompt_reset_task", "_cleanup_task"):
+            task = getattr(self, task_attr, None)
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        # 关闭 HTTP 会话
+        if self._http_session and not self._http_session.closed:
+            await self._http_session.close()
 
     def _is_qq_official(self, event: AstrMessageEvent) -> bool:
         """判断当前消息是否来自 QQ 官方机器人平台"""
@@ -337,43 +489,55 @@ class OverstatsPlugin(Star):
         url = f"{self.base_url}{endpoint}"
         payload = payload or {}
         try:
-            client_timeout = aiohttp.ClientTimeout(total=timeout)
-            async with aiohttp.ClientSession(timeout=client_timeout) as session:
-                async with session.post(url, json=payload) as resp:
-                    if resp.status == 200:
-                        return await resp.read(), None
-                    else:
-                        try:
-                            error_data = await resp.json()
-                            logger.error(f"Overstats API 错误: {resp.status} - {error_data}")
-                            return None, error_data
-                        except:
-                            logger.error(f"Overstats API 返回了非 JSON 错误: {resp.status}")
-                            return None, {"error": "non_json_error", "message": "API返回非JSON格式错误"}
+            session = await self._get_http_session()
+            # 若请求超时与默认不同，使用单次覆盖
+            req_timeout = aiohttp.ClientTimeout(total=timeout) if timeout != 600 else None
+            async with session.post(url, json=payload, timeout=req_timeout) as resp:
+                if resp.status == 200:
+                    return await resp.read(), None
+                else:
+                    try:
+                        error_data = await resp.json()
+                        logger.error(f"Overstats API 错误: {resp.status} - {error_data}")
+                        return None, error_data
+                    except:
+                        logger.error(f"Overstats API 返回了非 JSON 错误: {resp.status}")
+                        return None, {"error": "non_json_error", "message": "API返回非JSON格式错误"}
         except Exception as e:
             logger.error(f"网络请求异常: {e}")
             return None, {"error": "network_error", "message": str(e)}
 
-    def _safe_remove(self, path: str):
-        if path and os.path.exists(path):
-            try: os.remove(path)
-            except Exception: pass
-
-    async def _delayed_remove(self, path: str, delay: int):
-        await asyncio.sleep(delay)
-        self._safe_remove(path)
+    async def _periodic_cleanup_loop(self):
+        """定时清理临时图片目录中超过 7 天的文件（每天执行一次）"""
+        try:
+            while True:
+                await asyncio.sleep(86400)  # 24 小时
+                try:
+                    now = time.time()
+                    count = 0
+                    for f in self.temp_image_dir.iterdir():
+                        if f.is_file() and (now - f.stat().st_mtime) > 7 * 86400:
+                            try:
+                                f.unlink()
+                                count += 1
+                            except Exception:
+                                pass
+                    if count:
+                        logger.info(f"已清理 {count} 个过期临时图片文件")
+                except Exception as e:
+                    logger.error(f"临时文件清理异常: {e}")
+        except asyncio.CancelledError:
+            pass
 
     def _send_image_result(self, event: AstrMessageEvent, img_bytes: bytes, fallback_text: str = ""):
         if not img_bytes:
             return self._plain_error_result(event, fallback_text or "❌ 图片生成失败")
         try:
-            self.temp_image_dir.mkdir(parents=True, exist_ok=True)
             img_hash = abs(hash(img_bytes))
             img_path = self.temp_image_dir / f"{img_hash}.png"
             img_path.write_bytes(img_bytes)
             user_id = event.get_sender_id()
             chain = [Comp.At(qq=user_id), Comp.Plain("\n" if not fallback_text else f"\n{fallback_text}\n"), Comp.Image.fromFileSystem(str(img_path))]
-            asyncio.create_task(self._delayed_remove(str(img_path), 2592000))
             return event.chain_result(chain)
         except Exception as e:
             logger.error(f"构建图片消息链时发生错误: {e}")
@@ -381,7 +545,6 @@ class OverstatsPlugin(Star):
 
     async def _send_multiple_images_result(self, event: AstrMessageEvent, imgs_list: list[bytes]):
         try:
-            self.temp_image_dir.mkdir(parents=True, exist_ok=True)
             user_id = event.get_sender_id()
             
             valid_images = [img for img in imgs_list if img]
@@ -394,7 +557,6 @@ class OverstatsPlugin(Star):
                 img_path = self.temp_image_dir / f"{abs(hash(img_bytes))}_{time.time_ns()}.png"
                 img_path.write_bytes(img_bytes)
                 chain.append(Comp.Image.fromFileSystem(str(img_path)))
-                asyncio.create_task(self._delayed_remove(str(img_path), 2592000))
             yield event.chain_result(chain)
                 
         except Exception as e:
@@ -406,6 +568,10 @@ class OverstatsPlugin(Star):
     async def handle_direct_text_events(self, event: AstrMessageEvent):
         """处理直接发送的战网 ID、单局数字、绑定指令，以及纯@时返回快速指南"""
         msg = event.message_str.strip() if event.message_str else ""
+
+        # 群消息时提前加载群组配置到内存缓存
+        if self._is_group_message(event):
+            await self._ensure_group_config_loaded()
 
         # 纯@时返回快速指南
         if hasattr(event, "is_at_or_wake_command") and event.is_at_or_wake_command:
@@ -737,66 +903,70 @@ class OverstatsPlugin(Star):
 
         success = False
         try:
-            client_timeout = aiohttp.ClientTimeout(total=600)
-            async with aiohttp.ClientSession(timeout=client_timeout) as session:
-                async with session.post(url, json=payload) as resp:
-                    if resp.status != 200:
-                        try:
-                            error_data = await resp.json()
-                            err_msg = error_data.get("message", "未知后端 service 错误")
-                            yield self._plain_error_result(event, f"❌ 获取单局详细失败：{err_msg}")
-                        except Exception:
-                            yield self._plain_error_result(event, f"❌ 后端接口响应异常，状态码: {resp.status}")
-                        return
+            session = await self._get_http_session()
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=600)) as resp:
+                if resp.status != 200:
+                    try:
+                        error_data = await resp.json()
+                        err_msg = error_data.get("message", "未知后端 service 错误")
+                        yield self._plain_error_result(event, f"❌ 获取单局详细失败：{err_msg}")
+                    except Exception:
+                        yield self._plain_error_result(event, f"❌ 后端接口响应异常，状态码: {resp.status}")
+                    return
 
-                    data = await resp.json()
-                    raw_img_list = data.get("replies", [])
-                    
-                    if not raw_img_list:
-                        yield self._plain_error_result(event, "❌ 未能生成该单局的详细图片链接")
-                        return
+                data = await resp.json()
+                raw_img_list = data.get("replies", [])
+                
+                if not raw_img_list:
+                    yield self._plain_error_result(event, "❌ 未能生成该单局的详细图片链接")
+                    return
 
-                    # 逐张发送，复用 _send_image_result
-                    for u in raw_img_list:
-                        img_str = ""
-                        if isinstance(u, dict):
-                            if u.get("type") == "image":
-                                img_str = str(u.get("base64", "")).strip()
-                            if not img_str:
-                                for key in ["url", "image", "src", "path", "file"]:
-                                    if u.get(key):
-                                        img_str = str(u.get(key)).strip()
-                                        break
-                        else:
-                            img_str = str(u).strip()
-
+                # 收集所有图片数据，最后用多图消息链一次性发送
+                collected_images: list[bytes] = []
+                for u in raw_img_list:
+                    img_str = ""
+                    if isinstance(u, dict):
+                        if u.get("type") == "image":
+                            img_str = str(u.get("base64", "")).strip()
                         if not img_str:
-                            continue
+                            for key in ["url", "image", "src", "path", "file"]:
+                                if u.get(key):
+                                    img_str = str(u.get(key)).strip()
+                                    break
+                    else:
+                        img_str = str(u).strip()
 
-                        img_data = None
-                        try:
-                            if img_str.startswith("base64://"):
-                                img_data = base64.b64decode(img_str.replace("base64://", ""))
-                            elif img_str.startswith("data:image") and "base64," in img_str:
-                                img_data = base64.b64decode(img_str.split("base64,")[1])
-                            elif len(img_str) > 100 and not img_str.startswith("http") and not img_str.startswith("/"):
-                                padding = len(img_str) % 4
-                                if padding: img_str += '=' * (4 - padding)
-                                try: img_data = base64.b64decode(img_str)
-                                except Exception: pass
-                            
-                            if not img_data:
-                                full_img_url = img_str if img_str.startswith("http") else f"{self.base_url.rstrip('/').removesuffix('/api/v2')}{img_str if img_str.startswith('/') else '/' + img_str}"
-                                async with session.get(full_img_url, timeout=30, ssl=False) as img_resp:
-                                    if img_resp.status == 200:
-                                        img_data = await img_resp.read()
-                        except Exception as e:
-                            logger.error(f"处理图片失败：{e}")
-                            continue
+                    if not img_str:
+                        continue
 
-                        if img_data:
-                            success = True
-                            yield self._send_image_result(event, img_data)
+                    img_data = None
+                    try:
+                        if img_str.startswith("base64://"):
+                            img_data = base64.b64decode(img_str.replace("base64://", ""))
+                        elif img_str.startswith("data:image") and "base64," in img_str:
+                            img_data = base64.b64decode(img_str.split("base64,")[1])
+                        elif len(img_str) > 100 and not img_str.startswith("http") and not img_str.startswith("/"):
+                            padding = len(img_str) % 4
+                            if padding: img_str += '=' * (4 - padding)
+                            try: img_data = base64.b64decode(img_str)
+                            except Exception: pass
+                        
+                        if not img_data:
+                            full_img_url = img_str if img_str.startswith("http") else f"{self.base_url.rstrip('/').removesuffix('/api/v2')}{img_str if img_str.startswith('/') else '/' + img_str}"
+                            async with session.get(full_img_url, timeout=aiohttp.ClientTimeout(total=30), ssl=False) as img_resp:
+                                if img_resp.status == 200:
+                                    img_data = await img_resp.read()
+                    except Exception as e:
+                        logger.error(f"处理图片失败：{e}")
+                        continue
+
+                    if img_data:
+                        collected_images.append(img_data)
+
+                if collected_images:
+                    success = True
+                    async for r in self._send_multiple_images_result(event, collected_images):
+                        yield r
         except Exception as e:
             logger.error(f"处理单局详细图片异常：{e}")
             yield self._plain_error_result(event, "❌ 处理图片请求时发生 system 错误")
@@ -1185,6 +1355,72 @@ class OverstatsPlugin(Star):
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
             await self._finalize_business_status_prompt(prompt_token, success)
+
+    @filter.command("群设置")
+    async def group_config_cmd(self, event: AstrMessageEvent, action: str = "", value: str = ""):
+        """查看/切换群组功能配置: /群设置 或 /群设置 提示 开|关 或 /群设置 追加提示 开|关"""
+        if not self._is_group_message(event):
+            yield event.plain_result("⚠️ 此命令仅支持在群聊中使用")
+            return
+        group_id = self._get_group_id(event)
+        if not group_id:
+            yield event.plain_result("❌ 无法获取群组ID")
+            return
+
+        # 确保配置已从 KV 加载
+        await self._ensure_group_config_loaded()
+        cfg = self._get_group_feature_config(group_id)
+
+        # 无参数时显示当前状态（所有人可查看）
+        if not action:
+            dp_status = "✅ 开启" if cfg.get("daily_prompt_skip", False) else "❌ 关闭"
+            an_status = "✅ 开启" if cfg.get("append_notice", True) else "❌ 关闭"
+            text = f"""📋 群组功能配置 (群号: {group_id})
+
+🔔 首次提示后不再提示: {dp_status}
+💡 追加交互提示: {an_status}
+
+管理命令（仅管理员可用）：
+• <qqbot-cmd-input text="/群设置 提示 开 " show="/群设置 提示 开" reference="false" /> / <qqbot-cmd-input text="/群设置 提示 关 " show="/群设置 提示 关" reference="false" />
+• <qqbot-cmd-input text="/群设置 追加提示 开 " show="/群设置 追加提示 开" reference="false" /> / <qqbot-cmd-input text="/群设置 追加提示 关 " show="/群设置 追加提示 关" reference="false" />"""
+            yield event.plain_result(self._format_markdown_by_platform(event, text))
+            return
+
+        # 有参数时执行设置，需要群管理员权限
+        if not self._is_group_admin(event):
+            yield event.plain_result("⚠️ 仅群管理员或群主可以修改群组配置")
+            return
+        feature_map = {
+            "提示": "daily_prompt_skip",
+            "首次提示": "daily_prompt_skip",
+            "追加提示": "append_notice",
+            "追加": "append_notice",
+            "交互提示": "append_notice",
+        }
+        action_map = {
+            "开": True, "开启": True, "on": True, "true": True, "1": True,
+            "关": False, "关闭": False, "off": False, "false": False, "0": False,
+        }
+
+        feature_key = feature_map.get(action)
+        if not feature_key:
+            yield event.plain_result(f"❌ 未知功能: {action}\n支持的功能: 提示、追加提示")
+            return
+
+        if not value:
+            yield event.plain_result(f"❌ 请指定操作: 开 或 关\n示例: /群设置 {action} 开")
+            return
+
+        enabled = action_map.get(value)
+        if enabled is None:
+            yield event.plain_result(f"❌ 未知操作: {value}\n支持的操作: 开、关")
+            return
+
+        await self._set_group_feature_config(group_id, feature_key, enabled)
+
+        feature_names = {"daily_prompt_skip": "首次提示后不再提示", "append_notice": "追加交互提示"}
+        status_text = "✅ 已开启" if enabled else "❌ 已关闭"
+        yield event.plain_result(f"✅ 群组 {group_id} 的【{feature_names[feature_key]}】功能已{status_text}")
 
     @filter.command("绝活榜", alias={'英雄省榜'})
     async def ow_hero_leaderboard(self, event: AstrMessageEvent, province: str, hero: str):
