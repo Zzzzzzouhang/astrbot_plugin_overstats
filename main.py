@@ -17,7 +17,7 @@ from astrbot.api.event import filter, AstrMessageEvent  # 引入原生消息与�
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.7.3")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "1.9.3")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -55,6 +55,9 @@ class OverstatsPlugin(Star):
 
         # 群组级别配置（使用 AstrBot KV 存储持久化，内存缓存加速读取）
         self.group_config: dict | None = None  # None 表示尚未从 KV 加载
+
+        # 维护模式状态（使用 AstrBot KV 存储持久化，惰性加载）
+        self._maintenance_state: dict | None = None
 
     def _current_prompt_cycle_date(self, now: datetime | None = None) -> str:
         now = now or datetime.now()
@@ -219,6 +222,32 @@ class OverstatsPlugin(Star):
         self.group_config[gid][feature] = enabled
         await self._save_group_config()
 
+    _MAINTENANCE_KV_KEY = "maintenance_state"
+
+    async def _ensure_maintenance_loaded(self):
+        """确保维护模式状态已从 KV 加载到内存"""
+        if self._maintenance_state is not None:
+            return
+        try:
+            data = await self.get_kv_data(self._MAINTENANCE_KV_KEY, None)
+            if isinstance(data, dict):
+                self._maintenance_state = data
+            else:
+                self._maintenance_state = {"enabled": False, "content": ""}
+        except Exception as e:
+            logger.error(f"读取维护模式状态失败: {e}")
+            self._maintenance_state = {"enabled": False, "content": ""}
+
+    async def _set_maintenance(self, enabled: bool, content: str = ""):
+        """设置或取消维护模式并持久化"""
+        await self._ensure_maintenance_loaded()
+        self._maintenance_state["enabled"] = enabled
+        self._maintenance_state["content"] = content if enabled else ""
+        try:
+            await self.put_kv_data(self._MAINTENANCE_KV_KEY, self._maintenance_state)
+        except Exception as e:
+            logger.error(f"保存维护模式状态失败: {e}")
+
     def _is_group_message(self, event: AstrMessageEvent) -> bool:
         try:
             if getattr(event, "message_obj", None) and getattr(event.message_obj, "group_id", ""):
@@ -261,9 +290,16 @@ class OverstatsPlugin(Star):
         """统一的 ID 解析失败提示文案，修改 id_resolve_error_hint 即可全局生效"""
         return f"❌ {prefix}：{self.id_resolve_error_hint}"
 
-    async def _prepare_business_status_prompt(self, event: AstrMessageEvent, base_text: str) -> tuple[str | None, str | None]:
+    async def _prepare_business_status_prompt(self, event: AstrMessageEvent, base_text: str) -> tuple[str | None, str | None, bool]:
+        """准备业务状态提示。返回 (提示文本, 跟踪token, 是否应提前终止)。
+        当 should_stop=True 时（维护模式），调用方应 yield 文本后 return，不再执行业务逻辑。"""
+        # 维护模式检查：激活时返回维护内容并标记提前终止（群聊/私聊均生效）
+        await self._ensure_maintenance_loaded()
+        if self._maintenance_state and self._maintenance_state.get("enabled"):
+            return self._maintenance_state.get("content", "系统维护中"), None, True
+
         if not self._is_group_message(event):
-            return base_text, None
+            return base_text, None, False
 
         # 确保群组配置已加载
         await self._ensure_group_config_loaded()
@@ -301,7 +337,7 @@ class OverstatsPlugin(Star):
             if append not in prompt_text:
                 prompt_text = f"{prompt_text}\n💡 {append}"
 
-        return prompt_text, user_id if (daily_prompt_enabled and user_id) else None
+        return prompt_text, user_id if (daily_prompt_enabled and user_id) else None, False
 
     async def _finalize_business_status_prompt(self, reservation_user_id: str | None, success: bool):
         if not reservation_user_id:
@@ -720,9 +756,11 @@ class OverstatsPlugin(Star):
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/今日总结 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
 
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"⏳ 正在计算 {target_id} 的今日战绩总结...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"⏳ 正在计算 {target_id} 的今日战绩总结...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -759,12 +797,15 @@ class OverstatsPlugin(Star):
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/昨日总结 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
         prompt_token = None
+        _maintenance_stop = False
         if _skip_status_prompt:
             status_text = None
         else:
-            status_text, prompt_token = await self._prepare_business_status_prompt(event, f"⏳ 正在统计 {target_id} 的昨日战绩数据...")
+            status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"⏳ 正在统计 {target_id} 的昨日战绩数据...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -787,9 +828,11 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/周度总结 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"📊 正在生成 {target_id} 的本周战绩大数据总结，耗时较长（约30-60秒），请稍候...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"📊 正在生成 {target_id} 的本周战绩大数据总结，耗时较长（约30-60秒），请稍候...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -813,9 +856,11 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/大神数据 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"🔍 正在生成 {target_id} 的玩家详情...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🔍 正在生成 {target_id} 的玩家详情...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -839,9 +884,11 @@ class OverstatsPlugin(Star):
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/大神对局 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
 
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"📊 正在拉取 {target_id} 的最近对局...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"📊 正在拉取 {target_id} 的最近对局...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -885,9 +932,11 @@ class OverstatsPlugin(Star):
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/单局详细 1 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
 
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"⏳ 正在拉取 {target_id} 第 {index + 1} 局的单局多图详细战绩...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"⏳ 正在拉取 {target_id} 第 {index + 1} 局的单局多图详细战绩...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
         
         payload = {
             "bnet_id": target_id,
@@ -979,9 +1028,11 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/历史段位 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"📜 正在追溯 {target_id} 的历史段位记录...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"📜 正在追溯 {target_id} 的历史段位记录...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -1000,9 +1051,11 @@ class OverstatsPlugin(Star):
 
     @filter.command("同玩查询", alias={'开黑胜率'})
     async def dashen_sameplay(self, event: AstrMessageEvent, p1: str, p2: str):
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"👥 正在分析 {p1} 与 {p2} 的同玩胜率...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"👥 正在分析 {p1} 与 {p2} 的同玩胜率...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         payload = {"player1_bnet_id": p1, "player2_bnet_id": p2}
         success = False
@@ -1026,9 +1079,11 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/快速强度 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"⚡ 正在评估 {target_id} 的快速强度指数...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"⚡ 正在评估 {target_id} 的快速强度指数...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -1051,9 +1106,11 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/竞技强度 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"🏆 正在评估 {target_id} 的竞技天梯强度指数...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🏆 正在评估 {target_id} 的竞技天梯强度指数...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -1078,9 +1135,11 @@ class OverstatsPlugin(Star):
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/快速英雄云图 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
 
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"📊 正在获取 {target_id} 的快速模式英雄云图...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"📊 正在获取 {target_id} 的快速模式英雄云图...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         payload = {"bnet_id": target_id, "mode": "quick", "include_previous_season": True}
         if season: payload["season"] = str(season)
@@ -1108,9 +1167,11 @@ class OverstatsPlugin(Star):
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/竞技英雄云图 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
 
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"🏆 正在获取 {target_id} 的竞技模式英雄云图...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🏆 正在获取 {target_id} 的竞技模式英雄云图...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         payload = {"bnet_id": target_id, "mode": "competitive", "include_previous_season": True}
         if season: payload["season"] = str(season)
@@ -1135,9 +1196,11 @@ class OverstatsPlugin(Star):
         if not hero_name:
             yield self._plain_error_result(event, "❌ 请输入英雄名称，如：/威能 闪光")
             return
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"🔮 正在提取 {hero_name} 的核心威能数据...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🔮 正在提取 {hero_name} 的核心威能数据...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -1157,9 +1220,11 @@ class OverstatsPlugin(Star):
             yield self._plain_error_result(event, "❌ 请输入英雄名称，如：/ow英雄 闪光")
             return
 
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"🔥 正在读取 {hero_name} 的天梯 Pick 率走势图...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🔥 正在读取 {hero_name} 的天梯 Pick 率走势图...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         payload = {"view": "history", "game_mode": "competitive", "mmr": "all", "hero": hero_name}
 
@@ -1177,9 +1242,11 @@ class OverstatsPlugin(Star):
 
     @filter.command("商店", alias={'ow商店'})
     async def ow_shop(self, event: AstrMessageEvent):
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, "🛍️ 正在获取今日精选商店皮肤商品...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, "🛍️ 正在获取今日精选商店皮肤商品...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -1195,9 +1262,11 @@ class OverstatsPlugin(Star):
 
     @filter.command("ow赛事", alias={'赛事'})
     async def ow_esports(self, event: AstrMessageEvent):
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, "🎮 正在从 Pandascore 获取实时赛事对阵...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, "🎮 正在从 Pandascore 获取实时赛事对阵...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -1214,9 +1283,11 @@ class OverstatsPlugin(Star):
     @filter.command("获取段位分布")
     async def get_rank_distribution(self, event: AstrMessageEvent):
 
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, "📊 正在统计天梯全服大盘全英雄数据排行与环境分布...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, "📊 正在统计天梯全服大盘全英雄数据排行与环境分布...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         payload = {"view": "ranking", "game_mode": "competitive", "mmr": "all"}
 
@@ -1234,9 +1305,11 @@ class OverstatsPlugin(Star):
 
     @filter.command("ow活动", alias={'活动'})
     async def ow_activities(self, event: AstrMessageEvent):
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, "🎉 正在拉取当前版本限时节日/赛季大活动公告卡片...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, "🎉 正在拉取当前版本限时节日/赛季大活动公告卡片...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -1255,9 +1328,11 @@ class OverstatsPlugin(Star):
     @filter.command("banpick", alias={'全英雄排行'})
     async def ban_pick_stats(self, event: AstrMessageEvent):
 
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, "🚫 正在获取本周天梯英雄大盘选禁用排行...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, "🚫 正在获取本周天梯英雄大盘选禁用排行...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         payload = {"view": "ranking", "game_mode": "competitive", "mmr": "all"}
 
@@ -1275,9 +1350,11 @@ class OverstatsPlugin(Star):
 
     @filter.command("mappick")
     async def map_pick_stats(self, event: AstrMessageEvent):
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, "🗺️ 正在从最新版本补丁中检索当前赛季地图池与轮换出场...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, "🗺️ 正在从最新版本补丁中检索当前赛季地图池与轮换出场...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -1293,9 +1370,11 @@ class OverstatsPlugin(Star):
 
     @filter.command("皮肤搜索")
     async def skin_search(self, event: AstrMessageEvent, keyword: str = ""):
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"🔍 正在检索包含关键词【{keyword or '最新'}】的精选上架皮肤商品卡片...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🔍 正在检索包含关键词【{keyword or '最新'}】的精选上架皮肤商品卡片...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -1316,9 +1395,11 @@ class OverstatsPlugin(Star):
             yield self._plain_error_result(event, "❌ 参数错误。支持的日志类型：latest, small, big\n例如：/ow更新 small")
             return
 
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"📰 正在拉取外服 {kind} 更新日志卡片...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"📰 正在拉取外服 {kind} 更新日志卡片...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         success = False
         try:
@@ -1338,9 +1419,11 @@ class OverstatsPlugin(Star):
             yield self._plain_error_result(event, "❌ 请输入省份名称 and 职责位置，例如：/省榜 北京 tank\n(支持的位置: tank / dps / healer / open)")
             return
 
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"🏆 正在获取 {province} 地区 【{role}】 位置的大神天梯省榜...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🏆 正在获取 {province} 地区 【{role}】 位置的大神天梯省榜...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         payload = {"province": province, "role": role}
 
@@ -1355,6 +1438,60 @@ class OverstatsPlugin(Star):
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
             await self._finalize_business_status_prompt(prompt_token, success)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("维护")
+    async def maintenance_cmd(self, event: AstrMessageEvent, action: str = ""):
+        """设置或取消维护模式（仅 AstrBot 管理员可用）
+        用法：/维护 内容 或 /维护 取消
+        """
+        if not action:
+            yield event.plain_result("❌ 请输入维护内容，如：/维护 网易大神维护中，服务暂停，恢复时间未知\n取消维护：/维护 取消")
+            return
+
+        if action in ("取消", "关闭", "关", "off"):
+            await self._set_maintenance(False)
+            yield event.plain_result("✅ 维护模式已关闭")
+            return
+
+        # 从完整消息文本中提取 /维护 之后的所有内容（支持空格）
+        msg = (event.message_str or "").strip()
+        for prefix in ("/维护", "维护"):
+            if msg.startswith(prefix):
+                full_content = msg[len(prefix):].strip()
+                if full_content and full_content not in ("取消", "关闭", "关", "off"):
+                    action = full_content
+                break
+
+        await self._set_maintenance(True, action)
+        yield event.plain_result(f"✅ 维护模式已开启，内容：{action}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("ow连接测试")
+    async def connection_test_cmd(self, event: AstrMessageEvent):
+        """测试 Overstats 后端连接（仅 AstrBot 管理员可用）"""
+        # 从 base_url 构建健康检查地址：去掉 /api/v2 尾部，加上 /healthz
+        health_url = self.base_url.rstrip("/")
+        for suffix in ("/api/v2", "/api/v1", "/api"):
+            if health_url.endswith(suffix):
+                health_url = health_url[: -len(suffix)]
+                break
+        health_url += "/healthz"
+
+        try:
+            session = await self._get_http_session()
+            async with session.get(health_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                body = await resp.text()
+                if resp.status == 200:
+                    yield event.plain_result(body)
+                else:
+                    yield event.plain_result(f"⚠️ 服务响应异常，状态码: {resp.status}\n{body}")
+        except aiohttp.ClientConnectorError:
+            yield event.plain_result(f"❌ 连接失败：无法连接到 Overstats 服务，请检查服务是否启动及 API 地址配置。")
+        except asyncio.TimeoutError:
+            yield event.plain_result(f"❌ 连接超时：请求 10 秒内未收到响应，请检查网络或服务状态。")
+        except Exception as e:
+            yield event.plain_result(f"❌ 连接测试失败：{e}")
 
     @filter.command("群设置")
     async def group_config_cmd(self, event: AstrMessageEvent, action: str = "", value: str = ""):
@@ -1428,9 +1565,11 @@ class OverstatsPlugin(Star):
             yield self._plain_error_result(event, "❌ 请输入省份和英雄名称，例如：/绝活榜 北京 猎空")
             return
 
-        status_text, prompt_token = await self._prepare_business_status_prompt(event, f"🎖️ 正在获取 {province} 地区 【{hero}】 的大神英雄专精绝活榜...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🎖️ 正在获取 {province} 地区 【{hero}】 的大神英雄专精绝活榜...")
         if status_text:
             yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
 
         payload = {"province": province, "hero": hero, "mode": "preset"}
 
