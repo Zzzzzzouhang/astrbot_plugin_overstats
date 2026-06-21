@@ -521,6 +521,47 @@ class OverstatsPlugin(Star):
                 bnet_id = arg
         return bnet_id, mode
 
+    # 普通用户友好的中文关键词表：命中即从位置参数中剔除，避免和英雄名/省份/战网ID冲突
+    # 「大师」「钻石」等绝不会是英雄名或省份；「锐评关」「全员关」是自造词，无歧义
+    _KEYWORD_MAP = {
+        # 模式（pick率、强度图、段位分布）
+        "快速": {"game_mode": "quick"},
+        "竞技": {"game_mode": "competitive"},
+        # 段位（mmr）
+        "青铜": {"mmr": "Bronze"},
+        "白银": {"mmr": "Silver"},
+        "黄金": {"mmr": "Gold"},
+        "白金": {"mmr": "Platinum"},
+        "钻石": {"mmr": "Diamond"},
+        "大师": {"mmr": "Master"},
+        "宗师": {"mmr": "Grandmaster"},
+        "英杰": {"mmr": "Champion"},
+        # 绝活榜模式
+        "开放": {"lb_mode": "open"},
+        "预设": {"lb_mode": "preset"},
+        # 单局详细开关
+        "锐评": {"analyze": True},
+        "锐评关": {"analyze": False},
+        "全员关": {"show_all_heroes": False},
+    }
+
+    def _extract_keywords(self, args) -> tuple[list[str], dict]:
+        """从位置参数中识别中文关键词，返回 (剩下的位置参数, 命中的字段字典)。
+        关键词可无序、可省略、可混用；非关键词一律保留为位置参数。"""
+        positional, fields = [], {}
+        for a in args:
+            if a is None:
+                continue
+            a = str(a).strip()
+            if not a:
+                continue
+            hit = self._KEYWORD_MAP.get(a)
+            if hit:
+                fields.update(hit)
+            else:
+                positional.append(a)
+        return positional, fields
+
     async def _fetch_image(self, endpoint: str, payload: dict = None, timeout: int = 600) -> tuple[bytes | None, dict | None]:
         url = f"{self.base_url}{endpoint}"
         payload = payload or {}
@@ -720,13 +761,14 @@ class OverstatsPlugin(Star):
         help_text = """📌 Overstats 查询菜单
 🔗 ➤ <qqbot-cmd-input text="/绑定 战网ID（区分大小写）" show="绑定" reference="false" />示例：/绑定 Player#12345
 📋 ➤ <qqbot-cmd-input text="/今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="/昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="/周度总结 " show="本周" reference="false" />
-📊 ➤ <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="/大神对局 " show="大神对局" reference="false" /> ➤ <qqbot-cmd-input text="/单局详细 " show="单局详细" reference="false" />「数字」
-📈 ➤ <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" /> ➤ <qqbot-cmd-input text="/竞技强度 " show="竞技强度" reference="false" /> ➤ <qqbot-cmd-input text="/获取段位分布 " show="获取段位分布" reference="false" />
+📊 ➤ <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="/大神对局 " show="大神对局" reference="false" /> ➤ <qqbot-cmd-input text="/单局详细 " show="单局详细" reference="false" />「数字」可加 锐评关/全员关
+📈 ➤ <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" />「可选对局数」 ➤ <qqbot-cmd-input text="/竞技强度 " show="竞技强度" reference="false" />「可选对局数」 ➤ <qqbot-cmd-input text="/获取段位分布 " show="获取段位分布" reference="false" />「可选 快速/竞技 段位」
 🗺️ ➤ <qqbot-cmd-input text="/快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="/竞技英雄云图 " show="竞技云图" reference="false" />
-🏆 ➤ <qqbot-cmd-input text="/省榜 " show="省榜" reference="false" />「省份」「位置」 ➤ <qqbot-cmd-input text="/绝活榜 " show="绝活榜" reference="false" />「省份」「英雄」
-⚔️ ➤ <qqbot-cmd-input text="/威能 " show="威能" reference="false" />「英雄名」 ➤ <qqbot-cmd-input text="/ow英雄 " show="ow 英雄" reference="false" />「英雄名」 ➤ <qqbot-cmd-input text="/banpick " show="banpick" reference="false" /> ➤ <qqbot-cmd-input text="/mappick " show="mappick" reference="false" />
+🏆 ➤ <qqbot-cmd-input text="/省榜 " show="省榜" reference="false" />「省份」「位置」 ➤ <qqbot-cmd-input text="/绝活榜 " show="绝活榜" reference="false" />「省份」「英雄」可加 开放
+⚔️ ➤ <qqbot-cmd-input text="/威能 " show="威能" reference="false" />「英雄名」 ➤ <qqbot-cmd-input text="/ow英雄 " show="ow 英雄" reference="false" />「英雄名」可加 快速/竞技 段位 ➤ <qqbot-cmd-input text="/banpick " show="banpick" reference="false" />「可选 快速/竞技 段位」 ➤ <qqbot-cmd-input text="/mappick " show="mappick" reference="false" />
 🌍 ➤ <qqbot-cmd-input text="/同玩查询 " show="同玩查询" reference="false" />「ID1」「ID2」 ➤ <qqbot-cmd-input text="/商店 " show="商店" reference="false" /> ➤ <qqbot-cmd-input text="/皮肤搜索 " show="皮肤搜索" reference="false" /> ➤ <qqbot-cmd-input text="/ow赛事 " show="ow 赛事" reference="false" />
 📰 ➤ <qqbot-cmd-input text="/ow更新 " show="ow更新" reference="false" />「latest/small/big」
+🎁 ➤ 段位关键词：青铜/白银/黄金/白金/钻石/大师/宗师/英杰
 💡 发送 <qqbot-cmd-input text="/别称 " show="别称" reference="false" /> 可查看所有指令对应别称列表。"""
         
         yield event.plain_result(self._format_markdown_by_platform(event, help_text))
@@ -906,20 +948,20 @@ class OverstatsPlugin(Star):
             await self._finalize_business_status_prompt(prompt_token, success)
 
     @filter.command("单局详细", alias={'单局'})
-    async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+    async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = "", arg2: str = "", arg3: str = ""):
+        # 先识别中文关键词：锐评关 / 全员关 / 锐评（默认即锐评，可显式给）
+        positional, kw = self._extract_keywords([arg1, arg2, arg3])
         index = 0
         bnet_id = None
-        
-        for arg in [arg1, arg2]:
-            if not arg:
-                continue
-            if arg.isdigit(): 
+
+        for arg in positional:
+            if arg.isdigit():
                 digit = int(arg)
                 if digit > 20:
                     yield self._plain_error_result(event, "❌ 错误：单局详细的数字索引不能大于 20！")
                     return
                 index = max(0, digit - 1) if digit > 0 else 0
-            else: 
+            else:
                 bnet_id = arg
 
         if not bnet_id:
@@ -932,20 +974,25 @@ class OverstatsPlugin(Star):
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/单局详细 1 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
 
-        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"⏳ 正在拉取 {target_id} 第 {index + 1} 局的单局多图详细战绩...")
+        # 提示文案：关闭锐评时告知用户本次更快
+        base_prompt = f"⏳ 正在拉取 {target_id} 第 {index + 1} 局的单局多图详细战绩..."
+        if kw.get("analyze") is False:
+            base_prompt += "（本次已跳过 AI 锐评，出图更快）"
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, base_prompt)
         if status_text:
             yield event.plain_result(status_text)
         if _maintenance_stop:
             return
-        
+
         payload = {
             "bnet_id": target_id,
             "index": str(index),
             "limit": "20",
             "include_fight": True,
             "include_previous_season": True,
-            "show_all_heroes": True,
-            "analyze": True
+            # 默认开启，命中「全员关」「锐评关」时关闭
+            "show_all_heroes": kw.get("show_all_heroes", True),
+            "analyze": kw.get("analyze", True)
         }
         
         url = f"{self.base_url}/dashen-match/detail/replies"
@@ -1023,20 +1070,46 @@ class OverstatsPlugin(Star):
             await self._finalize_business_status_prompt(prompt_token, success)
 
     @filter.command("历史段位", alias={'历届段位'})
-    async def dashen_rank_history(self, event: AstrMessageEvent, bnet_id: str = ""):
+    async def dashen_rank_history(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        # /历史段位            /历史段位 Player#12345
+        # /历史段位 15 22（起始赛季 终止赛季）       /历史段位 Player#12345 15 22
+        positional, _kw = self._extract_keywords([arg1, arg2])
+        bnet_id = None
+        season_nums: list[int] = []
+        for arg in positional:
+            if arg.isdigit():
+                season_nums.append(int(arg))
+            else:
+                bnet_id = arg
+
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/历史段位 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
+            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/历史段位 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345\n可选附加 起始 终止 赛季，如 /历史段位 Player#12345 15 22")
             return
-        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"📜 正在追溯 {target_id} 的历史段位记录...")
+
+        season_hint = ""
+        if len(season_nums) == 1:
+            season_hint = f"（从 S{season_nums[0]} 起）"
+        elif len(season_nums) >= 2:
+            season_hint = f"（S{season_nums[0]} ~ S{season_nums[1]})"
+
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(
+            event, f"📜 正在追溯 {target_id} 的历史段位记录{season_hint}...")
         if status_text:
             yield event.plain_result(status_text)
         if _maintenance_stop:
             return
 
+        payload = {"bnet_id": target_id}
+        # 起止赛季：按出现顺序赋值；仅给一个数字时作为起始
+        if len(season_nums) >= 1:
+            payload["start_season"] = season_nums[0]
+        if len(season_nums) >= 2:
+            payload["end_season"] = season_nums[1]
+
         success = False
         try:
-            img_bytes, error_data = await self._fetch_image("/dashen-rank-history/image", {"bnet_id": target_id})
+            img_bytes, error_data = await self._fetch_image("/dashen-rank-history/image", payload)
             if img_bytes:
                 success = True
                 yield self._send_image_result(event, img_bytes)
@@ -1074,10 +1147,21 @@ class OverstatsPlugin(Star):
             await self._finalize_business_status_prompt(prompt_token, success)
 
     @filter.command("快速强度", alias={'快速强度指数'})
-    async def quick_strength(self, event: AstrMessageEvent, bnet_id: str = ""):
+    async def quick_strength(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        # /快速强度            /快速强度 Player#12345         /快速强度 8（对局数3-12）
+        # /快速强度 Player#12345 8
+        positional, _kw = self._extract_keywords([arg1, arg2])
+        bnet_id = None
+        limit = None
+        for arg in positional:
+            if arg.isdigit():
+                limit = int(arg)
+            else:
+                bnet_id = arg
+
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/快速强度 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
+            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/快速强度 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345\n可选附加对局数（3-12），如 /快速强度 Player#12345 8")
             return
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"⚡ 正在评估 {target_id} 的快速强度指数...")
         if status_text:
@@ -1085,9 +1169,13 @@ class OverstatsPlugin(Star):
         if _maintenance_stop:
             return
 
+        payload = {"bnet_id": target_id, "include_previous_season": True}
+        if limit is not None:
+            payload["limit"] = max(3, min(12, limit))
+
         success = False
         try:
-            img_bytes, error_data = await self._fetch_image("/dashen-quick-strength/image", {"bnet_id": target_id})
+            img_bytes, error_data = await self._fetch_image("/dashen-quick-strength/image", payload)
             if img_bytes:
                 success = True
                 yield self._send_image_result(event, img_bytes)
@@ -1101,10 +1189,21 @@ class OverstatsPlugin(Star):
             await self._finalize_business_status_prompt(prompt_token, success)
 
     @filter.command("竞技强度", alias={'竞技强度指数'})
-    async def competitive_strength(self, event: AstrMessageEvent, bnet_id: str = ""):
+    async def competitive_strength(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        # /竞技强度            /竞技强度 Player#12345         /竞技强度 8（对局数3-12）
+        # /竞技强度 Player#12345 8
+        positional, _kw = self._extract_keywords([arg1, arg2])
+        bnet_id = None
+        limit = None
+        for arg in positional:
+            if arg.isdigit():
+                limit = int(arg)
+            else:
+                bnet_id = arg
+
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/竞技强度 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
+            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/竞技强度 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345\n可选附加对局数（3-12），如 /竞技强度 Player#12345 8")
             return
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🏆 正在评估 {target_id} 的竞技天梯强度指数...")
         if status_text:
@@ -1112,9 +1211,13 @@ class OverstatsPlugin(Star):
         if _maintenance_stop:
             return
 
+        payload = {"bnet_id": target_id, "include_previous_season": True}
+        if limit is not None:
+            payload["limit"] = max(3, min(12, limit))
+
         success = False
         try:
-            img_bytes, error_data = await self._fetch_image("/dashen-competitive-strength/image", {"bnet_id": target_id})
+            img_bytes, error_data = await self._fetch_image("/dashen-competitive-strength/image", payload)
             if img_bytes:
                 success = True
                 yield self._send_image_result(event, img_bytes)
@@ -1215,18 +1318,30 @@ class OverstatsPlugin(Star):
             await self._finalize_business_status_prompt(prompt_token, success)
 
     @filter.command("ow英雄")
-    async def ow_hero_pick(self, event: AstrMessageEvent, hero_name: str):
+    async def ow_hero_pick(self, event: AstrMessageEvent, arg1: str = "", arg2: str = "", arg3: str = ""):
+        # /ow英雄 安娜  /ow英雄 安娜 快速  /ow英雄 安娜 大师  /ow英雄 安娜 快速 大师
+        positional, kw = self._extract_keywords([arg1, arg2, arg3])
+        hero_name = positional[0] if positional else ""
         if not hero_name:
-            yield self._plain_error_result(event, "❌ 请输入英雄名称，如：/ow英雄 闪光")
+            yield self._plain_error_result(event, "❌ 请输入英雄名称，如：/ow英雄 闪光\n可选附加：快速/竞技 模式、青铜~英杰 段位，如 /ow英雄 安娜 快速 大师")
             return
 
-        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🔥 正在读取 {hero_name} 的天梯 Pick 率走势图...")
+        # 默认竞技全段位，可被 快速/竞技 与分段关键词覆盖
+        mode_label = "快速" if kw.get("game_mode") == "quick" else "竞技"
+        mmr_label = kw.get("mmr", "all")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(
+            event, f"🔥 正在读取 {hero_name} 的 {mode_label}（{mmr_label}）Pick 率走势图...")
         if status_text:
             yield event.plain_result(status_text)
         if _maintenance_stop:
             return
 
-        payload = {"view": "history", "game_mode": "competitive", "mmr": "all", "hero": hero_name}
+        payload = {
+            "view": "history",
+            "game_mode": kw.get("game_mode", "competitive"),
+            "mmr": kw.get("mmr", "all"),
+            "hero": hero_name
+        }
 
         success = False
         try:
@@ -1281,15 +1396,21 @@ class OverstatsPlugin(Star):
             await self._finalize_business_status_prompt(prompt_token, success)
 
     @filter.command("获取段位分布")
-    async def get_rank_distribution(self, event: AstrMessageEvent):
+    async def get_rank_distribution(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        # /获取段位分布        /获取段位分布 快速       /获取段位分布 快速 大师       /获取段位分布 大师
+        _positional, kw = self._extract_keywords([arg1, arg2])
+        game_mode = kw.get("game_mode", "competitive")
+        mmr = kw.get("mmr", "all")
+        mode_label = "快速" if game_mode == "quick" else "竞技"
 
-        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, "📊 正在统计天梯全服大盘全英雄数据排行与环境分布...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(
+            event, f"📊 正在统计 {mode_label}（{mmr}）天梯全服大盘全英雄数据排行与环境分布...")
         if status_text:
             yield event.plain_result(status_text)
         if _maintenance_stop:
             return
 
-        payload = {"view": "ranking", "game_mode": "competitive", "mmr": "all"}
+        payload = {"view": "ranking", "game_mode": game_mode, "mmr": mmr}
 
         success = False
         try:
@@ -1326,15 +1447,21 @@ class OverstatsPlugin(Star):
             await self._finalize_business_status_prompt(prompt_token, success)
 
     @filter.command("banpick", alias={'全英雄排行'})
-    async def ban_pick_stats(self, event: AstrMessageEvent):
+    async def ban_pick_stats(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        # /banpick        /banpick 快速       /banpick 快速 黄金       /banpick 黄金
+        _positional, kw = self._extract_keywords([arg1, arg2])
+        game_mode = kw.get("game_mode", "competitive")
+        mmr = kw.get("mmr", "all")
+        mode_label = "快速" if game_mode == "quick" else "竞技"
 
-        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, "🚫 正在获取本周天梯英雄大盘选禁用排行...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(
+            event, f"🚫 正在获取 {mode_label}（{mmr}）本周天梯英雄大盘选禁用排行...")
         if status_text:
             yield event.plain_result(status_text)
         if _maintenance_stop:
             return
 
-        payload = {"view": "ranking", "game_mode": "competitive", "mmr": "all"}
+        payload = {"view": "ranking", "game_mode": game_mode, "mmr": mmr}
 
         success = False
         try:
@@ -1560,18 +1687,25 @@ class OverstatsPlugin(Star):
         yield event.plain_result(f"✅ 群组 {group_id} 的【{feature_names[feature_key]}】功能已{status_text}")
 
     @filter.command("绝活榜", alias={'英雄省榜'})
-    async def ow_hero_leaderboard(self, event: AstrMessageEvent, province: str, hero: str):
+    async def ow_hero_leaderboard(self, event: AstrMessageEvent, province: str, hero: str, arg3: str = ""):
+        # /绝活榜 北京 猎空        /绝活榜 北京 猎空 开放（开放=开放队列模式）
+        _positional, kw = self._extract_keywords([province, hero, arg3])
+        # 关键词识别后还原省/英雄（关键词被剔除，剩下的前两个就是省份与英雄）
+        province = _positional[0] if len(_positional) >= 1 else province
+        hero = _positional[1] if len(_positional) >= 2 else hero
         if not province or not hero:
-            yield self._plain_error_result(event, "❌ 请输入省份和英雄名称，例如：/绝活榜 北京 猎空")
+            yield self._plain_error_result(event, "❌ 请输入省份和英雄名称，例如：/绝活榜 北京 猎空\n可选附加 开放（开放队列模式），如 /绝活榜 北京 猎空 开放")
             return
 
-        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🎖️ 正在获取 {province} 地区 【{hero}】 的大神英雄专精绝活榜...")
+        mode = kw.get("lb_mode", "preset")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(
+            event, f"🎖️ 正在获取 {province} 地区 【{hero}】（{'开放队列' if mode == 'open' else '预设'}）的大神英雄专精绝活榜...")
         if status_text:
             yield event.plain_result(status_text)
         if _maintenance_stop:
             return
 
-        payload = {"province": province, "hero": hero, "mode": "preset"}
+        payload = {"province": province, "hero": hero, "mode": mode}
 
         success = False
         try:
