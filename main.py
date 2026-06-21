@@ -509,7 +509,7 @@ class OverstatsPlugin(Star):
 
     def _parse_profile_args(self, arg1: str = "", arg2: str = "") -> tuple[str | None, str]:
         bnet_id = None
-        mode = "competitive"
+        mode = "quick"
         for arg in [arg1, arg2]:
             if not arg:
                 continue
