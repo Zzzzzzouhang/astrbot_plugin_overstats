@@ -897,7 +897,7 @@ class OverstatsPlugin(Star):
                 success = True
                 yield self._send_image_result(event, img_bytes)
             elif error_data and error_data.get("error") == "summary_empty" and error_data.get("details", {}).get("scope") == "today":
-                yield event.plain_result("ℹ️ 你在过去的 24 小时内没有对局记录，尝试生成昨日总结...")
+                yield event.plain_result(f"ℹ️ {target_id} 在过去的 24 小时内没有对局记录，尝试生成昨日总结...")
                 img_bytes, error_data = await self._fetch_image("/dashen-summary/yesterday/image", {"bnet_id": target_id})
                 if img_bytes:
                     success = True
@@ -906,6 +906,8 @@ class OverstatsPlugin(Star):
                     err_msg = error_data.get("message") if error_data else "获取昨日总结失败，可能昨日未登录游戏。"
                     if err_msg and "Could not resolve customerToken" in err_msg:
                         yield self._plain_error_result(event, self._id_resolve_err("获取昨日总结失败"))
+                    elif error_data and error_data.get("error") == "summary_empty":
+                        yield self._plain_error_result(event, f"❌ {target_id} 在过去 48 小时内没有对局记录")
                     else:
                         yield self._plain_error_result(event, f"❌ {err_msg}")
             else:
@@ -944,6 +946,8 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else "获取昨日总结失败，可能昨日未登录游戏。"
                 if err_msg and "Could not resolve customerToken" in err_msg:
                     yield self._plain_error_result(event, self._id_resolve_err("获取昨日总结失败"))
+                elif error_data and error_data.get("error") == "summary_empty":
+                    yield self._plain_error_result(event, f"❌ {target_id} 在昨日没有对局记录")
                 else:
                     yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
@@ -971,6 +975,8 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else "获取周度总结失败，请检查服务日志或是否请求超时。"
                 if err_msg and "Could not resolve customerToken" in err_msg:
                     yield self._plain_error_result(event, self._id_resolve_err("获取周度总结失败"))
+                elif error_data and error_data.get("error") == "summary_empty" and error_data.get("details", {}).get("scope") == "week":
+                    yield self._plain_error_result(event, f"❌ {target_id} 在过去 7 天内没有对局记录")
                 else:
                     yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
