@@ -868,7 +868,7 @@ class OverstatsPlugin(Star):
         if not target_id:
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/周度总结 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
             return
-        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"📊 正在生成 {target_id} 的本周战绩大数据总结，耗时较长（约30-60秒），请稍候...")
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"📊 正在生成 {target_id} 的本周战绩大数据总结...")
         if status_text:
             yield event.plain_result(status_text)
         if _maintenance_stop:
@@ -1683,6 +1683,30 @@ class OverstatsPlugin(Star):
         feature_names = {"daily_prompt_skip": "首次提示后不再提示", "append_notice": "追加交互提示"}
         status_text = "✅ 已开启" if enabled else "❌ 已关闭"
         yield event.plain_result(f"✅ 群组 {group_id} 的【{feature_names[feature_key]}】功能已{status_text}")
+
+    @filter.command("管理")
+    async def admin_menu(self, event: AstrMessageEvent):
+        """管理员维护指令菜单（仅 Bot 管理员或群主/群管理员可用）"""
+        if not self._is_group_admin(event):
+            yield event.plain_result("⚠️ 此命令仅限 Bot 管理员或群主/群管理员使用")
+            return
+
+        text = """🛠️ 管理员维护指令菜单
+
+🔧 **维护管理：**
+• <qqbot-cmd-input text="/维护 " show="/维护 内容" reference="false" /> 开启维护模式（如：/维护 服务升级中，暂停服务）
+• <qqbot-cmd-input text="/维护 取消 " show="/维护 取消" reference="false" /> 关闭维护模式
+
+⚙️ **群组配置：**
+• <qqbot-cmd-input text="/群设置 " show="/群设置" reference="false" /> 查看当前群组功能配置
+• <qqbot-cmd-input text="/群设置 提示 开 " show="/群设置 提示 开" reference="false" /> / <qqbot-cmd-input text="/群设置 提示 关 " show="/群设置 提示 关" reference="false" /> 切换首次提示后不再提示
+• <qqbot-cmd-input text="/群设置 追加提示 开 " show="/群设置 追加提示 开" reference="false" /> / <qqbot-cmd-input text="/群设置 追加提示 关 " show="/群设置 追加提示 关" reference="false" /> 切换追加交互提示
+
+🔌 **系统诊断：**
+• <qqbot-cmd-input text="/ow连接测试 " show="/ow连接测试" reference="false" /> 测试 Overstats 后端连接状态
+
+💡 维护模式开启后，所有指令将直接返回维护内容，不再执行业务逻辑。"""
+        yield event.plain_result(self._format_markdown_by_platform(event, text))
 
     @filter.command("绝活榜", alias={'英雄省榜'})
     async def ow_hero_leaderboard(self, event: AstrMessageEvent, province: str, hero: str, arg3: str = ""):
