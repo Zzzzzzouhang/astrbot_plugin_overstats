@@ -22,8 +22,8 @@ _CONFIG_TEMPLATE = '''from __future__ import annotations
 # ======================= Core Service ====================== #
 API_HOST = {host!r}
 API_PORT = {port}
-USE_STREAM_RESPONSE = True
-ENABLE_DATABASE_WRITE = True
+USE_STREAM_RESPONSE = {use_stream_response}
+ENABLE_DATABASE_WRITE = {enable_database_write}
 
 # ======================= Dashen Upstream ====================== #
 # Configure at least one account.
@@ -31,8 +31,8 @@ DASHEN_ACCOUNTS = {accounts}
 
 DASHEN_DTS = {dts}
 DASHEN_SERVER = {server}
-DASHEN_ACCOUNT_MAX_REQUESTS_PER_SECOND = 5
-DASHEN_ACCOUNT_RATE_LIMIT_WINDOW_SECONDS = 1.0
+DASHEN_ACCOUNT_MAX_REQUESTS_PER_SECOND = {dashen_account_max_rps}
+DASHEN_ACCOUNT_RATE_LIMIT_WINDOW_SECONDS = {dashen_rate_limit_window}
 DASHEN_CLIENT_TYPE = "60"
 DASHEN_ORIGIN = "https://act.ds.163.com"
 DASHEN_REFERER = "https://act.ds.163.com/"
@@ -41,8 +41,8 @@ DASHEN_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36 "
     "app/df_client dfVersion/100111"
 )
-DASHEN_ACCOUNT_FAILURE_COOLDOWN_SECONDS = 60
-DASHEN_MAX_CONCURRENT_REQUESTS = 2
+DASHEN_ACCOUNT_FAILURE_COOLDOWN_SECONDS = {dashen_failure_cooldown}
+DASHEN_MAX_CONCURRENT_REQUESTS = {dashen_max_concurrent}
 DASHEN_MAX_ACCEPTED_REQUESTS = max(len(DASHEN_ACCOUNTS) * 4, 1)
 
 # Optional proxy settings.
@@ -55,25 +55,25 @@ DASHEN_NETEASE_PROXIES = [
 OW_ESPORTS_API_KEY = {ow_esports_api_key!r}
 
 # Optional external OW guess asset pack root.
-OW_GUESS_ASSET_ROOT = "ow_guess_assets"
+OW_GUESS_ASSET_ROOT = {ow_guess_asset_root!r}
 
 # ======================= Dashen Season ====================== #
-DASHEN_CURRENT_SEASON = 23
-DASHEN_HISTORY_START_SEASON = 15
+DASHEN_CURRENT_SEASON = {dashen_current_season}
+DASHEN_HISTORY_START_SEASON = {dashen_history_start_season}
 
 # ======================= OW Hero Leaderboard ====================== #
-OW_HERO_LEADERBOARD_CN_SEASON = 3
+OW_HERO_LEADERBOARD_CN_SEASON = {ow_hero_leaderboard_cn_season}
 
 # ======================= Match Analysis ====================== #
 ANALYSIS_BASE_URL = {analysis_base_url!r}
 ANALYSIS_API_KEY = {analysis_api_key!r}
-ANALYSIS_PROXY = ""
+ANALYSIS_PROXY = {analysis_proxy!r}
 
 ANALYSIS_OPENAI_MODEL = {analysis_model!r}
 
 # Optional external patch-note fetch proxy.
-PATCH_NOTES_USE_INTERNATIONAL_PROXY = False
-PATCH_NOTES_INTERNATIONAL_PROXY = ""
+PATCH_NOTES_USE_INTERNATIONAL_PROXY = {patch_notes_use_proxy}
+PATCH_NOTES_INTERNATIONAL_PROXY = {patch_notes_proxy!r}
 
 ANALYSIS_PERSONA_PROMPT = {persona_prompt!r}
 '''
@@ -314,7 +314,7 @@ def generate_config(config: dict) -> str:
         合法的 Python 配置文件内容字符串
     """
     host = _escape_string(config.get("backend_host", "127.0.0.1"))
-    port = int(config.get("backend_port", 18080) or 18080)
+    port = int(config.get("backend_port", 18081) or 18081)
     webui_accounts = config.get("dashen_accounts", []) or []
 
     # 批量账号文本：每行一条（name,role_id,token），合并到 WebUI 账号并去重
@@ -341,6 +341,21 @@ def generate_config(config: dict) -> str:
     analysis_model = _escape_string(config.get("analysis_model", ""))
     persona_prompt = _escape_string(config.get("analysis_persona_prompt", ""))
 
+    # 新增可调配置项（从 AstrBot 配置读取，回退到原项目默认值）
+    use_stream_response = bool(config.get("use_stream_response", True))
+    enable_database_write = bool(config.get("enable_database_write", True))
+    dashen_account_max_rps = int(config.get("dashen_account_max_requests_per_second", 5) or 5)
+    dashen_rate_limit_window = float(config.get("dashen_account_rate_limit_window_seconds", 1.0) or 1.0)
+    dashen_failure_cooldown = int(config.get("dashen_account_failure_cooldown_seconds", 60) or 60)
+    dashen_max_concurrent = int(config.get("dashen_max_concurrent_requests", 2) or 2)
+    ow_guess_asset_root = _escape_string(config.get("ow_guess_asset_root", "ow_guess_assets"))
+    dashen_current_season = int(config.get("dashen_current_season", 23) or 23)
+    dashen_history_start_season = int(config.get("dashen_history_start_season", 15) or 15)
+    ow_hero_leaderboard_cn_season = int(config.get("ow_hero_leaderboard_cn_season", 3) or 3)
+    analysis_proxy = _escape_string(config.get("analysis_proxy", ""))
+    patch_notes_use_proxy = bool(config.get("patch_notes_use_international_proxy", False))
+    patch_notes_proxy = _escape_string(config.get("patch_notes_international_proxy", ""))
+
     return _CONFIG_TEMPLATE.format(
         host=host,
         port=port,
@@ -353,6 +368,19 @@ def generate_config(config: dict) -> str:
         analysis_api_key=analysis_api_key,
         analysis_model=analysis_model,
         persona_prompt=persona_prompt,
+        use_stream_response=use_stream_response,
+        enable_database_write=enable_database_write,
+        dashen_account_max_rps=dashen_account_max_rps,
+        dashen_rate_limit_window=dashen_rate_limit_window,
+        dashen_failure_cooldown=dashen_failure_cooldown,
+        dashen_max_concurrent=dashen_max_concurrent,
+        ow_guess_asset_root=ow_guess_asset_root,
+        dashen_current_season=dashen_current_season,
+        dashen_history_start_season=dashen_history_start_season,
+        ow_hero_leaderboard_cn_season=ow_hero_leaderboard_cn_season,
+        analysis_proxy=analysis_proxy,
+        patch_notes_use_proxy=patch_notes_use_proxy,
+        patch_notes_proxy=patch_notes_proxy,
     )
 
 

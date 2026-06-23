@@ -40,7 +40,7 @@
 
 ### 独立链接模式（manual）准备
 
-1. 请前往 [Zzzzzzouhang/Overstats](https://github.com/Zzzzzzouhang/Overstats) 仓库，按照其说明文档完成服务部署
+1. 请前往 [AddOneSecondL/Overstats](https://github.com/AddOneSecondL/Overstats) 仓库，按照其说明文档完成服务部署，或使用我的[Zzzzzzouhang/Overstats](https://github.com/Zzzzzzouhang/Overstats) 有针对查询服务的优化，二次查询更快，渲染数据更全
 2. 确保 Overstats 后端的 API 端口（默认 `18080`）可以被 AstrBot 所在的服务器正常访问
 > ⚠️ 监听全部端口需要在Overstats/config/config.py，改API_HOST = "0.0.0.0"，外网访问需要服务器开放对应端口防火墙
 

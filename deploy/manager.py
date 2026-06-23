@@ -44,7 +44,7 @@ class DeployStatus:
     mode: str = "manual"
     backend_dir: str = ""
     venv_dir: str = ""
-    backend_port: int = 18080
+    backend_port: int = 18081
     backend_host: str = "127.0.0.1"
     git_commit: str = "unknown"
     process_alive: bool = False
@@ -122,9 +122,9 @@ class DeployManager:
     @property
     def backend_port(self) -> int:
         try:
-            return int(self._config.get("backend_port", 18080) or 18080)
+            return int(self._config.get("backend_port", 18081) or 18081)
         except (TypeError, ValueError):
-            return 18080
+            return 18081
 
     @property
     def backend_dir(self) -> Path:

@@ -180,6 +180,30 @@ class OverstatsPlugin(Star):
             pass
         return None
 
+    def _is_astrbot_admin(self, event: AstrMessageEvent) -> bool:
+        """检查发送者是否为 AstrBot 系统管理员（配置面板中的 admins_id）。
+
+        与 _is_group_admin 不同，此方法仅检查 AstrBot 全局管理员列表，
+        不包含群主/群管理员。用于维护模式等需要系统管理员权限的场景。
+        """
+        try:
+            sender_id = str(event.get_sender_id())
+            admin_ids = []
+            if hasattr(self.context, "get_config"):
+                cfg = self.context.get_config()
+                admin_ids = [str(uid) for uid in getattr(cfg, "admins_id", [])]
+            if sender_id in admin_ids:
+                return True
+        except Exception:
+            pass
+        # AstrMessageEvent 携带的 admin 标记（@filter.permission_type(ADMIN) 触发的）
+        try:
+            if getattr(event, "is_admin", False):
+                return True
+        except Exception:
+            pass
+        return False
+
     def _is_group_admin(self, event: AstrMessageEvent) -> bool:
         """检查发送者是否为群管理员/群主 或 AstrBot 管理员"""
         sender_id = ""
@@ -315,11 +339,19 @@ class OverstatsPlugin(Star):
 
     async def _prepare_business_status_prompt(self, event: AstrMessageEvent, base_text: str) -> tuple[str | None, str | None, bool]:
         """准备业务状态提示。返回 (提示文本, 跟踪token, 是否应提前终止)。
-        当 should_stop=True 时（维护模式），调用方应 yield 文本后 return，不再执行业务逻辑。"""
+
+        当 should_stop=True 时（维护模式），调用方应 yield 文本后 return，不再执行业务逻辑。
+        AstrBot 管理员不受维护模式限制，可正常使用数据查询指令。
+        """
         # 维护模式检查：激活时返回维护内容并标记提前终止（群聊/私聊均生效）
+        # AstrBot 管理员绕过维护限制，可正常使用数据查询指令
         await self._ensure_maintenance_loaded()
         if self._maintenance_state and self._maintenance_state.get("enabled"):
-            return self._maintenance_state.get("content", "系统维护中"), None, True
+            if self._is_astrbot_admin(event):
+                # 管理员不受维护模式限制，正常执行业务逻辑
+                pass
+            else:
+                return self._maintenance_state.get("content", "系统维护中"), None, True
 
         if not self._is_group_message(event):
             return base_text, None, False

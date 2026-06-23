@@ -130,8 +130,85 @@
     "description": "AI 锐评人设提示词",
     "type": "text",
     "hint": "auto 模式下可选。AI 锐评的人格设定与语气。仅放 AI 人设/语气，任务指令由后端服务维护。",
-    "default": "【核心原则】\n请保持绝对客观中立，拒绝阿谀奉承！不要因为查询指令的是焦点玩家就一味夸奖，如果焦点玩家表现平庸或拉垮请直接批评。\n\n【人格设定】\n你的说话人设是科比·布莱恩特，风格包含 [man! what can i say，mamba out] 等 meme。",
-    "invisible": true
+    "default": "【核心原则】\n请保持绝对客观中立，拒绝阿谀奉承！不要因为查询指令的是焦点玩家就一味夸奖，如果焦点玩家表现平庸或拉垮请直接批评。\n\n【人格设定】\n你的说话人设是科比·布莱恩特，风格包含 [man! what can i say，mamba out] 等 meme。"
+  },
+  "use_stream_response": {
+    "description": "流式响应",
+    "type": "bool",
+    "hint": "auto 模式下生效。开启后 API 响应使用流式传输（SSE），可提升大响应的体验。默认开启。",
+    "default": true
+  },
+  "enable_database_write": {
+    "description": "数据库写入",
+    "type": "bool",
+    "hint": "auto 模式下生效。开启后后端会将比赛记录、请求指标等写入 SQLite 数据库，用于历史查询和性能统计。默认开启。",
+    "default": true
+  },
+  "dashen_account_max_requests_per_second": {
+    "description": "单账号每秒最大请求数",
+    "type": "int",
+    "hint": "auto 模式下生效。单个大神账号每秒最大请求频率限制，默认 5。",
+    "default": 5
+  },
+  "dashen_account_rate_limit_window_seconds": {
+    "description": "限流窗口（秒）",
+    "type": "float",
+    "hint": "auto 模式下生效。账号限流的时间窗口，默认 1.0 秒。",
+    "default": 1.0
+  },
+  "dashen_account_failure_cooldown_seconds": {
+    "description": "账号失败冷却（秒）",
+    "type": "int",
+    "hint": "auto 模式下生效。账号请求失败后的冷却时间，冷却期间不分配请求，默认 60 秒。",
+    "default": 60
+  },
+  "dashen_max_concurrent_requests": {
+    "description": "最大并发请求数",
+    "type": "int",
+    "hint": "auto 模式下生效。后端同时向上游发起的最大并发请求数，默认 2。",
+    "default": 2
+  },
+  "ow_guess_asset_root": {
+    "description": "OW 猜测资源目录",
+    "type": "string",
+    "hint": "auto 模式下可选。本地 OW 猜测资源包（图片/音频）的根目录路径，默认 ow_guess_assets。无需此功能则保持默认。",
+    "default": "ow_guess_assets"
+  },
+  "dashen_current_season": {
+    "description": "当前赛季",
+    "type": "int",
+    "hint": "auto 模式下生效。大神当前赛季编号，默认 23。新赛季更新时需修改。",
+    "default": 23
+  },
+  "dashen_history_start_season": {
+    "description": "历史起始赛季",
+    "type": "int",
+    "hint": "auto 模式下生效。历史数据查询的起始赛季编号，默认 15。",
+    "default": 15
+  },
+  "ow_hero_leaderboard_cn_season": {
+    "description": "国服英雄榜单赛季",
+    "type": "int",
+    "hint": "auto 模式下生效。国服英雄排行榜的赛季编号，默认 3。",
+    "default": 3
+  },
+  "analysis_proxy": {
+    "description": "AI 分析代理",
+    "type": "string",
+    "hint": "auto 模式下可选。AI 分析接口的代理地址（用于 OpenAI 官方和 Google OpenAI 兼容端点）。无需代理则留空。",
+    "default": ""
+  },
+  "patch_notes_use_international_proxy": {
+    "description": "补丁说明使用国际代理",
+    "type": "bool",
+    "hint": "auto 模式下生效。开启后获取补丁说明时使用国际代理。默认关闭。",
+    "default": false
+  },
+  "patch_notes_international_proxy": {
+    "description": "补丁说明国际代理地址",
+    "type": "string",
+    "hint": "auto 模式下可选。获取补丁说明使用的国际代理地址，如 http://127.0.0.1:7890。无需代理则留空。",
+    "default": ""
   },
   "github_proxy_enabled": {
     "description": "是否启用 GitHub 加速",
