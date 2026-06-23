@@ -81,50 +81,43 @@
     "description": "大神 DTS 年份",
     "type": "int",
     "hint": "auto 模式下生成配置使用，默认 2026。",
-    "default": 2026,
-    "invisible": true
+    "default": 2026
   },
   "dashen_server": {
     "description": "大神 server",
     "type": "int",
     "hint": "auto 模式下生成配置使用，默认 1。",
-    "default": 1,
-    "invisible": true
+    "default": 1
   },
   "dashen_international_proxy": {
     "description": "网易大神国际代理",
     "type": "string",
     "hint": "auto 模式下可选。访问网易大神上游接口的国际代理地址，如 http://127.0.0.1:7890。无需代理则留空。",
-    "default": "",
-    "invisible": true
+    "default": ""
   },
   "ow_esports_api_key": {
     "description": "OW 赛事 API Key",
     "type": "string",
     "hint": "auto 模式下可选。PandaScore 赛事接口的 API Key，获取地址: https://app.pandascore.co/dashboard/main。无需赛事功能则留空。",
-    "default": "",
-    "invisible": true
+    "default": ""
   },
   "analysis_base_url": {
     "description": "AI 分析 Base URL",
     "type": "string",
     "hint": "auto 模式下可选。OpenAI 兼容接口的 Base URL，用于单局详细 AI 锐评功能。例如: https://api.deepseek.com/v1。无需 AI 锐评则留空。",
-    "default": "",
-    "invisible": true
+    "default": ""
   },
   "analysis_api_key": {
     "description": "AI 分析 API Key",
     "type": "string",
     "hint": "auto 模式下可选。AI 分析接口的 API Key。",
-    "default": "",
-    "invisible": true
+    "default": ""
   },
   "analysis_model": {
     "description": "AI 分析模型名",
     "type": "string",
     "hint": "auto 模式下可选。除谷歌和 deepseek 以外的模型填写，如 gpt-4o-mini。",
-    "default": "",
-    "invisible": true
+    "default": ""
   },
   "analysis_persona_prompt": {
     "description": "AI 锐评人设提示词",
