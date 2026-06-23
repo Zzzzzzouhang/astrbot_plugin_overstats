@@ -1,6 +1,6 @@
 {
     "name": "astrbot_plugin_overstats",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "author": "Your Name",
     "description": "完整功能的Overstats守望先锋数据插件，支持所有API接口和自然语言查询",
     "repo": "",

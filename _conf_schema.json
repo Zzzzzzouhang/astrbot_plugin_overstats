@@ -1,9 +1,161 @@
 {
-  "overstats_api_url": {
-    "description": "Overstats API 地址",
+  "deploy_mode": {
+    "description": "后端接入模式",
     "type": "string",
-    "hint": "例如：http://127.0.0.1:18080/api/v2",
+    "hint": "manual=独立链接模式（自行部署后端，填写下方 API 地址）；auto=一键托管模式（插件自动部署并管理后端生命周期）。切换后需重载插件生效。",
+    "obvious_hint": true,
+    "default": "manual",
+    "options": ["manual", "auto"]
+  },
+  "overstats_api_url": {
+    "description": "Overstats API 地址（manual 模式使用）",
+    "type": "string",
+    "hint": "独立链接模式下填写，例如：http://127.0.0.1:18080/api/v2。auto 模式下此项忽略，将自动使用本地托管地址。",
     "obvious_hint": true,
     "default": "http://127.0.0.1:18080/api/v2"
+  },
+  "backend_repo_url": {
+    "description": "后端仓库地址",
+    "type": "string",
+    "hint": "auto 模式下用于 git clone/pull 的 Overstats 仓库地址，一般无需修改。",
+    "default": "https://github.com/Zzzzzzouhang/Overstats.git"
+  },
+  "backend_host": {
+    "description": "后端监听地址",
+    "type": "string",
+    "hint": "auto 模式下后端服务监听的地址。默认 127.0.0.1（仅本地访问）。如需外网访问可改为 0.0.0.0，并确保服务器防火墙开放对应端口。",
+    "default": "127.0.0.1"
+  },
+  "backend_port": {
+    "description": "后端监听端口",
+    "type": "int",
+    "hint": "auto 模式下后端服务监听端口，默认 18081。如端口被占用可修改。",
+    "default": 18081
+  },
+  "auto_start_on_boot": {
+    "description": "插件加载时自动启动后端",
+    "type": "bool",
+    "hint": "auto 模式下生效。开启后插件加载时若后端代码与虚拟环境已就绪，将自动启动后端进程。首次部署仍需手动执行 /ow部署。",
+    "default": false
+  },
+  "dashen_accounts": {
+    "description": "大神账号配置",
+    "type": "template_list",
+    "hint": "auto 模式必填。配置至少一个网易大神账号的 role_id 和 token（获取方式见原项目 Faststart.md）。auto 模式下部署前必须填写，否则部署会失败。",
+    "obvious_hint": true,
+    "templates": {
+      "account": {
+        "name": "大神账号",
+        "hint": "每个账号需要填写 role_id（数字）和 token（字符串）",
+        "display_item": "name",
+        "items": {
+          "name": {
+            "description": "账号名称（仅用于标识）",
+            "type": "string",
+            "default": "primary"
+          },
+          "role_id": {
+            "description": "大神 role_id",
+            "type": "int",
+            "hint": "网易大神侧账号标识，数字格式。获取方式见原项目 Faststart.md。",
+            "default": 0
+          },
+          "token": {
+            "description": "大神 token",
+            "type": "string",
+            "hint": "大神业务令牌，同时作为业务请求 token 和 GL-Bigdata-Auth-Token 请求头。获取方式见原项目 Faststart.md。",
+            "default": ""
+          }
+        }
+      }
+    }
+  },
+  "dashen_dts": {
+    "description": "大神 DTS 年份",
+    "type": "int",
+    "hint": "auto 模式下生成配置使用，默认 2026。",
+    "default": 2026,
+    "invisible": true
+  },
+  "dashen_server": {
+    "description": "大神 server",
+    "type": "int",
+    "hint": "auto 模式下生成配置使用，默认 1。",
+    "default": 1,
+    "invisible": true
+  },
+  "dashen_international_proxy": {
+    "description": "网易大神国际代理",
+    "type": "string",
+    "hint": "auto 模式下可选。访问网易大神上游接口的国际代理地址，如 http://127.0.0.1:7890。无需代理则留空。",
+    "default": "",
+    "invisible": true
+  },
+  "ow_esports_api_key": {
+    "description": "OW 赛事 API Key",
+    "type": "string",
+    "hint": "auto 模式下可选。PandaScore 赛事接口的 API Key，获取地址: https://app.pandascore.co/dashboard/main。无需赛事功能则留空。",
+    "default": "",
+    "invisible": true
+  },
+  "analysis_base_url": {
+    "description": "AI 分析 Base URL",
+    "type": "string",
+    "hint": "auto 模式下可选。OpenAI 兼容接口的 Base URL，用于单局详细 AI 锐评功能。例如: https://api.deepseek.com/v1。无需 AI 锐评则留空。",
+    "default": "",
+    "invisible": true
+  },
+  "analysis_api_key": {
+    "description": "AI 分析 API Key",
+    "type": "string",
+    "hint": "auto 模式下可选。AI 分析接口的 API Key。",
+    "default": "",
+    "invisible": true
+  },
+  "analysis_model": {
+    "description": "AI 分析模型名",
+    "type": "string",
+    "hint": "auto 模式下可选。除谷歌和 deepseek 以外的模型填写，如 gpt-4o-mini。",
+    "default": "",
+    "invisible": true
+  },
+  "analysis_persona_prompt": {
+    "description": "AI 锐评人设提示词",
+    "type": "text",
+    "hint": "auto 模式下可选。AI 锐评的人格设定与语气。仅放 AI 人设/语气，任务指令由后端服务维护。",
+    "default": "【核心原则】\n请保持绝对客观中立，拒绝阿谀奉承！不要因为查询指令的是焦点玩家就一味夸奖，如果焦点玩家表现平庸或拉垮请直接批评。\n\n【人格设定】\n你的说话人设是科比·布莱恩特，风格包含 [man! what can i say，mamba out] 等 meme。",
+    "invisible": true
+  },
+  "github_proxy_enabled": {
+    "description": "是否启用 GitHub 加速",
+    "type": "bool",
+    "hint": "默认关闭。当 Git 克隆出现 RPC 失败、HTTP/2 流错误或 early EOF 等网络报错时，会自动启用加速代理重试（无论此开关是否开启）。开启后首次克隆即使用代理。一般无需手动开启，除非你的网络环境无法直连 GitHub。",
+    "obvious_hint": true,
+    "default": false
+  },
+  "github_proxy_primary": {
+    "description": "GitHub 主加速地址",
+    "type": "string",
+    "hint": "GitHub 加速代理的主地址，默认 https://gh.llkk.cc/ 。当网络错误自动重试时优先使用此地址。",
+    "default": "https://gh.llkk.cc/"
+  },
+  "github_proxy_fallback": {
+    "description": "GitHub 备加速地址",
+    "type": "string",
+    "hint": "GitHub 加速代理的备用地址，默认 https://gh-proxy.com/ 。当主加速地址失败时自动切换至此地址。",
+    "default": "https://gh-proxy.com/"
+  },
+  "github_proxy_custom": {
+    "description": "自定义 GitHub 加速地址",
+    "type": "string",
+    "hint": "可选。填写后加速重试时优先使用此地址（优先级高于主/备地址）。留空则使用主/备地址。例如：https://mirror.ghproxy.com/ 。",
+    "default": ""
+  },
+  "direct_message_handling_enabled": {
+    "description": "是否开启直接消息处理",
+    "type": "bool",
+    "hint": "开启后自动匹配回复，无需@机器人即可处理直接发送的战网ID、单局数字，以及纯@时返回快速指南。仅对 QQ 官方机器人（qq_official / qq_official_webhook）生效。",
+    "obvious_hint": true,
+    "default": false
   }
 }
