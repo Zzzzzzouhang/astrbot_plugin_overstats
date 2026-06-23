@@ -41,7 +41,7 @@
   "dashen_accounts": {
     "description": "大神账号配置",
     "type": "template_list",
-    "hint": "auto 模式必填。配置至少一个网易大神账号的 role_id 和 token（获取方式见原项目 Faststart.md）。auto 模式下部署前必须填写，否则部署会失败。",
+    "hint": "auto 模式必填。配置至少一个网易大神账号的 role_id 和 token（获取方式见原项目 Faststart.md）。auto 模式下部署前必须填写，否则部署会失败。如需批量配置大量账号，请使用下方「大神账号文件路径」配置项。",
     "obvious_hint": true,
     "templates": {
       "account": {
@@ -69,6 +69,13 @@
         }
       }
     }
+  },
+  "dashen_accounts_bulk": {
+    "description": "批量账号配置（文本）",
+    "type": "text",
+    "hint": "可选。支持直接粘贴 JSON 数组（推荐，可直接粘贴 Overstats 原版 DASHEN_ACCOUNTS 内容）。适合需要配置大量账号的场景，与上方 WebUI 账号合并去重，批量优先。\n\nJSON 格式示例（可直接粘贴数组片段，无需手动补全括号）：\n[\n    {\"name\": \"account-1\", \"role_id\": 123456789, \"token\": \"xxx\"},\n    {\"name\": \"account-2\", \"role_id\": 987654321, \"token\": \"yyy\"}\n]\n\n留空则仅使用上方 WebUI 账号。",
+    "obvious_hint": true,
+    "default": ""
   },
   "dashen_dts": {
     "description": "大神 DTS 年份",
@@ -156,6 +163,6 @@
     "type": "bool",
     "hint": "开启后自动匹配回复，无需@机器人即可处理直接发送的战网ID、单局数字，以及纯@时返回快速指南。仅对 QQ 官方机器人（qq_official / qq_official_webhook）生效。",
     "obvious_hint": true,
-    "default": false
+    "default": true
   }
 }
