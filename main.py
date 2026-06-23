@@ -766,7 +766,7 @@ class OverstatsPlugin(Star):
         """根据平台返回快速指南"""
         text = """📌 Overstats 快速指南
 
-🔗 ➤ <qqbot-cmd-input text="/绑定 战网ID（区分大小写）" show="绑定" reference="false" />示例：/绑定 Player#12345
+🔗 ➤ <qqbot-cmd-input text="/绑定 " show="绑定" reference="false" />示例：/绑定 Player#12345
 📊 ➤ <qqbot-cmd-input text="/今日总结 " show="今日总结" reference="false" /> ➤ <qqbot-cmd-input text="/本周总结 " show="本周总结" reference="false" />
 📈 ➤ <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="/大神对局 " show="对局" reference="false" />
 💪 ➤ <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" /> ➤ <qqbot-cmd-input text="/竞技强度 " show="竞技强度" reference="false" />
@@ -844,7 +844,7 @@ class OverstatsPlugin(Star):
     @filter.command("owhelp", alias={'ow菜单', 'ow帮助', 'OW帮助', 'help'})
     async def ow_help(self, event: AstrMessageEvent):
         help_text = """📌 Overstats 查询菜单
-🔗 ➤ <qqbot-cmd-input text="/绑定 战网ID（区分大小写）" show="绑定" reference="false" />示例：/绑定 Player#12345
+🔗 ➤ <qqbot-cmd-input text="/绑定 " show="绑定" reference="false" />示例：/绑定 Player#12345
 📋 ➤ <qqbot-cmd-input text="/今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="/昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="/周度总结 " show="本周" reference="false" />
 📊 ➤ <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="/大神对局 " show="大神对局" reference="false" /> ➤ <qqbot-cmd-input text="/单局详细 " show="单局详细" reference="false" />「数字」可加 锐评关/全员关
 📈 ➤ <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" />「可选对局数」 ➤ <qqbot-cmd-input text="/竞技强度 " show="竞技强度" reference="false" />「可选对局数」 ➤ <qqbot-cmd-input text="/获取段位分布 " show="获取段位分布" reference="false" />「可选 快速/竞技 段位」
@@ -903,7 +903,7 @@ class OverstatsPlugin(Star):
                     success = True
                     yield self._send_image_result(event, img_bytes)
                 else:
-                    err_msg = error_data.get("message") if error_data else "获取昨日总结失败，可能昨日未登录游戏。"
+                    err_msg = error_data.get("message") if error_data else "获取昨日总结失败，可能昨日没有对局记录。"
                     if err_msg and "Could not resolve customerToken" in err_msg:
                         yield self._plain_error_result(event, self._id_resolve_err("获取昨日总结失败"))
                     elif error_data and error_data.get("error") == "summary_empty":
