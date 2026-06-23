@@ -309,7 +309,7 @@ class OverstatsPlugin(Star):
         daily_prompt_enabled = cfg.get("daily_prompt_skip", False)
         append_notice_enabled = cfg.get("append_notice", True)
 
-        # 首次提示后不再提示 功能
+        # 首次提示后不再提示 功能：已提示过的用户直接跳过加载提示
         user_id = None
         if daily_prompt_enabled:
             user_id = str(event.get_sender_id())
@@ -317,25 +317,23 @@ class OverstatsPlugin(Star):
                 self._ensure_daily_prompt_state_current_unlocked()
                 prompted_users = self.daily_prompt_state.setdefault("prompted_users", {})
                 if prompted_users.get(user_id) or user_id in self.daily_prompt_pending_users:
-                    user_id = None  # 已提示过，不再追加首次提示
+                    # 今日已提示过，不再显示加载提示，直接返回结果
+                    return None, None, False
                 else:
                     self.daily_prompt_pending_users.add(user_id)
 
         # 构建状态提示文本
         prompt_text = base_text
 
-        # 追加「首次提示后不再提示」文案
+        # 追加「首次提示后不再提示」标记文案（仅首次提示时显示，由 daily_prompt_skip 控制）
         if daily_prompt_enabled and user_id:
             prompt_text = f"{prompt_text}\n{self.daily_group_prompt_suffix}"
-            if self._is_qq_group_message(event):
-                notice = self._format_markdown_by_platform(event, self.daily_group_prompt_notice)
-                prompt_text = f"{prompt_text}\n💡 {notice}"
 
-        # 追加「交互提示」文案（独立于首次提示功能，始终可追加）
+        # 追加「交互提示」文案（由 append_notice 独立控制，与首次提示功能解耦）
         if append_notice_enabled and self._is_qq_group_message(event):
-            append = self._format_markdown_by_platform(event, self.error_append_notice)
-            if append not in prompt_text:
-                prompt_text = f"{prompt_text}\n💡 {append}"
+            notice = self._format_markdown_by_platform(event, self.daily_group_prompt_notice)
+            if notice not in prompt_text:
+                prompt_text = f"{prompt_text}\n💡 {notice}"
 
         return prompt_text, user_id if (daily_prompt_enabled and user_id) else None, False
 
