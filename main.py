@@ -7,6 +7,7 @@ import re
 import base64
 import json
 import time
+import inspect
 import urllib.parse
 from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
@@ -24,7 +25,7 @@ except ImportError:
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.1.0")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.2.0")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -77,6 +78,13 @@ class OverstatsPlugin(Star):
 
         # 维护模式状态（使用 AstrBot KV 存储持久化，惰性加载）
         self._maintenance_state: dict | None = None
+
+        # 全量适配配置（按群独立开关 + 机器人昵称，持久化到 JSON 文件）
+        self.full_adapt_config_file = self.plugin_data_dir / "full_adaptation_config.json"
+        self.full_adapt_config: dict | None = None  # 惰性加载
+        self._bot_nickname_cache: str | None = None  # 自动探测的机器人昵称缓存
+        # 全量适配指令分发表：指令名/别名 -> 方法引用（懒构建，避免 __init__ 时方法未绑定）
+        self._full_adapt_map: dict | None = None
 
         # auto 模式下按需自动启动后端（异步，不阻塞插件初始化）
         # 保存 task 引用，便于 terminate 时取消，避免遗留异步任务
@@ -198,7 +206,7 @@ class OverstatsPlugin(Star):
             pass
         # AstrMessageEvent 携带的 admin 标记（@filter.permission_type(ADMIN) 触发的）
         try:
-            if getattr(event, "is_admin", False):
+            if event.is_admin():
                 return True
         except Exception:
             pass
@@ -243,7 +251,7 @@ class OverstatsPlugin(Star):
 
         # 3. 检查 AstrMessageEvent 是否携带 admin 标记
         try:
-            if getattr(event, "is_admin", False):
+            if event.is_admin():
                 return True
         except Exception:
             pass
@@ -268,6 +276,95 @@ class OverstatsPlugin(Star):
             self.group_config[gid] = {"daily_prompt_skip": False, "append_notice": True}
         self.group_config[gid][feature] = enabled
         await self._save_group_config()
+
+    # ==================== 全量适配（@机器人昵称 + 指令） ====================
+
+    def _load_full_adapt_config(self) -> dict:
+        """从 JSON 文件加载全量适配配置（惰性，带内存缓存）"""
+        if self.full_adapt_config is not None:
+            return self.full_adapt_config
+        try:
+            if self.full_adapt_config_file.exists():
+                with open(self.full_adapt_config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.full_adapt_config = data if isinstance(data, dict) else {}
+            else:
+                self.full_adapt_config = {}
+        except Exception as e:
+            logger.error(f"读取全量适配配置失败: {e}")
+            self.full_adapt_config = {}
+        return self.full_adapt_config
+
+    def _save_full_adapt_config(self):
+        try:
+            with open(self.full_adapt_config_file, "w", encoding="utf-8") as f:
+                json.dump(self.full_adapt_config, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            logger.error(f"保存全量适配配置失败: {e}")
+
+    def _get_full_adapt(self, group_id: str) -> dict:
+        """获取指定群的全量适配配置"""
+        return self._load_full_adapt_config().get(
+            str(group_id), {"enabled": False, "nickname": ""}
+        )
+
+    def _set_full_adapt(self, group_id: str, enabled: bool, nickname: str | None = None):
+        """设置指定群的全量适配开关（可选更新昵称）并持久化到 JSON"""
+        cfg = self._load_full_adapt_config()
+        gid = str(group_id)
+        cur = cfg.get(gid, {"enabled": False, "nickname": ""})
+        cur["enabled"] = enabled
+        if nickname is not None and nickname.strip():
+            cur["nickname"] = nickname.strip()
+        cur.setdefault("nickname", "")
+        cfg[gid] = cur
+        self._save_full_adapt_config()
+
+    def _is_real_at_bot(self, event: AstrMessageEvent) -> bool:
+        """检测消息是否真实@了机器人（排除 QQ 官方占位@）。
+
+        QQ 官方在「被动消息/全量推送」开启时，未真实@机器人的群消息也会带占位 At，
+        此时 self_id 为 "qq_official"/"unknown_selfid"；真实@时 self_id 为机器人真实 ID
+        （如 76092C918FC3D8D6204C848C07AC3E31，即机器人的 openid/标识）。
+        普通机器人（aiocqhttp）self_id 为机器人 QQ 号，真实@时 At.qq 与之一致。
+        """
+        try:
+            self_id = str(event.get_self_id())
+        except Exception:
+            return False
+        # QQ 官方占位@：self_id 为占位符，并非真实@
+        if not self_id or self_id in ("qq_official", "unknown_selfid"):
+            return False
+        try:
+            for comp in event.get_messages():
+                if isinstance(comp, Comp.At) and str(getattr(comp, "qq", "")) == self_id:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _get_bot_nickname(self, event: AstrMessageEvent, adapt_cfg: dict | None = None) -> str:
+        """解析机器人昵称：群独立配置 > 自动探测(真实@时的 At.name) > 全局配置兜底"""
+        # 1. 群独立配置
+        if adapt_cfg and adapt_cfg.get("nickname"):
+            return adapt_cfg["nickname"]
+        # 2. 自动探测：当前消息真实@机器人时取 At.name
+        try:
+            self_id = str(event.get_self_id())
+            if self_id and self_id not in ("qq_official", "unknown_selfid"):
+                for comp in event.get_messages():
+                    if isinstance(comp, Comp.At) and str(getattr(comp, "qq", "")) == self_id:
+                        name = (getattr(comp, "name", "") or "").strip()
+                        if name:
+                            self._bot_nickname_cache = name
+                            return name
+        except Exception:
+            pass
+        # 3. 缓存的自动探测结果
+        if self._bot_nickname_cache:
+            return self._bot_nickname_cache
+        # 4. 全局配置兜底
+        return (self.config.get("full_adaptation_nickname", "") or "").strip()
 
     _MAINTENANCE_KV_KEY = "maintenance_state"
 
@@ -294,6 +391,19 @@ class OverstatsPlugin(Star):
             await self.put_kv_data(self._MAINTENANCE_KV_KEY, self._maintenance_state)
         except Exception as e:
             logger.error(f"保存维护模式状态失败: {e}")
+
+    async def _check_maintenance(self, event: AstrMessageEvent) -> str | None:
+        """集中维护模式检查，返回维护提示文本或 None（放行）。
+
+        若维护模式启用且发送者非 AstrBot 管理员，返回维护内容；
+        否则返回 None，允许正常执行业务逻辑。
+        调用方应在 yield 维护文本后 return，不再继续执行业务。
+        """
+        await self._ensure_maintenance_loaded()
+        if self._maintenance_state and self._maintenance_state.get("enabled"):
+            if not self._is_astrbot_admin(event):
+                return self._maintenance_state.get("content", "系统维护中")
+        return None
 
     def _is_group_message(self, event: AstrMessageEvent) -> bool:
         try:
@@ -707,61 +817,203 @@ class OverstatsPlugin(Star):
             logger.error(f"多图发送逻辑错误: {e}")
             yield self._plain_error_result(event, "❌ 多图发送失败")  
 
-    @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL) 
+    @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK | filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE | filter.EventMessageType.GROUP_MESSAGE)
     async def handle_direct_text_events(self, event: AstrMessageEvent):
         """处理直接发送的战网 ID、单局数字、绑定指令，以及纯@时返回快速指南。
 
-        仅处理 QQ 官方机器人（qq_official / qq_official_webhook）的消息。
+        兼容 QQ 官方机器人（qq_official / qq_official_webhook）与普通 QQ 机器人（aiocqhttp）。
+        群聊中必须真实@机器人才会响应（排除 QQ 官方占位@[At:qq_official]，防止误触发），私聊放行。
         需在配置面板开启「是否开启直接消息处理」开关后生效。
         """
         # 配置开关：未开启直接消息处理时跳过
         if not bool(self.config.get("direct_message_handling_enabled", False)):
             return
 
-        # 仅处理 QQ 官方机器人的消息（qq_official / qq_official_webhook）
-        # 普通 QQ 机器人（aiocqhttp/NapCat 等）不走此逻辑，避免与正常指令冲突
+        # 兼容 QQ 官方与普通机器人
         platform_name = ""
         try:
             platform_name = event.get_platform_name() or ""
         except Exception:
             pass
-        if platform_name not in ("qq_official", "qq_official_webhook"):
+        if platform_name not in ("qq_official", "qq_official_webhook", "aiocqhttp"):
+            return
+
+        is_group = self._is_group_message(event)
+
+        # 群聊必须真实@机器人（排除 QQ 官方占位@），私聊放行，防止误触发
+        if is_group and not self._is_real_at_bot(event):
             return
 
         msg = event.message_str.strip() if event.message_str else ""
 
         # 群消息时提前加载群组配置到内存缓存
-        if self._is_group_message(event):
+        if is_group:
             await self._ensure_group_config_loaded()
 
-        # 纯@时返回快速指南
+        # 纯@（无文本）时返回快速指南
         if hasattr(event, "is_at_or_wake_command") and event.is_at_or_wake_command:
             if not msg or msg.isspace():
-                quick_guide = self._get_quick_guide(event)
-                yield event.plain_result(quick_guide)
+                yield event.plain_result(self._get_quick_guide(event))
                 event.stop_event()
                 return
 
         if not msg:
             return
-            
+
         if msg.isdigit():
             num = int(msg)
             if 0 < num <= 20:
                 async for result in self.dashen_match_detail(event, arg1=str(num)):
                     yield result
-                event.stop_event() 
+                event.stop_event()
                 return
 
         bind_match = re.match(r"^(?:/?(?:大神)?绑定\s+)?(?:/?(?:大神)?绑定)?\s*([^#＃\s]+[#＃]\d+)$", msg)
         if bind_match:
-            clean_bnet_id = bind_match.group(1) # 极其精准地提取真正的战网 ID
+            clean_bnet_id = bind_match.group(1)  # 极其精准地提取真正的战网 ID
             async for result in self.dashen_bind(event, bnet_id=clean_bnet_id):
                 yield result
-            event.stop_event() 
+            event.stop_event()
             return
-    
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK | filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
+    async def full_adaptation_interceptor(self, event: AstrMessageEvent):
+        """全量消息适配拦截器：群聊中以"@机器人昵称 指令"格式的纯文本消息也能触发对应指令。
+
+        默认关闭，需群管理员通过 /全量适配开 开启（按群独立，持久化到 JSON）。
+        仅处理纯文本@昵称（非真实@提及）；真实@仍走框架原生指令派发，避免重复响应。
+        兼容 QQ 官方（含 [At:qq_official] 占位与 [At:<openid>] 真实@两种格式）与普通机器人。
+
+        实现说明：AstrBot 的指令派发在 WakingCheckStage 阶段即依据 is_at_or_wake_command
+        与 message_str 完成匹配，早于任何插件处理器执行；纯文本"@昵称 指令"无法被框架识别为
+        唤醒，故此处维护插件自身的指令分发表（不依赖框架内部 API），手动解析并调用对应方法。
+        """
+        if not self._is_group_message(event):
+            return
+        group_id = self._get_group_id(event)
+        if not group_id:
+            return
+
+        adapt_cfg = self._get_full_adapt(group_id)
+        if not adapt_cfg.get("enabled", False):
+            return
+
+        # 真实@机器人 → 交给框架原生派发，避免重复响应
+        if self._is_real_at_bot(event):
+            return
+
+        nickname = self._get_bot_nickname(event, adapt_cfg)
+        if not nickname:
+            return
+
+        msg = (event.message_str or "").strip()
+        prefix = f"@{nickname}"
+        # 匹配纯文本 "@昵称" 前缀（后接空格/全角空格，或即为昵称本身）
+        if not (msg == prefix or msg.startswith(prefix + " ") or msg.startswith(prefix + "\u3000")):
+            return
+
+        cmd_text = msg[len(prefix):].strip()
+
+        # 纯@昵称（无指令）→ 快速指南
+        if not cmd_text:
+            yield event.plain_result(self._get_quick_guide(event))
+            event.stop_event()
+            return
+
+        # 数字快捷：@昵称 5 → 第 5 局单局详细
+        if cmd_text.isdigit() and 0 < int(cmd_text) <= 20:
+            async for r in self.dashen_match_detail(event, arg1=str(int(cmd_text))):
+                yield r
+            event.stop_event()
+            return
+
+        # 绑定快捷：@昵称 Player#12345
+        bind_m = re.match(r"^(?:/?(?:大神)?绑定\s+)?(?:/?(?:大神)?绑定)?\s*([^#＃\s]+[#＃]\d+)$", cmd_text)
+        if bind_m:
+            async for r in self.dashen_bind(event, bnet_id=bind_m.group(1)):
+                yield r
+            event.stop_event()
+            return
+
+        # 指令派发：自维护分发表，按方法签名自动适配参数数量（标准库 inspect）
+        tokens = cmd_text.split()
+        cmd = tokens[0].lstrip("/")  # 兼容用户带 "/" 前缀
+        rest = tokens[1:]
+        method = self._ensure_full_adapt_map().get(cmd)
+        if not method:
+            return  # 未命中本插件指令，交回后续流程
+
+        # 按方法签名（除 self/event）截取参数，不足补空串（交由方法内部校验给出友好提示）
+        try:
+            params = [p for p in inspect.signature(method).parameters.values()
+                      if p.name not in ("self", "event")]
+        except Exception:
+            params = []
+        n_max = len(params)
+        args = rest[:n_max]
+        args += [""] * (n_max - len(args))
+
+        try:
+            async for r in method(event, *args):
+                yield r
+            event.stop_event()
+        except TypeError as e:
+            # 参数不匹配（如必填参数缺失）的兜底提示
+            yield self._plain_error_result(event, f"❌ 指令参数不匹配：{e}\n请检查指令用法，可发送 @机器人昵称 获取快速指南。")
+            event.stop_event()
+        except Exception as e:
+            logger.error(f"全量适配派发异常（{cmd}）: {e}")
+            yield self._plain_error_result(event, f"❌ 指令执行异常：{e}")
+            event.stop_event()
+
+    def _ensure_full_adapt_map(self) -> dict:
+        """懒构建全量适配指令分发表：指令名/别名 -> 方法引用。
+
+        仅收录业务查询指令；管理/部署类指令需真实@机器人触发（避免权限绕过）。
+        表与 @filter.command 声明保持同步，新增业务指令时在此追加一行即可。
+        """
+        if self._full_adapt_map is not None:
+            return self._full_adapt_map
+        table = [
+            # (指令名 + 别称, 方法引用)
+            (["owhelp", "ow菜单", "ow帮助", "OW帮助", "help"], self.ow_help),
+            (["所有指令", "别称"], self.show_aliases),
+            (["快速指南", "快捷指令"], self.quick_guide_command),
+            (["大神绑定", "绑定"], self.dashen_bind),
+            (["今日总结", "今日", "今日数据"], self.dashen_today),
+            (["昨日总结", "昨日", "昨日数据", "昨天数据", "昨天"], self.dashen_yesterday),
+            (["周度总结", "本周总结", "本周数据", "本周"], self.dashen_week),
+            (["大神数据", "详情卡片", "战绩查询", "数据"], self.dashen_profile),
+            (["大神对局", "最近对局", "战绩", "对局"], self.dashen_match),
+            (["单局详细", "单局"], self.dashen_match_detail),
+            (["历史段位", "历届段位"], self.dashen_rank_history),
+            (["同玩查询", "开黑胜率"], self.dashen_sameplay),
+            (["快速强度", "快速强度指数"], self.quick_strength),
+            (["竞技强度", "竞技强度指数"], self.competitive_strength),
+            (["快速英雄云图", "快速云图"], self.quick_hero_treemap),
+            (["竞技英雄云图", "竞技云图"], self.competitive_hero_treemap),
+            (["威能"], self.ow_hero_perk),
+            (["ow英雄"], self.ow_hero_pick),
+            (["商店", "ow商店"], self.ow_shop),
+            (["ow赛事", "赛事"], self.ow_esports),
+            (["获取段位分布"], self.get_rank_distribution),
+            (["ow活动", "活动"], self.ow_activities),
+            (["banpick", "全英雄排行"], self.ban_pick_stats),
+            (["mappick"], self.map_pick_stats),
+            (["皮肤搜索"], self.skin_search),
+            (["ow更新", "版本更新"], self.ow_patch_notes),
+            (["省榜", "排行"], self.ow_rank_leaderboard),
+            (["绝活榜", "英雄省榜"], self.ow_hero_leaderboard),
+        ]
+        m = {}
+        for names, method in table:
+            for n in names:
+                m[n] = method
+        self._full_adapt_map = m
+        return m
+
     def _get_quick_guide(self, event: AstrMessageEvent) -> str:
         """根据平台返回快速指南"""
         text = """📌 Overstats 快速指南
@@ -2038,6 +2290,44 @@ class OverstatsPlugin(Star):
         status_text = "✅ 已开启" if enabled else "❌ 已关闭"
         yield event.plain_result(f"✅ 群组 {group_id} 的【{feature_names[feature_key]}】功能已{status_text}")
 
+    @filter.command("全量适配开")
+    async def full_adapt_enable(self, event: AstrMessageEvent, nickname: str = ""):
+        """开启本群的全量消息适配（群管理员专属）。
+
+        用法：/全量适配开 [机器人昵称]
+        昵称可选，用于匹配"@昵称 指令"格式的纯文本消息。
+        不填则优先自动探测（真实@机器人时获取），其次使用配置面板的「全量适配昵称兜底」。
+        """
+        if not self._is_group_message(event):
+            yield event.plain_result("⚠️ 此命令仅支持在群聊中使用")
+            return
+        if not self._is_group_admin(event):
+            yield event.plain_result("⚠️ 仅群管理员或群主可操作全量适配开关")
+            return
+        group_id = self._get_group_id(event)
+        nickname = (nickname or "").strip()
+        self._set_full_adapt(group_id, True, nickname if nickname else None)
+        eff_nick = nickname or self._get_bot_nickname(event, self._get_full_adapt(group_id)) or "（未设置，将自动探测或使用全局兜底）"
+        yield event.plain_result(
+            f"✅ 本群（{group_id}）已开启全量消息适配。\n"
+            f"📝 触发格式：@机器人昵称 指令（纯文本即可，无需真实@）。\n"
+            f"🤖 当前机器人昵称：{eff_nick}\n"
+            f"💡 可用 /全量适配开 昵称 重新指定昵称；/全量适配关 关闭。"
+        )
+
+    @filter.command("全量适配关")
+    async def full_adapt_disable(self, event: AstrMessageEvent):
+        """关闭本群的全量消息适配（群管理员专属）。"""
+        if not self._is_group_message(event):
+            yield event.plain_result("⚠️ 此命令仅支持在群聊中使用")
+            return
+        if not self._is_group_admin(event):
+            yield event.plain_result("⚠️ 仅群管理员或群主可操作全量适配开关")
+            return
+        group_id = self._get_group_id(event)
+        self._set_full_adapt(group_id, False)
+        yield event.plain_result(f"✅ 本群（{group_id}）已关闭全量消息适配。")
+
     @filter.command("管理")
     async def admin_menu(self, event: AstrMessageEvent):
         """管理员维护指令菜单（仅 Bot 管理员或群主/群管理员可用）"""
@@ -2055,6 +2345,7 @@ class OverstatsPlugin(Star):
 • <qqbot-cmd-input text="/群设置 " show="/群设置" reference="false" /> 查看当前群组功能配置
 • <qqbot-cmd-input text="/群设置 提示 开 " show="/群设置 提示 开" reference="false" /> / <qqbot-cmd-input text="/群设置 提示 关 " show="/群设置 提示 关" reference="false" /> 切换首次提示后不再提示
 • <qqbot-cmd-input text="/群设置 追加提示 开 " show="/群设置 追加提示 开" reference="false" /> / <qqbot-cmd-input text="/群设置 追加提示 关 " show="/群设置 追加提示 关" reference="false" /> 切换追加交互提示
+• <qqbot-cmd-input text="/全量适配开 " show="/全量适配开" reference="false" /> [昵称] / <qqbot-cmd-input text="/全量适配关 " show="/全量适配关" reference="false" /> 开关「@昵称 指令」纯文本触发（按群独立）
 
 🔌 **系统诊断（所有模式通用）：**
 • <qqbot-cmd-input text="/ow连接测试 " show="/ow连接测试" reference="false" /> 测试 Overstats 后端连接状态
