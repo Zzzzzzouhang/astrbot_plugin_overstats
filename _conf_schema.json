@@ -228,6 +228,13 @@
     "hint": "可选。填写后加速重试时优先使用此地址（优先级高于主/备地址）。留空则使用主/备地址。例如：https://mirror.ghproxy.com/ 。",
     "default": ""
   },
+  "save_image_locally": {
+    "description": "图片是否保存本地后再发送",
+    "type": "bool",
+    "hint": "默认开启。开启后将图片数据先保存到本地临时文件再发送；关闭后跳过本地落盘步骤，直接将图片 bytes 转为 base64 发送，减少磁盘 I/O。注意：关闭后可能略微增加内存占用。",
+    "obvious_hint": true,
+    "default": true
+  },
   "direct_message_handling_enabled": {
     "description": "是否开启直接消息处理",
     "type": "bool",
@@ -238,8 +245,24 @@
   "full_adaptation_nickname": {
     "description": "全量适配昵称兜底",
     "type": "string",
-    "hint": "全量消息适配功能的机器人昵称兜底值。当群内未通过 /全量适配开 昵称 指定昵称、且未能自动探测到机器人昵称时使用。开启全量适配后，群聊中发送“@机器人昵称 指令”格式的纯文本消息即可触发对应指令。",
+    "hint": "全量消息适配功能的机器人昵称兜底值。当群内未通过 /全量适配开 昵称 指定昵称、且未能自动探测到机器人昵称时使用。开启全量适配后，群聊中发送"@机器人昵称 指令"格式的纯文本消息即可触发对应指令。",
     "obvious_hint": true,
     "default": ""
+  },
+  "group_whitelist": {
+    "description": "群白名单",
+    "type": "list",
+    "items": {"type": "string"},
+    "hint": "维护模式下白名单内的群可正常使用所有功能，跳过权限拦截。注意：QQ官方机器人需填写群openid（而非群号），其他平台填对应群ID。",
+    "obvious_hint": true,
+    "default": []
+  },
+  "user_whitelist": {
+    "description": "个人白名单",
+    "type": "list",
+    "items": {"type": "string"},
+    "hint": "维护模式下白名单内的个人可正常使用所有功能，跳过权限拦截。注意：QQ官方机器人需填写个人openid（而非QQ号），其他平台填用户ID。",
+    "obvious_hint": true,
+    "default": []
   }
 }

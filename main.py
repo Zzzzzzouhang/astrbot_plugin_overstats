@@ -38,17 +38,26 @@ class OverstatsPlugin(Star):
         self.daily_prompt_pending_users: set[str] = set()
         self.id_resolve_error_hint = "未查询到id或者id错误，id严格区分大小写"
         
+        # 读取图片本地保存开关（默认开启，保持向后兼容）
+        self._save_image_locally = bool(self.config.get("save_image_locally", True))
+
         try:
             plugin_name = getattr(self, "name", "overstats_full")
             self.plugin_data_dir = Path(get_astrbot_data_path()) / "plugin_data" / plugin_name
             self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
-            self.temp_image_dir = self.plugin_data_dir / "temp"
-            self.temp_image_dir.mkdir(parents=True, exist_ok=True)
+            if self._save_image_locally:
+                self.temp_image_dir = self.plugin_data_dir / "temp"
+                self.temp_image_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                self.temp_image_dir = None  # 不落盘模式下无需临时目录
         except Exception as e:
             logger.warning(f"初始化插件专属数据目录失败: {e}")
             self.plugin_data_dir = Path(tempfile.gettempdir())
-            self.temp_image_dir = self.plugin_data_dir / "temp"
-            self.temp_image_dir.mkdir(parents=True, exist_ok=True)
+            if self._save_image_locally:
+                self.temp_image_dir = self.plugin_data_dir / "temp"
+                self.temp_image_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                self.temp_image_dir = None
 
         # 一键部署管理器（auto 模式下托管后端生命周期，manual 模式下仅做状态查询）
         # 必须在 plugin_data_dir 初始化后实例化，依赖数据目录存放后端代码与 venv
@@ -70,8 +79,11 @@ class OverstatsPlugin(Star):
         # 复用 aiohttp.ClientSession（懒加载，首次请求时创建）
         self._http_session: aiohttp.ClientSession | None = None
 
-        # 定时清理临时图片（每天凌晨执行一次，替代逐张延迟删除）
-        self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop())
+        # 定时清理临时图片（仅本地保存模式下启用，每天凌晨执行一次）
+        if self._save_image_locally:
+            self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop())
+        else:
+            self._cleanup_task = None
 
         # 群组级别配置（使用 AstrBot KV 存储持久化，内存缓存加速读取）
         self.group_config: dict | None = None  # None 表示尚未从 KV 加载
@@ -395,15 +407,34 @@ class OverstatsPlugin(Star):
     async def _check_maintenance(self, event: AstrMessageEvent) -> str | None:
         """集中维护模式检查，返回维护提示文本或 None（放行）。
 
-        若维护模式启用且发送者非 AstrBot 管理员，返回维护内容；
+        若维护模式启用且发送者非 AstrBot 管理员且不在白名单内，返回维护内容；
         否则返回 None，允许正常执行业务逻辑。
         调用方应在 yield 维护文本后 return，不再继续执行业务。
         """
         await self._ensure_maintenance_loaded()
         if self._maintenance_state and self._maintenance_state.get("enabled"):
-            if not self._is_astrbot_admin(event):
+            if not self._is_astrbot_admin(event) and not self._is_whitelisted(event):
                 return self._maintenance_state.get("content", "系统维护中")
         return None
+
+    def _is_whitelisted(self, event: AstrMessageEvent) -> bool:
+        """检查当前消息的群聊或发送者是否在白名单中。"""
+        group_whitelist = self.config.get("group_whitelist", []) or []
+        user_whitelist = self.config.get("user_whitelist", []) or []
+        if not group_whitelist and not user_whitelist:
+            return False
+        if group_whitelist:
+            group_id = self._get_group_id(event)
+            if group_id and group_id in group_whitelist:
+                return True
+        if user_whitelist:
+            try:
+                sender_id = str(event.get_sender_id())
+                if sender_id in user_whitelist:
+                    return True
+            except Exception:
+                pass
+        return False
 
     def _is_group_message(self, event: AstrMessageEvent) -> bool:
         try:
@@ -454,11 +485,11 @@ class OverstatsPlugin(Star):
         AstrBot 管理员不受维护模式限制，可正常使用数据查询指令。
         """
         # 维护模式检查：激活时返回维护内容并标记提前终止（群聊/私聊均生效）
-        # AstrBot 管理员绕过维护限制，可正常使用数据查询指令
+        # AstrBot 管理员 + 白名单群/用户绕过维护限制，可正常使用数据查询指令
         await self._ensure_maintenance_loaded()
         if self._maintenance_state and self._maintenance_state.get("enabled"):
-            if self._is_astrbot_admin(event):
-                # 管理员不受维护模式限制，正常执行业务逻辑
+            if self._is_astrbot_admin(event) or self._is_whitelisted(event):
+                # 管理员/白名单不受维护模式限制，正常执行业务逻辑
                 pass
             else:
                 return self._maintenance_state.get("content", "系统维护中"), None, True
@@ -787,11 +818,17 @@ class OverstatsPlugin(Star):
         if not img_bytes:
             return self._plain_error_result(event, fallback_text or "❌ 图片生成失败")
         try:
-            img_hash = abs(hash(img_bytes))
-            img_path = self.temp_image_dir / f"{img_hash}.png"
-            img_path.write_bytes(img_bytes)
             user_id = event.get_sender_id()
-            chain = [Comp.At(qq=user_id), Comp.Plain("\n" if not fallback_text else f"\n{fallback_text}\n"), Comp.Image.fromFileSystem(str(img_path))]
+            if self._save_image_locally:
+                # 本地保存模式：先写临时文件再用 fromFileSystem 发送（原有行为）
+                img_hash = abs(hash(img_bytes))
+                img_path = self.temp_image_dir / f"{img_hash}.png"
+                img_path.write_bytes(img_bytes)
+                image_comp = Comp.Image.fromFileSystem(str(img_path))
+            else:
+                # 直接发送模式：bytes 转 base64，不落盘
+                image_comp = Comp.Image.fromBytes(img_bytes)
+            chain = [Comp.At(qq=user_id), Comp.Plain("\n" if not fallback_text else f"\n{fallback_text}\n"), image_comp]
             return event.chain_result(chain)
         except Exception as e:
             logger.error(f"构建图片消息链时发生错误: {e}")
@@ -808,9 +845,14 @@ class OverstatsPlugin(Star):
 
             chain = [Comp.At(qq=user_id), Comp.Plain("\n")]
             for img_bytes in valid_images:
-                img_path = self.temp_image_dir / f"{abs(hash(img_bytes))}_{time.time_ns()}.png"
-                img_path.write_bytes(img_bytes)
-                chain.append(Comp.Image.fromFileSystem(str(img_path)))
+                if self._save_image_locally:
+                    # 本地保存模式：写临时文件再用 fromFileSystem 发送
+                    img_path = self.temp_image_dir / f"{abs(hash(img_bytes))}_{time.time_ns()}.png"
+                    img_path.write_bytes(img_bytes)
+                    chain.append(Comp.Image.fromFileSystem(str(img_path)))
+                else:
+                    # 直接发送模式：bytes 转 base64，不落盘
+                    chain.append(Comp.Image.fromBytes(img_bytes))
             yield event.chain_result(chain)
                 
         except Exception as e:
@@ -1092,6 +1134,21 @@ class OverstatsPlugin(Star):
             
         async for r in self._send_multiple_images_result(event, imgs_list):
             yield r
+
+    @filter.command("单图测试")
+    async def single_image_test(self, event: AstrMessageEvent):
+        img_path = self.plugin_data_dir / "test1.png"
+        if not img_path.exists():
+            yield self._plain_error_result(event, "❌ 未能读取到测试图片 test1.png。")
+            return
+        try:
+            with open(img_path, "rb") as f:
+                img_bytes = f.read()
+        except Exception as e:
+            logger.error(f"读取测试图片 test1.png 失败: {e}")
+            yield self._plain_error_result(event, "❌ 读取测试图片失败。")
+            return
+        yield self._send_image_result(event, img_bytes)
 
     @filter.command("owhelp", alias={'ow菜单', 'ow帮助', 'OW帮助', 'help'})
     async def ow_help(self, event: AstrMessageEvent):
