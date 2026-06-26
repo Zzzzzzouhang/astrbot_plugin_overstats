@@ -1498,6 +1498,12 @@ class OverstatsPlugin(Star):
         async for r in self.shiqu_manager.run(event, arg1):
             yield r
 
+    @filter.command("ow是区吗结果", alias={'是区吗结果'})
+    async def ow_shiqu_result(self, event: AstrMessageEvent):
+        """OW 是区吗结果：返回上次生成的判定书图片。"""
+        async for r in self.shiqu_manager.last_result(event):
+            yield r
+
     @filter.command("历史段位", alias={'历届段位'})
     async def dashen_rank_history(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
         # /历史段位            /历史段位 Player#12345

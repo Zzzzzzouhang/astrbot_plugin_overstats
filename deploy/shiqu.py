@@ -9,6 +9,7 @@
 
 import asyncio
 import json
+import re
 import time
 import logging
 from collections import deque
@@ -30,7 +31,39 @@ MAP_DICT = {m["guid"]: m["name"] for m in _QTOOL["mapList"]}
 _MAX_CONCURRENT = 10
 _QUEUE: deque = deque()
 _ACTIVE: set = set()
+_ACTIVE_META: dict[str, str] = {}  # uid → 当前步骤描述，用于重复触发时告知进度
+_LAST_IMAGE: dict[str, str] = {}   # uid → 上次生成的图片文件路径
 _QUEUE_LOCK = asyncio.Lock()
+
+# ── AstrBot 文转图模板 ──────────────────────────────────────
+
+_SHIQU_HTML_TMPL = '''<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#12161e; color:#dce1eb; font-family:"PingFang SC","Microsoft YaHei",sans-serif; font-size:22px; line-height:1.85; padding:28px 24px; }
+  h1 { font-size:30px; text-align:center; color:#f0b47c; margin-bottom:8px; padding-bottom:16px; border-bottom:2px solid #2a3040; }
+  h2 { font-size:26px; color:#c9986a; margin:24px 0 10px; }
+  h3 { font-size:24px; color:#e0c090; margin:18px 0 8px; }
+  p { margin:6px 0; }
+  p.gamen { margin:10px 0; line-height:1.85; }
+  p.gamen b { color:#e8d5b7; }
+  p.gamen span { color:#dce1eb; font-weight:normal; }
+  p.mate { margin:10px 0; color:#b0bec5; }
+  .score { font-size:48px; text-align:center; color:#ffd700; font-weight:bold; margin:12px 0; }
+  .verdict { display:block; font-size:32px; text-align:center; font-weight:bold; margin:4px 0 32px; }
+  .verdict.god,.iv.god { color:#e67e22; }
+  .verdict.ok,.iv.ok { color:#4ecdc4; }
+  .verdict.mid,.iv.mid { color:#f9ca24; }
+  .verdict.bad,.iv.bad { color:#e17055; }
+  .verdict.terrible,.iv.terrible { color:#d63031; }
+  .iv { font-weight:bold; }
+  .footer { margin-top:28px; padding-top:12px; border-top:1px solid #2a3040; color:#6e7681; font-size:13px; text-align:center; }
+</style></head><body>
+  <h1>{{ title }}</h1>
+  <div class="body">{{ body|safe }}</div>
+  <div class="footer">{{ footer }}</div>
+</body></html>'''
 
 
 class ShiquManager:
@@ -83,6 +116,7 @@ class ShiquManager:
     async def _dequeue(self, uid: str):
         async with _QUEUE_LOCK:
             _ACTIVE.discard(uid)
+            _ACTIVE_META.pop(uid, None)
             # 从队列中取出下一个
             while _QUEUE and len(_ACTIVE) < _MAX_CONCURRENT:
                 next_uid, _ = _QUEUE.popleft()
@@ -373,6 +407,123 @@ class ShiquManager:
 {match_text}
 """
 
+    # ── LLM 调用 ──
+
+    async def _call_astrbot_llm(self, event, prompt: str) -> Optional[str]:
+        """通过 AstrBot 内置 LLM 生成是区吗判定。"""
+        try:
+            umo = event.unified_msg_origin
+            provider_id = None
+            try:
+                provider_id = await self._plugin.context.get_current_chat_provider_id(umo=umo)
+            except Exception:
+                try:
+                    provider_id = await self._plugin.context.get_current_chat_provider_id()
+                except Exception:
+                    pass
+
+            if not provider_id:
+                logger.error("[是区吗] LLM provider_id not found")
+                return None
+
+            resp = await self._plugin.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=prompt,
+            )
+            return (resp.completion_text if resp else None) or None
+        except Exception as e:
+            logger.error(f"[是区吗] 调用 AstrBot LLM 失败: {e}")
+            return None
+
+    # ── 纯文本 → HTML ──
+
+    @staticmethod
+    def _plain_to_html(text: str) -> str:
+        """将 LLM 输出的纯文本转为 HTML 正文，与 tests/simulate_shiqu_render.py 渲染一致。"""
+        # 转义 HTML 特殊字符
+        text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        # ── 评分着色（按档位）──
+        def _score(m):
+            s = int(m.group(1))
+            if s >= 85:
+                c = "#e67e22"
+            elif s > 70:
+                c = "#ff6b6b"
+            elif s >= 60:
+                c = "#4ecdc4"
+            elif s >= 55:
+                c = "#f9ca24"
+            elif s >= 43:
+                c = "#e17055"
+            else:
+                c = "#d63031"
+            return f'<div class="score" style="color:{c}">{s}/100</div>'
+
+        text = re.sub(r"评分：\s*(\d+)/100", _score, text)
+
+        # ── 判定文字着色 ──
+        _VERDICT_CLASS = {
+            "你是职业吗？": "god",
+            "暴力炸！": "god",
+            "恭喜，你不是区": "ok",
+            "不幸，你可能是区？": "mid",
+            "别看了，你就是区！": "bad",
+            "你个大区！！！": "terrible",
+        }
+        # 主判定行（独立一行）→ block div
+        def _verdict(m):
+            v = m.group(1).strip(",.;.")
+            cls = _VERDICT_CLASS.get(v, "")
+            return f'<div class="verdict {cls}">{v}</div>'
+
+        verdict_pat = "|".join(re.escape(k) for k in _VERDICT_CLASS)
+        text = re.sub(rf"^({verdict_pat})$", _verdict, text, flags=re.M)
+
+        # 队友行 "判定：xxx" → 内联着色
+        for v, cls in _VERDICT_CLASS.items():
+            text = text.replace(f"判定：{v}", f'判定：<span class="iv {cls}">{v}</span>')
+
+        # ── 章节标题 ──
+        text = text.replace("逐局点评：", "\n<h2>逐局点评</h2>\n")
+        text = text.replace("综合评价：", "\n<h2>综合评价</h2>\n")
+        text = text.replace("队友点评：", "\n<h2>队友点评</h2>\n")
+        text = text.replace("数据概况：", "\n<h3>数据概况</h3>\n")
+
+        # ── 逐行处理 ──
+        lines = text.split("\n")
+        buf = []
+        for s in lines:
+            s = s.strip()
+            if not s:
+                buf.append("")
+                continue
+            # 已处理过的标签 → 直接保留
+            if s.startswith("<h") or s.startswith("<div") or s.startswith("<span"):
+                buf.append(s)
+            # 单局条目："第N局：... " → 按 " —— " 分割为加粗头部 + 普通点评
+            elif s.startswith("第") and "局" in s:
+                if " —— " in s:
+                    head, tail = s.split(" —— ", 1)
+                    buf.append(f'<p class="gamen"><b>{head}</b> —— <span>{tail}</span></p>')
+                else:
+                    buf.append(f'<p class="gamen"><b>{s}</b></p>')
+            # 队友条目："- 玩家名...":"
+            elif s.startswith("- "):
+                buf.append(f'<p class="mate">{s}</p>')
+            # 标题行（已被转义但仍以 🔍 开头且含 是区吗判定书）
+            elif "是区吗判定书" in s and s.startswith("🔍"):
+                buf.append(f'<h1>{s.replace("🔍 ", "")}</h1>')
+            else:
+                buf.append(f"<p>{s}</p>")
+
+        body = "\n".join(buf)
+
+        # ── 去重：如果 build_html 返回结果中出现了裸标题 h1，移除一次 ──
+        body = re.sub(r"<h1>是区吗判定书</h1>\s*", "", body, count=1)
+
+        return body
+
     # ── 主流程 ──
 
     async def run(self, event, bnet_id_input: str = ""):
@@ -388,33 +539,44 @@ class ShiquManager:
             yield event.plain_result("❌ 请提供 BattleTag，或先使用 /绑定 绑定。\n用法：是区吗 <battle_tag>")
             return
 
+        # ── 重复触发检查 ──
+        async with _QUEUE_LOCK:
+            if uid in _ACTIVE_META:
+                step = _ACTIVE_META[uid]
+                yield event.plain_result(f"⏳ 判定书正在生成中，当前步骤：{step}，请稍候…")
+                return
+            if uid in _ACTIVE:
+                yield event.plain_result("⏳ 判定书正在生成中，请稍候…")
+                return
+            for euid, _ in _QUEUE:
+                if euid == uid:
+                    yield event.plain_result("⏳ 您的判定书正在排队中，请稍候…")
+                    return
+
         # 排队
         pos, total = await self._enqueue(event)
         if pos > 0:
-            yield event.plain_result(f"⏳ 排队中：第 {pos}/{total} 位\n用法：是区吗[战网id]")
+            yield event.plain_result(f"⏳ 排队中：第 {pos}/{total} 位，请稍候…")
             return
 
         try:
-            yield event.plain_result(f"🔍 正在查 {target_id} 最近 12 场数据…")
+            # 仅一条进度消息
+            yield event.plain_result(f"🔍 正在生成 {target_id} 是区吗判定书")
 
             t0 = time.time()
+            _ACTIVE_META[uid] = "拉取对局数据"
             matches = await self._fetch_12_matches(target_id)
             t1 = time.time()
+            logger.info(f"📊 已获取 {len(matches)} 场 ({(t1 - t0):.1f}s)")
 
             if len(matches) < 2:
-                yield event.plain_result(f"❌ 仅获取到 {len(matches)} 场对局，至少需要 2 场。")
+                yield event.plain_result(f"❌ {target_id} 仅获取到 {len(matches)} 场对局，至少需要 2 场。")
                 return
 
-            yield event.plain_result(
-                f"📊 已获取 {len(matches)} 场 ({(t1 - t0):.1f}s)\n🔍 正在串行拉取队友详细数据…"
-            )
-
+            _ACTIVE_META[uid] = "拉取队友详细数据"
             await self._serial_fetch_all_teammate_details(matches, target_id)
             t2 = time.time()
-
-            yield event.plain_result(
-                f"📊 队友数据拉取完成 ({(t2 - t1):.1f}s)\n🤖 正在生成提示词…"
-            )
+            logger.info(f"📊 队友数据拉取完成 ({(t2 - t1):.1f}s)")
 
             # 保存 JSON
             data_dir = self._plugin.plugin_data_dir / "shiqu"
@@ -425,17 +587,48 @@ class ShiquManager:
             # 构建 prompt
             db_path = str(getattr(self._plugin, "config", {}).get("sqlite_db_path", "") or "").strip()
             prompt = self._build_prompt(matches, target_id, db_path=db_path)
-
             prompt_path = data_dir / f"{target_id.replace('#','_')}_prompt.txt"
             prompt_path.write_text(prompt, encoding="utf-8")
+            logger.info(f"✅ Prompt 已生成 ({len(prompt)} 字符)")
 
-            yield event.plain_result(
-                f"✅ 数据已就绪\n📁 JSON: {json_path.name}\n📝 Prompt: {prompt_path.name} "
-                f"({len(prompt)} 字符)\n\n⚠️ 此功能基础逻辑已完成，LLM 调用后续实现。"
+            # ── 调用 LLM ──
+            _ACTIVE_META[uid] = "AI 生成判定"
+            llm_text = await self._call_astrbot_llm(event, prompt)
+            if not llm_text:
+                yield event.plain_result("❌ AI 判定生成失败：LLM 调用异常，请稍后重试。")
+                return
+            t3 = time.time()
+            logger.info(f"[是区吗] LLM done ({len(prompt)}→{len(llm_text)}ch, llm={t3 - t2:.1f}s)")
+
+            # ── 渲染图片 ──
+            _ACTIVE_META[uid] = "渲染图片"
+            title = f"是区吗判定书 · {target_id}"
+            footer = time.strftime("生成时间：%Y-%m-%d %H:%M") + "  ·  AI 数据带阴阳师 (Astrbot LLM)"
+            body_html = self._plain_to_html(llm_text)
+            url = await self._plugin.html_render(
+                _SHIQU_HTML_TMPL,
+                {"title": title, "body": body_html, "footer": footer},
+                options={"type": "png"},
             )
+            # 缓存图片路径，供「是区吗结果」复用
+            _LAST_IMAGE[uid] = url
+            yield event.image_result(url)
+            logger.info(f"[是区吗] 总耗时={time.time() - t0:.1f}s (render={time.time() - t3:.1f}s)")
 
         except Exception as exc:
             logger.error(f"[是区吗] error: {exc}", exc_info=True)
-            yield event.plain_result(f"❌ 错误：{exc}")
+            yield event.plain_result(f"❌ 生成判定书失败：{exc}")
         finally:
             await self._dequeue(uid)
+
+    async def last_result(self, event):
+        """返回用户上次生成的判定书图片。"""
+        if not self.check_access(event):
+            yield event.plain_result("🔒 是区吗功能处于测试阶段，仅对白名单/管理员开放。")
+            return
+        uid = self._user_key(event)
+        path = _LAST_IMAGE.get(uid)
+        if not path or not Path(path).exists():
+            yield event.plain_result("❌ 没有找到上次的判定书结果，请先用「是区吗」生成一份。")
+            return
+        yield event.image_result(path)
