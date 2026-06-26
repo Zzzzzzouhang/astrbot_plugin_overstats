@@ -33,7 +33,7 @@ except ImportError:
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.2.0")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.3.1")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -2187,26 +2187,26 @@ class OverstatsPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ow后端日志")
     async def ow_backend_logs_cmd(self, event: AstrMessageEvent):
-        """查看后端持久化日志文件（仅 AstrBot 管理员可用，auto 模式生效）。
+        """查看 Overstats 后端持久化日志文件（仅 AstrBot 管理员可用，auto 模式生效）。
 
-        从专用日志文件中提取最新的 10 条记录。与 /ow部署日志 不同，
+        从专用日志文件中提取最新的 30 条记录。与 /ow部署日志 不同，
         此指令读取持久化日志文件，日志跨后端重启保留。
         """
         if not self.deploy_manager.is_auto_mode:
             yield event.plain_result("⚠️ 当前为独立链接模式，后端日志请到您部署后端的服务器查看。")
             return
 
-        logs = self.deploy_manager.get_backend_logs(10)
+        logs = self.deploy_manager.get_backend_logs(30)
         if not logs:
             yield event.plain_result(
-                "📋 暂无后端持久化日志。\n"
+                "📋 暂无 Overstats 后端持久化日志。\n"
                 f"日志文件路径: {self.deploy_manager.log_file_path}\n"
                 "后端启动并产生输出后日志将写入该文件。"
             )
             return
 
         lines = [
-            f"📋 后端持久化日志（最新 {len(logs)} 条）：",
+            f"📋 Overstats 后端持久化日志（最新 {len(logs)} 条）：",
             f"📂 文件: {self.deploy_manager.log_file_path}",
             "",
         ]
@@ -2250,65 +2250,63 @@ class OverstatsPlugin(Star):
 
         lines.append("")
         lines.append("📋 卸载选项：")
-        lines.append("• 回复 /ow卸载后端 确认 — 删除全部（代码+venv+数据库）")
-        lines.append("• 回复 /ow卸载后端 仅代码 — 仅删除后端代码（保留venv）")
-        lines.append("• 回复 /ow卸载后端 仅venv — 仅删除虚拟环境（保留代码）")
-        lines.append("• 回复 /ow卸载后端 强制 — 强制删除全部（进程无法停止时使用）")
+        lines.append("• 回复 /ow卸载后端执行确认 — 删除全部（代码+venv+数据库）")
+        lines.append("• 回复 /ow卸载后端执行仅代码 — 仅删除后端代码（保留venv）")
+        lines.append("• 回复 /ow卸载后端执行仅venv — 仅删除虚拟环境（保留代码）")
+        lines.append("• 回复 /ow卸载后端执行强制 — 强制删除全部（进程无法停止时使用）")
         lines.append("")
         lines.append("❗ 卸载后如需重新使用，请重新执行 /ow部署")
 
         yield event.plain_result("\n".join(lines))
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("ow卸载后端执行")
-    async def ow_uninstall_backend_exec_cmd(self, event: AstrMessageEvent, mode: str = "all"):
-        """执行后端卸载（仅 AstrBot 管理员可用）。
-
-        Args:
-            mode: all=全部, code=仅代码, venv=仅venv, force=强制全部
-        """
+    async def _uninstall_exec(self, event: AstrMessageEvent, delete_code: bool, delete_venv: bool, force: bool):
+        """统一卸载执行逻辑。"""
         if not self.deploy_manager.is_auto_mode:
             yield event.plain_result("⚠️ 当前为独立链接模式，后端由您自行部署管理。")
             return
-
-        mode = (mode or "all").strip().lower()
-
-        # 解析卸载选项
-        if mode in ("确认", "all", "全部", "确认卸载"):
-            delete_code, delete_venv, force = True, True, False
-        elif mode in ("仅代码", "code", "代码"):
-            delete_code, delete_venv, force = True, False, False
-        elif mode in ("仅venv", "venv"):
-            delete_code, delete_venv, force = False, True, False
-        elif mode in ("强制", "force", "强制卸载"):
-            delete_code, delete_venv, force = True, True, True
-        else:
-            yield event.plain_result("❌ 未识别的卸载模式。请使用：确认 / 仅代码 / 仅venv / 强制")
-            return
-
-        # 检查是否有东西可卸载
         preview = self.deploy_manager.get_uninstall_preview()
         if not preview["backend_exists"] and not preview["venv_exists"]:
             yield event.plain_result("ℹ️ 后端代码和虚拟环境均不存在，无需卸载。")
             return
-
         yield event.plain_result("⏳ 正在执行后端卸载（先停止进程 → 再删除文件）...")
-
         result = await self.deploy_manager.uninstall_backend(
-            delete_code=delete_code,
-            delete_venv=delete_venv,
-            force=force,
+            delete_code=delete_code, delete_venv=delete_venv, force=force,
         )
-
         status_icon = "✅" if result.success else "⚠️"
         lines = [
             f"{status_icon} 卸载{'完成' if result.success else '部分完成'}（释放 {result.freed_space_mb:.1f} MB）",
-            "",
-            result.message,
-            "",
+            "", result.message, "",
         ]
         lines.extend(result.details)
         yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("ow卸载后端执行确认")
+    async def ow_uninstall_backend_confirm(self, event: AstrMessageEvent):
+        """删除全部后端资源（代码+venv+数据库）。"""
+        async for msg in self._uninstall_exec(event, delete_code=True, delete_venv=True, force=False):
+            yield msg
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("ow卸载后端执行仅代码")
+    async def ow_uninstall_backend_code_only(self, event: AstrMessageEvent):
+        """仅删除后端代码目录（含数据库），保留虚拟环境。"""
+        async for msg in self._uninstall_exec(event, delete_code=True, delete_venv=False, force=False):
+            yield msg
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("ow卸载后端执行仅venv")
+    async def ow_uninstall_backend_venv_only(self, event: AstrMessageEvent):
+        """仅删除虚拟环境，保留后端代码。"""
+        async for msg in self._uninstall_exec(event, delete_code=False, delete_venv=True, force=False):
+            yield msg
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("ow卸载后端执行强制")
+    async def ow_uninstall_backend_force(self, event: AstrMessageEvent):
+        """强制删除全部后端资源（进程无法正常停止时使用）。"""
+        async for msg in self._uninstall_exec(event, delete_code=True, delete_venv=True, force=True):
+            yield msg
 
     @filter.command("群设置")
     async def group_config_cmd(self, event: AstrMessageEvent, action: str = "", value: str = ""):
@@ -2443,13 +2441,14 @@ class OverstatsPlugin(Star):
 • <qqbot-cmd-input text="/ow停止后端 " show="/ow停止后端" reference="false" /> 停止后端进程
 • <qqbot-cmd-input text="/ow重启后端 " show="/ow重启后端" reference="false" /> 重启后端（修改配置后需执行）
 • <qqbot-cmd-input text="/ow部署日志 " show="/ow部署日志" reference="false" /> 查看后端运行日志（内存，最近50行）
-• <qqbot-cmd-input text="/ow后端日志 " show="/ow后端日志" reference="false" /> 查看后端持久化日志（文件，最新10条）
+• <qqbot-cmd-input text="/ow后端日志 " show="/ow后端日志" reference="false" /> 查看 Overstats 后端持久化日志（文件，最新30条）
 
 🗑️ **后端卸载（仅 auto 托管模式）：**
 • <qqbot-cmd-input text="/ow卸载后端 " show="/ow卸载后端" reference="false" /> 预览卸载影响（空间/数据库/进程）
-• <qqbot-cmd-input text="/ow卸载后端执行 确认 " show="/ow卸载后端执行 确认" reference="false" /> 删除全部后端资源（代码+venv+数据库）
-• <qqbot-cmd-input text="/ow卸载后端执行 仅代码 " show="/ow卸载后端执行 仅代码" reference="false" /> 仅删除后端代码（保留venv）
-• <qqbot-cmd-input text="/ow卸载后端执行 强制 " show="/ow卸载后端执行 强制" reference="false" /> 强制删除（进程无法停止时使用）
+• <qqbot-cmd-input text="/ow卸载后端执行确认 " show="/ow卸载后端执行确认" reference="false" /> 删除全部后端资源（代码+venv+数据库）
+• <qqbot-cmd-input text="/ow卸载后端执行仅代码 " show="/ow卸载后端执行仅代码" reference="false" /> 仅删除后端代码（保留venv）
+• <qqbot-cmd-input text="/ow卸载后端执行仅venv " show="/ow卸载后端执行仅venv" reference="false" /> 仅删除虚拟环境（保留代码）
+• <qqbot-cmd-input text="/ow卸载后端执行强制 " show="/ow卸载后端执行强制" reference="false" /> 强制删除（进程无法停止时使用）
 
 💡 维护模式开启后，所有指令将直接返回维护内容，不再执行业务逻辑。
 💡 一键部署指令需在配置面板切换为 auto 模式后使用，配置修改后需重载插件生效。

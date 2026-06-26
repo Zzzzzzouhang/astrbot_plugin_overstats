@@ -197,7 +197,11 @@ class ProcessRunner:
             return
         try:
             while True:
-                line_bytes = await self._process.stdout.readline()
+                try:
+                    line_bytes = await self._process.stdout.readline()
+                except ValueError:
+                    # ponytail: 单行输出超过 chunk limit（如 base64 数据），跳过继续
+                    continue
                 if not line_bytes:
                     # EOF
                     break
