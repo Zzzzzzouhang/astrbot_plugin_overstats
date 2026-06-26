@@ -28,12 +28,67 @@ _QTOOL = json.loads((Path(__file__).resolve().parent / "query_tool.json").read_t
 HERO_DICT = {h["heroGuid"]: {"name": h["name"], "role": h["roleType"]} for h in _QTOOL["heroList"]}
 MAP_DICT = {m["guid"]: m["name"] for m in _QTOOL["mapList"]}
 
+_VERDICT_ENUM = ["你是职业吗？", "暴力炸！", "恭喜，你不是区！", "不幸，你可能是区？", "别看了，你就是区！", "你个大区！！！"]
+_SHIQU_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["target_id", "score", "verdict", "summary", "match_comments", "overall_comment", "teammate_comments"],
+    "properties": {
+        "target_id": {"type": "string"},
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "verdict": {"type": "string", "enum": _VERDICT_ENUM},
+        "summary": {"type": "string", "minLength": 1},
+        "match_comments": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["index", "result", "hero", "comment"],
+                "properties": {
+                    "index": {"type": "integer", "minimum": 1},
+                    "result": {"type": "string", "enum": ["胜", "负", "平", "未知"]},
+                    "hero": {"type": "string"},
+                    "comment": {"type": "string", "minLength": 1},
+                },
+            },
+        },
+        "overall_comment": {"type": "string", "minLength": 1},
+        "teammate_comments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "games", "score", "verdict", "comment"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "games": {"type": "integer", "minimum": 1},
+                    "score": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "verdict": {"type": "string", "enum": _VERDICT_ENUM},
+                    "comment": {"type": "string", "minLength": 1},
+                },
+            },
+        },
+    },
+}
+
 _MAX_CONCURRENT = 10
 _QUEUE: deque = deque()
 _ACTIVE: set = set()
 _ACTIVE_META: dict[str, str] = {}  # uid → 当前步骤描述，用于重复触发时告知进度
-_LAST_IMAGE: dict[str, str] = {}   # uid → 上次生成的图片文件路径
+_LAST_IMAGE: dict[str, str] = {}   # uid → 上次生成的图片文件路径（进程内加速用，持久记录以 JSON 为准）
 _QUEUE_LOCK = asyncio.Lock()
+
+_VERDICT_RULES = [
+    {"score_min": 85, "labels": ("你是职业吗？",), "canonical": "你是职业吗？", "emoji": "😱", "class": "god"},
+    {"score_min": 71, "labels": ("暴力炸！",), "canonical": "暴力炸！", "emoji": "🤤", "class": "boom"},
+    {"score_min": 60, "labels": ("恭喜，你不是区！", "恭喜，你不是区"), "canonical": "恭喜，你不是区！", "emoji": "😂", "class": "ok"},
+    {"score_min": 55, "labels": ("不幸，你可能是区？",), "canonical": "不幸，你可能是区？", "emoji": "🤔", "class": "mid"},
+    {"score_min": 43, "labels": ("别看了，你就是区！",), "canonical": "别看了，你就是区！", "emoji": "🤡", "class": "bad"},
+    {"score_min": 0, "labels": ("你个大区！！！",), "canonical": "你个大区！！！", "emoji": "😡", "class": "terrible"},
+]
+
+_VERDICT_BY_LABEL = {label: rule for rule in _VERDICT_RULES for label in rule["labels"]}
 
 # ── AstrBot 文转图模板 ──────────────────────────────────────
 
@@ -41,24 +96,26 @@ _SHIQU_HTML_TMPL = '''<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:#12161e; color:#dce1eb; font-family:"PingFang SC","Microsoft YaHei",sans-serif; font-size:22px; line-height:1.85; padding:28px 24px; }
-  h1 { font-size:30px; text-align:center; color:#f0b47c; margin-bottom:8px; padding-bottom:16px; border-bottom:2px solid #2a3040; }
-  h2 { font-size:26px; color:#c9986a; margin:24px 0 10px; }
-  h3 { font-size:24px; color:#e0c090; margin:18px 0 8px; }
-  p { margin:6px 0; }
-  p.gamen { margin:10px 0; line-height:1.85; }
+  html { background:#12161e; }
+  body { width:360px; max-width:360px; background:#12161e; color:#dce1eb; font-family:"PingFang SC","Microsoft YaHei","Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif; font-size:26px; line-height:1.78; padding:24px 18px; overflow-wrap:anywhere; word-break:break-word; }
+  h1 { font-size:34px; line-height:1.35; text-align:center; color:#f0b47c; margin-bottom:10px; padding-bottom:18px; border-bottom:2px solid #2a3040; }
+  h2 { font-size:31px; color:#c9986a; margin:26px 0 12px; }
+  h3 { font-size:29px; color:#e0c090; margin:20px 0 10px; }
+  p { margin:8px 0; }
+  p.gamen { margin:12px 0; line-height:1.78; }
   p.gamen b { color:#e8d5b7; }
   p.gamen span { color:#dce1eb; font-weight:normal; }
-  p.mate { margin:10px 0; color:#b0bec5; }
-  .score { font-size:48px; text-align:center; color:#ffd700; font-weight:bold; margin:12px 0; }
-  .verdict { display:block; font-size:32px; text-align:center; font-weight:bold; margin:4px 0 32px; }
+  p.mate { margin:12px 0; color:#b0bec5; }
+  .score { font-size:58px; line-height:1.15; text-align:center; color:#ffd700; font-weight:bold; margin:16px 0 8px; }
+  .verdict { display:block; font-size:38px; line-height:1.35; text-align:center; font-weight:bold; margin:8px 0 34px; }
   .verdict.god,.iv.god { color:#e67e22; }
+  .verdict.boom,.iv.boom { color:#ff6b6b; }
   .verdict.ok,.iv.ok { color:#4ecdc4; }
   .verdict.mid,.iv.mid { color:#f9ca24; }
   .verdict.bad,.iv.bad { color:#e17055; }
   .verdict.terrible,.iv.terrible { color:#d63031; }
   .iv { font-weight:bold; }
-  .footer { margin-top:28px; padding-top:12px; border-top:1px solid #2a3040; color:#6e7681; font-size:13px; text-align:center; }
+  .footer { margin-top:30px; padding-top:14px; border-top:1px solid #2a3040; color:#6e7681; font-size:16px; line-height:1.55; text-align:center; }
 </style></head><body>
   <h1>{{ title }}</h1>
   <div class="body">{{ body|safe }}</div>
@@ -90,6 +147,68 @@ class ShiquManager:
             return f"{event.get_platform_name()}:{event.get_sender_id()}"
         except Exception:
             return str(event.get_sender_id())
+
+    def _data_dir(self) -> Path:
+        data_dir = self._plugin.plugin_data_dir / "shiqu"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir
+
+    @staticmethod
+    def _safe_filename(value: str, fallback: str = "unknown") -> str:
+        safe = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]+", "_", str(value)).strip("._-")
+        return safe[:80] or fallback
+
+    @staticmethod
+    def _atomic_write_text(path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
+
+    @classmethod
+    def _atomic_write_json(cls, path: Path, data: dict | list) -> None:
+        cls._atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
+
+    def _user_record_path(self, uid: str) -> Path:
+        return self._data_dir() / "users" / f"{self._safe_filename(uid, 'user')}.json"
+
+    def _new_artifact_paths(self, uid: str, target_id: str) -> tuple[Path, Path, Path, Path]:
+        data_dir = self._data_dir() / "results"
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        ms = int((time.time() * 1000) % 1000)
+        base = f"{ts}_{ms:03d}_{self._safe_filename(uid, 'user')}_{self._safe_filename(target_id, 'target')}"
+        return (
+            data_dir / f"{base}_12matches.json",
+            data_dir / f"{base}_prompt.txt",
+            data_dir / f"{base}_llm_raw.txt",
+            data_dir / f"{base}_result.json",
+        )
+
+    def _save_user_record(self, uid: str, record: dict) -> None:
+        self._atomic_write_json(self._user_record_path(uid), record)
+
+    def _load_user_record(self, uid: str) -> Optional[dict]:
+        path = self._user_record_path(uid)
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception as e:
+            logger.warning(f"[是区吗] 读取用户结果记录失败: {e}")
+            return None
+
+    async def _render_result_image(self, result: dict, generated_at: str = "") -> str:
+        target_id = str(result.get("target_id") or "未知玩家")
+        title = f"是区吗判定书 · {target_id}"
+        footer_time = generated_at or time.strftime("%Y-%m-%d %H:%M:%S")
+        footer = f"生成时间：{footer_time}  ·  AI 数据带阴阳师 (Astrbot LLM)"
+        body_html = self._plain_to_html(self._result_to_plain_text(result))
+        return await self._plugin.html_render(
+            _SHIQU_HTML_TMPL,
+            {"title": title, "body": body_html, "footer": footer},
+            options={"type": "png", "width": 396, "viewport": {"width": 396, "height": 900}},
+        )
 
     async def _enqueue(self, event) -> tuple[int, int]:
         """加入队列，返回 (排号, 总人数)。排号 0 表示立即执行。"""
@@ -364,14 +483,12 @@ class ShiquManager:
    - 百分制评分标准：
      * ≥85 = 你是职业吗？
      * >70 = 暴力炸！
-     * 60~70 = 恭喜，你不是区
+     * 60~70 = 恭喜，你不是区！
      * 55~59 = 不幸，你可能是区？
      * <55 = 别看了，你就是区！
      * <43 = 你个大区！！！
 3. 综合判定：综合 {n} 场比赛中职责对应核心指标、KDA、胜负、英雄选择等因素进行评分。
 4. 队友点评规则：
-   - 共同少于6局的胜率无统计学意义，仅供参考。
-   - 仅对共同≥2局的队友逐一评分。
    - 评分标准同焦点玩家（≥50夸/赞赏，<50串）。
 
 【阴阳话术库（示例）】
@@ -381,27 +498,14 @@ class ShiquManager:
 这波操作，完美诠释了什么叫「无效阵亡」。
 建议把「最后一击」截图珍藏，毕竟这种高光时刻不多见。
 
-【输出格式】严格使用中文，纯文本（一行一句，不要 markdown，不要代码块，不要任何 ** 或 _ 标记）：
+【输出格式】
+只输出一个合法 JSON 对象，不要 markdown，不要代码块，不要任何 JSON 外的解释文字。
+所有字段必须使用中文内容；verdict 字段只能从 schema enum 中选择，不要在 verdict 里添加 emoji，emoji 由渲染器按分数自动添加。
+match_comments 必须覆盖已获取到的 {n} 局，index 从 1 到 {n}；teammate_comments 只输出共同游戏≥2局的队友。
+overall_comment 约 300 字，串子风格阴阳总结，有数据支撑，可少量使用 emoji 增强表达力。
 
-🔍 {target_id} 是区吗判定书
-
-评分：XX/100
-[判定文字，如：恭喜，你不是区]
-
-数据概况：
-一两句话概括 {n} 场整体表现，提及与分段均值的对比。
-
-逐局点评：
-第1局：胜/负/平，英雄名 —— 1~2句毒舌点评（好的夸差的串）
-第2局：同上
-（共 {n} 局）
-
-综合评价：
-约 300 字，串子风格阴阳总结，有数据支撑，可少量使用 emoji 增强表达力。
-
-队友点评：
-- 玩家名（共同X局，胜率Y%）：评分XX/100，判定文字 —— 1~2句毒舌点评
-（≥50 夸/赞赏，<50 串；共同少于6局的胜率仅供参考，不作为核心评判依据）
+JSON Schema：
+{json.dumps(_SHIQU_JSON_SCHEMA, ensure_ascii=False, indent=2)}
 
 【比赛数据】
 {match_text}
@@ -426,16 +530,171 @@ class ShiquManager:
                 logger.error("[是区吗] LLM provider_id not found")
                 return None
 
-            resp = await self._plugin.context.llm_generate(
-                chat_provider_id=provider_id,
-                prompt=prompt,
-            )
+            llm_kwargs = {
+                "chat_provider_id": provider_id,
+                "prompt": prompt,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "shiqu_result",
+                        "strict": True,
+                        "schema": _SHIQU_JSON_SCHEMA,
+                    },
+                },
+            }
+            try:
+                resp = await self._plugin.context.llm_generate(**llm_kwargs)
+            except Exception as e:
+                logger.warning(f"[是区吗] json_schema 调用失败，降级为普通 JSON prompt: {e}")
+                resp = await self._plugin.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
             return (resp.completion_text if resp else None) or None
         except Exception as e:
             logger.error(f"[是区吗] 调用 AstrBot LLM 失败: {e}")
             return None
 
-    # ── 纯文本 → HTML ──
+    # ── 结构化结果 → 渲染文本 → HTML ──
+
+    @staticmethod
+    def _extract_json_object(text: str) -> Optional[dict]:
+        cleaned = (text or "").strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+        try:
+            data = json.loads(cleaned)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            pass
+
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                data = json.loads(cleaned[start:end + 1])
+                return data if isinstance(data, dict) else None
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _clamp_score(value, default: int = 0) -> int:
+        try:
+            score = int(round(float(value)))
+        except Exception:
+            score = default
+        return max(0, min(100, score))
+
+    @classmethod
+    def _normalize_result(cls, data: dict, target_id: str) -> dict:
+        score = cls._clamp_score(data.get("score"), 0)
+        result = {
+            "target_id": str(data.get("target_id") or target_id),
+            "score": score,
+            "verdict": cls._score_rule(score)["canonical"],
+            "summary": str(data.get("summary") or "暂无数据概况。").strip(),
+            "match_comments": [],
+            "overall_comment": str(data.get("overall_comment") or "暂无综合评价。").strip(),
+            "teammate_comments": [],
+        }
+
+        for i, item in enumerate(data.get("match_comments") or [], start=1):
+            if not isinstance(item, dict):
+                continue
+            result["match_comments"].append({
+                "index": cls._clamp_score(item.get("index"), i),
+                "result": str(item.get("result") or "未知"),
+                "hero": str(item.get("hero") or "未知英雄"),
+                "comment": str(item.get("comment") or "暂无点评。").strip(),
+            })
+
+        for item in data.get("teammate_comments") or []:
+            if not isinstance(item, dict):
+                continue
+            tm_score = cls._clamp_score(item.get("score"), 0)
+            result["teammate_comments"].append({
+                "name": str(item.get("name") or "未知队友"),
+                "games": max(1, cls._clamp_score(item.get("games"), 1)),
+                "score": tm_score,
+                "verdict": cls._score_rule(tm_score)["canonical"],
+                "comment": str(item.get("comment") or "暂无点评。").strip(),
+            })
+
+        return result
+
+    @classmethod
+    def _parse_llm_json_result(cls, raw_text: str, target_id: str) -> Optional[dict]:
+        data = cls._extract_json_object(raw_text)
+        if data is None:
+            return None
+        return cls._normalize_result(data, target_id)
+
+    @staticmethod
+    def _result_to_plain_text(result: dict) -> str:
+        lines = [
+            f"🔍 {result.get('target_id', '未知玩家')} 是区吗判定书",
+            "",
+            f"评分：{result.get('score', 0)}/100",
+            str(result.get("verdict") or ""),
+            "",
+            "数据概况：",
+            str(result.get("summary") or ""),
+            "",
+            "逐局点评：",
+        ]
+
+        for item in result.get("match_comments") or []:
+            lines.append(
+                f"第{item.get('index', '?')}局：{item.get('result', '未知')}，{item.get('hero', '未知英雄')} —— {item.get('comment', '')}"
+            )
+
+        lines.extend(["", "综合评价：", str(result.get("overall_comment") or ""), "", "队友点评："])
+        teammates = result.get("teammate_comments") or []
+        if teammates:
+            for item in teammates:
+                lines.append(
+                    f"- {item.get('name', '未知队友')}（共同{item.get('games', '?')}局）：评分{item.get('score', 0)}/100，判定：{item.get('verdict', '')} —— {item.get('comment', '')}"
+                )
+        else:
+            lines.append("- 暂无共同游戏≥2局的队友。")
+
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _score_rule(score: int) -> dict:
+        for rule in _VERDICT_RULES:
+            if score >= int(rule["score_min"]):
+                return rule
+        return _VERDICT_RULES[-1]
+
+    @staticmethod
+    def _strip_verdict_emoji(value: str) -> str:
+        return re.sub(r"^[😱🤤😂🤔🤡😡]\s*", "", value.strip())
+
+    @classmethod
+    def _verdict_rule_for_text(cls, value: str) -> Optional[dict]:
+        label = cls._strip_verdict_emoji(value).strip("，,。.;； ")
+        return _VERDICT_BY_LABEL.get(label)
+
+    @classmethod
+    def _decorate_verdict(cls, value: str, block: bool = False) -> str:
+        rule = cls._verdict_rule_for_text(value)
+        if not rule:
+            return value
+        text = f'{rule["emoji"]} {rule["canonical"]}'
+        if block:
+            return f'<div class="verdict {rule["class"]}">{text}</div>'
+        return f'<span class="iv {rule["class"]}">{text}</span>'
+
+    @classmethod
+    def _decorate_inline_verdicts(cls, value: str) -> str:
+        labels = sorted(_VERDICT_BY_LABEL, key=len, reverse=True)
+        pattern = re.compile(rf"(?:[😱🤤😂🤔🤡😡]\s*)?({'|'.join(re.escape(label) for label in labels)})")
+
+        def repl(m):
+            rule = _VERDICT_BY_LABEL[m.group(1)]
+            return f'<span class="iv {rule["class"]}">{rule["emoji"]} {rule["canonical"]}</span>'
+
+        return pattern.sub(repl, value)
 
     @staticmethod
     def _plain_to_html(text: str) -> str:
@@ -446,43 +705,18 @@ class ShiquManager:
         # ── 评分着色（按档位）──
         def _score(m):
             s = int(m.group(1))
-            if s >= 85:
-                c = "#e67e22"
-            elif s > 70:
-                c = "#ff6b6b"
-            elif s >= 60:
-                c = "#4ecdc4"
-            elif s >= 55:
-                c = "#f9ca24"
-            elif s >= 43:
-                c = "#e17055"
-            else:
-                c = "#d63031"
+            rule = ShiquManager._score_rule(s)
+            c = {
+                "god": "#e67e22",
+                "boom": "#ff6b6b",
+                "ok": "#4ecdc4",
+                "mid": "#f9ca24",
+                "bad": "#e17055",
+                "terrible": "#d63031",
+            }.get(str(rule["class"]), "#ffd700")
             return f'<div class="score" style="color:{c}">{s}/100</div>'
 
         text = re.sub(r"评分：\s*(\d+)/100", _score, text)
-
-        # ── 判定文字着色 ──
-        _VERDICT_CLASS = {
-            "你是职业吗？": "god",
-            "暴力炸！": "god",
-            "恭喜，你不是区": "ok",
-            "不幸，你可能是区？": "mid",
-            "别看了，你就是区！": "bad",
-            "你个大区！！！": "terrible",
-        }
-        # 主判定行（独立一行）→ block div
-        def _verdict(m):
-            v = m.group(1).strip(",.;.")
-            cls = _VERDICT_CLASS.get(v, "")
-            return f'<div class="verdict {cls}">{v}</div>'
-
-        verdict_pat = "|".join(re.escape(k) for k in _VERDICT_CLASS)
-        text = re.sub(rf"^({verdict_pat})$", _verdict, text, flags=re.M)
-
-        # 队友行 "判定：xxx" → 内联着色
-        for v, cls in _VERDICT_CLASS.items():
-            text = text.replace(f"判定：{v}", f'判定：<span class="iv {cls}">{v}</span>')
 
         # ── 章节标题 ──
         text = text.replace("逐局点评：", "\n<h2>逐局点评</h2>\n")
@@ -498,6 +732,13 @@ class ShiquManager:
             if not s:
                 buf.append("")
                 continue
+            verdict_rule = ShiquManager._verdict_rule_for_text(s)
+            if verdict_rule:
+                buf.append(ShiquManager._decorate_verdict(s, block=True))
+                continue
+            # LLM 第一行标题由外层模板渲染，正文里跳过，避免重复。
+            if "是区吗判定书" in s and s.startswith("🔍"):
+                continue
             # 已处理过的标签 → 直接保留
             if s.startswith("<h") or s.startswith("<div") or s.startswith("<span"):
                 buf.append(s)
@@ -510,17 +751,11 @@ class ShiquManager:
                     buf.append(f'<p class="gamen"><b>{s}</b></p>')
             # 队友条目："- 玩家名...":"
             elif s.startswith("- "):
-                buf.append(f'<p class="mate">{s}</p>')
-            # 标题行（已被转义但仍以 🔍 开头且含 是区吗判定书）
-            elif "是区吗判定书" in s and s.startswith("🔍"):
-                buf.append(f'<h1>{s.replace("🔍 ", "")}</h1>')
+                buf.append(f'<p class="mate">{ShiquManager._decorate_inline_verdicts(s)}</p>')
             else:
                 buf.append(f"<p>{s}</p>")
 
         body = "\n".join(buf)
-
-        # ── 去重：如果 build_html 返回结果中出现了裸标题 h1，移除一次 ──
-        body = re.sub(r"<h1>是区吗判定书</h1>\s*", "", body, count=1)
 
         return body
 
@@ -578,17 +813,13 @@ class ShiquManager:
             t2 = time.time()
             logger.info(f"📊 队友数据拉取完成 ({(t2 - t1):.1f}s)")
 
-            # 保存 JSON
-            data_dir = self._plugin.plugin_data_dir / "shiqu"
-            data_dir.mkdir(parents=True, exist_ok=True)
-            json_path = data_dir / f"{target_id.replace('#','_')}_12matches.json"
-            json_path.write_text(json.dumps(matches, ensure_ascii=False, indent=2), encoding="utf-8")
+            matches_path, prompt_path, llm_raw_path, result_path = self._new_artifact_paths(uid, target_id)
+            self._atomic_write_json(matches_path, matches)
 
             # 构建 prompt
             db_path = str(getattr(self._plugin, "config", {}).get("sqlite_db_path", "") or "").strip()
             prompt = self._build_prompt(matches, target_id, db_path=db_path)
-            prompt_path = data_dir / f"{target_id.replace('#','_')}_prompt.txt"
-            prompt_path.write_text(prompt, encoding="utf-8")
+            self._atomic_write_text(prompt_path, prompt)
             logger.info(f"✅ Prompt 已生成 ({len(prompt)} 字符)")
 
             # ── 调用 LLM ──
@@ -597,21 +828,31 @@ class ShiquManager:
             if not llm_text:
                 yield event.plain_result("❌ AI 判定生成失败：LLM 调用异常，请稍后重试。")
                 return
+            self._atomic_write_text(llm_raw_path, llm_text)
+            result = self._parse_llm_json_result(llm_text, target_id)
+            if result is None:
+                yield event.plain_result("❌ AI 判定生成失败：返回内容不是合法 JSON，请稍后重试。")
+                return
+            self._atomic_write_json(result_path, result)
             t3 = time.time()
             logger.info(f"[是区吗] LLM done ({len(prompt)}→{len(llm_text)}ch, llm={t3 - t2:.1f}s)")
 
             # ── 渲染图片 ──
             _ACTIVE_META[uid] = "渲染图片"
-            title = f"是区吗判定书 · {target_id}"
-            footer = time.strftime("生成时间：%Y-%m-%d %H:%M") + "  ·  AI 数据带阴阳师 (Astrbot LLM)"
-            body_html = self._plain_to_html(llm_text)
-            url = await self._plugin.html_render(
-                _SHIQU_HTML_TMPL,
-                {"title": title, "body": body_html, "footer": footer},
-                options={"type": "png"},
-            )
+            generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
+            url = await self._render_result_image(result, generated_at=generated_at)
             # 缓存图片路径，供「是区吗结果」复用
             _LAST_IMAGE[uid] = url
+            self._save_user_record(uid, {
+                "uid": uid,
+                "target_id": target_id,
+                "generated_at": generated_at,
+                "matches_path": str(matches_path),
+                "prompt_path": str(prompt_path),
+                "llm_raw_path": str(llm_raw_path),
+                "result_path": str(result_path),
+                "image_path": str(url),
+            })
             yield event.image_result(url)
             logger.info(f"[是区吗] 总耗时={time.time() - t0:.1f}s (render={time.time() - t3:.1f}s)")
 
@@ -622,13 +863,28 @@ class ShiquManager:
             await self._dequeue(uid)
 
     async def last_result(self, event):
-        """返回用户上次生成的判定书图片。"""
+        """读取用户上次结构化判定结果，重新渲染图片返回。"""
         if not self.check_access(event):
             yield event.plain_result("🔒 是区吗功能处于测试阶段，仅对白名单/管理员开放。")
             return
         uid = self._user_key(event)
-        path = _LAST_IMAGE.get(uid)
-        if not path or not Path(path).exists():
+        record = self._load_user_record(uid)
+        if not record:
             yield event.plain_result("❌ 没有找到上次的判定书结果，请先用「是区吗」生成一份。")
             return
-        yield event.image_result(path)
+        result_path = Path(str(record.get("result_path") or ""))
+        if not result_path.exists():
+            yield event.plain_result("❌ 上次的判定结果文件不存在，请重新生成一份。")
+            return
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            if not isinstance(result, dict):
+                raise ValueError("result json is not an object")
+            url = await self._render_result_image(result, generated_at=str(record.get("generated_at") or ""))
+            _LAST_IMAGE[uid] = url
+            record["image_path"] = str(url)
+            self._save_user_record(uid, record)
+            yield event.image_result(url)
+        except Exception as exc:
+            logger.error(f"[是区吗] 重新渲染结果失败: {exc}", exc_info=True)
+            yield event.plain_result(f"❌ 重新渲染判定书失败：{exc}")
