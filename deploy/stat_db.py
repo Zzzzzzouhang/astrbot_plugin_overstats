@@ -16,7 +16,8 @@ logger = logging.getLogger("astrbot")
 
 # ── 延迟加载 stat GUID → 中文名（从 deploy/query_tool.json 的 heroAttrList）──
 _NAME_MAP: dict[str, str] | None = None
-_SKIP_GUIDS = {"603482350067646497"}  # 累计游戏时间
+_SKIP_GUIDS = {"603482350067646497", "603482350067648623"}  # 游戏时间、英雄获胜
+_SKIP_TEXTS = {"英雄获胜", "累计游戏时间", "累积游戏时间"}
 
 
 # ── 与后端 normalize_dashen_hero_stat_value 等价的归一化 ──
@@ -24,6 +25,12 @@ _HERO_AVG_PERCENT_KEYWORDS = ("率", "效率", "占比")
 _HERO_AVG_PERCENT_TEXTS = {"英雄获胜"}
 _HERO_AVG_RAW_VALUE_TEXTS = {"英雄获胜", "累计游戏时间", "累积游戏时间"}
 _HERO_AVG_RAW_VALUE_GUIDS = {"603482350067646497", "603482350067648623"}
+_BROAD_REFERENCE_BUCKETS = (0, 4, 5, 6, 7, *range(25, 45))
+
+
+def should_skip_prompt_stat(value_guid: str = "", value_text: str = "") -> bool:
+    """这些字段不参与提示词构造。"""
+    return str(value_guid or "") in _SKIP_GUIDS or str(value_text or "") in _SKIP_TEXTS
 
 
 def _is_percent_stat(value_text: str) -> bool:
@@ -145,7 +152,7 @@ def query_hero_stat_averages(
         result: dict[str, dict[str, Any]] = {}
         for row in rows:
             guid = row["statmap_name"]
-            if guid in _SKIP_GUIDS:
+            if should_skip_prompt_stat(value_guid=guid):
                 continue
             result[guid] = {
                 "median": row["median_value"],
@@ -156,6 +163,76 @@ def query_hero_stat_averages(
         return result
     except Exception as e:
         logger.warning(f"[stat_db] 查询失败 (hero={hero_guid}): {e}")
+        return {}
+
+
+def query_hero_stat_averages_for_buckets(
+    db_path: str,
+    hero_guid: str,
+    rank_buckets: tuple[int, ...] = _BROAD_REFERENCE_BUCKETS,
+) -> dict[str, dict[str, Any]]:
+    """查询指定英雄在多个段位 bucket 的聚合参考数据。"""
+    path = Path(db_path)
+    if not path.is_file():
+        logger.warning(f"[stat_db] 数据库文件不存在: {db_path}")
+        return {}
+    if not rank_buckets:
+        return {}
+
+    try:
+        conn = sqlite3.connect(str(path))
+        conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in rank_buckets)
+        rows = conn.execute(
+            f"""SELECT statmap_name, median_value, avg_value, sample_count
+                FROM comp_data_summary
+                WHERE hero_guid = ? AND rank_bucket_key IN ({placeholders})
+                ORDER BY statmap_name""",
+            (hero_guid, *rank_buckets),
+        ).fetchall()
+        conn.close()
+
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            guid = row["statmap_name"]
+            if should_skip_prompt_stat(value_guid=guid):
+                continue
+            grouped.setdefault(guid, []).append(row)
+
+        result: dict[str, dict[str, Any]] = {}
+        for guid, stat_rows in grouped.items():
+            weighted_median = 0.0
+            weighted_avg = 0.0
+            weight_sum = 0
+            fallback_medians = []
+            fallback_avgs = []
+            for row in stat_rows:
+                samples = int(row["sample_count"] or 0)
+                median = row["median_value"]
+                avg = row["avg_value"]
+                if median is not None:
+                    fallback_medians.append(float(median))
+                    if samples > 0:
+                        weighted_median += float(median) * samples
+                if avg is not None:
+                    fallback_avgs.append(float(avg))
+                    if samples > 0:
+                        weighted_avg += float(avg) * samples
+                if samples > 0:
+                    weight_sum += samples
+
+            if weight_sum > 0:
+                median_value = weighted_median / weight_sum if fallback_medians else None
+                avg_value = weighted_avg / weight_sum if fallback_avgs else None
+            else:
+                median_value = sum(fallback_medians) / len(fallback_medians) if fallback_medians else None
+                avg_value = sum(fallback_avgs) / len(fallback_avgs) if fallback_avgs else None
+            if median_value is None:
+                continue
+            result[guid] = {"median": median_value, "avg": avg_value, "samples": weight_sum}
+        return result
+    except Exception as e:
+        logger.warning(f"[stat_db] 聚合查询失败 (hero={hero_guid}): {e}")
         return {}
 
 
@@ -187,16 +264,25 @@ def build_reference_text(
     if not averages:
         return ""
 
-    parts = []
+    by_name: dict[str, tuple[float, int]] = {}
     for stat_guid, info in averages.items():
         name = _load_name_map().get(stat_guid)
         if not name:
             continue  # 跳过无中文映射的统计指标
+        if should_skip_prompt_stat(value_guid=stat_guid, value_text=name):
+            continue
         median = info["median"]
         if median is None:
             continue
         samples = info.get("samples", 0)
-        if samples is not None and samples > 0:
+        samples = int(samples or 0)
+        old = by_name.get(name)
+        if old is None or samples > old[1]:
+            by_name[name] = (float(median), samples)
+
+    parts = []
+    for name, (median, samples) in by_name.items():
+        if samples > 0:
             parts.append(f"{name}分段中位{median:.1f}({samples}样本)")
         else:
             parts.append(f"{name}分段中位{median:.1f}")
@@ -205,6 +291,47 @@ def build_reference_text(
         return ""
 
     return f"  {player_name}（{hero_name}）分段参考: " + ", ".join(parts)
+
+
+def build_broad_reference_text(
+    db_path: Optional[str],
+    player_name: str,
+    hero_guid: str,
+    hero_name: str,
+) -> str:
+    """为一局玩家构建聚合参考文本。"""
+    if not db_path:
+        return ""
+
+    averages = query_hero_stat_averages_for_buckets(db_path, hero_guid)
+    if not averages:
+        return ""
+
+    by_name: dict[str, tuple[float, int]] = {}
+    for stat_guid, info in averages.items():
+        name = _load_name_map().get(stat_guid)
+        if not name:
+            continue
+        if should_skip_prompt_stat(value_guid=stat_guid, value_text=name):
+            continue
+        median = info["median"]
+        if median is None:
+            continue
+        samples = int(info.get("samples") or 0)
+        old = by_name.get(name)
+        if old is None or samples > old[1]:
+            by_name[name] = (float(median), samples)
+
+    parts = []
+    for name, (median, samples) in by_name.items():
+        if samples > 0:
+            parts.append(f"{name}中位{median:.1f}({samples}样本)")
+        else:
+            parts.append(f"{name}中位{median:.1f}")
+
+    if not parts:
+        return ""
+    return f"  {player_name}（{hero_name}）参考: " + ", ".join(parts)
 
 
 

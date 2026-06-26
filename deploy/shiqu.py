@@ -19,14 +19,49 @@ from typing import Optional
 logger = logging.getLogger("astrbot")
 
 try:
-    from .stat_db import build_reference_text, load_stat_name_map, normalize_stat_value
+    from .stat_db import build_broad_reference_text, load_stat_name_map, normalize_stat_value, should_skip_prompt_stat
 except ImportError:
-    from stat_db import build_reference_text, load_stat_name_map, normalize_stat_value  # type: ignore[no-redef]
+    from stat_db import build_broad_reference_text, load_stat_name_map, normalize_stat_value, should_skip_prompt_stat  # type: ignore[no-redef]
 
 # 从 query_tool.json 加载游戏数据
 _QTOOL = json.loads((Path(__file__).resolve().parent / "query_tool.json").read_text("utf-8"))
 HERO_DICT = {h["heroGuid"]: {"name": h["name"], "role": h["roleType"]} for h in _QTOOL["heroList"]}
 MAP_DICT = {m["guid"]: m["name"] for m in _QTOOL["mapList"]}
+_HERO_ATTR_GUIDS: dict[str, set[str]] = {}
+_HERO_SPECIAL_ATTR_GUIDS: dict[str, set[str]] = {}
+_GENERAL_ATTR_GUIDS: set[str] = set()
+for _attr in _QTOOL.get("heroAttrList", []):
+    _hg = str(_attr.get("heroGuid", ""))
+    _vg = str(_attr.get("valueGuid", ""))
+    if not _hg or not _vg:
+        continue
+    _HERO_ATTR_GUIDS.setdefault(_hg, set()).add(_vg)
+    if _attr.get("valueType") == "通用数据":
+        _GENERAL_ATTR_GUIDS.add(_vg)
+    else:
+        _HERO_SPECIAL_ATTR_GUIDS.setdefault(_hg, set()).add(_vg)
+
+
+def _stat_allowed_for_hero(value_guid: str, hero_guid: str) -> bool:
+    return value_guid in _GENERAL_ATTR_GUIDS or value_guid in _HERO_ATTR_GUIDS.get(hero_guid, set())
+
+
+def _infer_hero_guid_from_stat_map(stat_map: dict, fallback_hero_guid: str = "", *, allow_fallback: bool = False) -> str:
+    stat_guids = {str(g) for g in (stat_map or {}).keys()}
+    scores = []
+    for hero_guid, special_guids in _HERO_SPECIAL_ATTR_GUIDS.items():
+        hits = len(stat_guids & special_guids)
+        if hits > 0:
+            scores.append((hits, hero_guid))
+    if scores:
+        best = max(hit for hit, _ in scores)
+        winners = [hero_guid for hit, hero_guid in scores if hit == best]
+        if fallback_hero_guid in winners:
+            return fallback_hero_guid
+        if len(winners) == 1:
+            return winners[0]
+        return ""
+    return fallback_hero_guid if allow_fallback else ""
 
 _VERDICT_ENUM = ["你是职业吗？", "暴力炸！", "恭喜，你不是区！", "不幸，你可能是区？", "别看了，你就是区！", "你个大区！！！"]
 _SHIQU_JSON_SCHEMA = {
@@ -62,7 +97,7 @@ _SHIQU_JSON_SCHEMA = {
                 "required": ["name", "games", "score", "verdict", "comment"],
                 "properties": {
                     "name": {"type": "string"},
-                    "games": {"type": "integer", "minimum": 1},
+                    "games": {"type": ["integer", "null"], "minimum": 1},
                     "score": {"type": "integer", "minimum": 0, "maximum": 100},
                     "verdict": {"type": "string", "enum": _VERDICT_ENUM},
                     "comment": {"type": "string", "minLength": 1},
@@ -97,17 +132,17 @@ _SHIQU_HTML_TMPL = '''<!DOCTYPE html>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html { background:#12161e; }
-  body { width:100%; min-width:0; background:#12161e; color:#dce1eb; font-family:"Noto Sans CJK SC","Microsoft YaHei","PingFang SC",Arial,sans-serif; font-size:28px; line-height:1.76; padding:30px 26px; overflow-wrap:break-word; word-break:normal; font-variant-numeric:normal; font-feature-settings:"tnum" 0; }
-  h1 { font-size:36px; line-height:1.35; text-align:center; color:#f0b47c; margin-bottom:10px; padding-bottom:18px; border-bottom:2px solid #2a3040; }
-  h2 { font-size:33px; color:#c9986a; margin:28px 0 12px; }
-  h3 { font-size:31px; color:#e0c090; margin:22px 0 10px; }
-  p { margin:8px 0; }
-  p.gamen { margin:12px 0; line-height:1.76; }
+  body { width:100%; min-width:0; background:#12161e; color:#dce1eb; font-family:"Noto Sans CJK SC","Microsoft YaHei","PingFang SC",Arial,sans-serif; font-size:56px; line-height:1.64; padding:48px 42px; overflow-wrap:break-word; word-break:normal; font-variant-numeric:normal; font-feature-settings:"tnum" 0; }
+  h1 { font-size:72px; line-height:1.25; text-align:center; color:#f0b47c; margin-bottom:20px; padding-bottom:30px; border-bottom:3px solid #2a3040; }
+  h2 { font-size:66px; color:#c9986a; margin:52px 0 24px; }
+  h3 { font-size:62px; color:#e0c090; margin:40px 0 20px; }
+  p { margin:16px 0; }
+  p.gamen { margin:24px 0; line-height:1.64; }
   p.gamen b { color:#e8d5b7; }
   p.gamen span { color:#dce1eb; font-weight:normal; }
-  p.mate { margin:12px 0; color:#b0bec5; }
-  .score { font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif; font-size:60px; line-height:1.15; text-align:center; color:#ffd700; font-weight:bold; margin:16px 0 8px; letter-spacing:0; }
-  .verdict { display:block; font-size:39px; line-height:1.35; text-align:center; font-weight:bold; margin:8px 0 34px; }
+  p.mate { margin:24px 0; color:#b0bec5; }
+  .score { font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif; font-size:120px; line-height:1.12; text-align:center; color:#ffd700; font-weight:bold; margin:32px 0 16px; letter-spacing:0; }
+  .verdict { display:block; font-size:78px; line-height:1.25; text-align:center; font-weight:bold; margin:16px 0 64px; }
   .verdict.god,.iv.god { color:#e67e22; }
   .verdict.boom,.iv.boom { color:#ff6b6b; }
   .verdict.ok,.iv.ok { color:#4ecdc4; }
@@ -115,7 +150,7 @@ _SHIQU_HTML_TMPL = '''<!DOCTYPE html>
   .verdict.bad,.iv.bad { color:#e17055; }
   .verdict.terrible,.iv.terrible { color:#d63031; }
   .iv { font-weight:bold; }
-  .footer { margin-top:30px; padding-top:14px; border-top:1px solid #2a3040; color:#6e7681; font-size:16px; line-height:1.55; text-align:center; }
+  .footer { margin-top:56px; padding-top:28px; border-top:2px solid #2a3040; color:#6e7681; font-size:32px; line-height:1.45; text-align:center; }
 </style></head><body>
   <h1>{{ title }}</h1>
   <div class="body">{{ body|safe }}</div>
@@ -330,46 +365,160 @@ class ShiquManager:
         STAT_KEYS = [("kill","击杀"),("assist","助攻"),("death","阵亡"),("finalHit","最后一击"),
                      ("heroDamage","伤害"),("damageTaken","承伤"),("cure","治疗"),
                      ("healingTaken","受疗"),("resistDamage","格挡")]
+        ENTRY_STAT_GUIDS = [
+            ("击杀", ("603482350067646495",)),
+            ("助攻", ("603482350067648392",)),
+            ("阵亡", ("603482350067646506",)),
+            ("最后一击", ("603482350067646507",)),
+            ("单独消灭", ("603482350067646509",)),
+            ("伤害", ("603482350067647671",)),
+            ("治疗", ("603482350067647479", "603482350067646913")),
+        ]
 
         def _rate(v, t): return f"{v * 600 / max(t, 60):.1f}" if t > 0 else str(v)
 
-        def _hero_detail_text(p) -> str:
-            """将 _heroList 中的 statMap 转成可读文本（与 DB 归一化口径一致）。"""
-            hl = p.get("_heroList")
-            if not hl or not isinstance(hl, list):
-                return ""
+        def _fmt_num(v) -> str:
+            if v is None:
+                return "?"
+            if isinstance(v, (int, float)) and float(v) == int(v):
+                return str(int(v))
+            return f"{float(v):.2f}"
+
+        def _fmt_minsec(seconds: float) -> str:
+            seconds = max(0, int(seconds or 0))
+            return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+        def _normalized_stat(sm: dict, guids: tuple[str, ...], ut: float, name_map: dict[str, str], hero_guid: str):
+            values = []
+            for guid in guids:
+                if guid not in sm or not _stat_allowed_for_hero(guid, hero_guid):
+                    continue
+                name = name_map.get(guid, "")
+                if should_skip_prompt_stat(value_guid=guid, value_text=name):
+                    continue
+                nv = normalize_stat_value(sm.get(guid), ut, value_text=name, value_guid=guid)
+                if nv is not None:
+                    values.append(nv)
+            if not values:
+                return None
+            return max(values)
+
+        def _hero_detail_text(entry: dict, hero_guid: str, name_map: dict[str, str]) -> str:
+            """将单个英雄 entry 的 statMap 转成可读文本（与 DB 归一化口径一致）。"""
+            sm = entry.get("statMap", {}) or {}
+            ut = float(entry.get("userTimeSec", 600) or 600)
+            seen: dict[str, str] = {}
+            for guid, raw_val in sm.items():
+                guid = str(guid)
+                if not _stat_allowed_for_hero(guid, hero_guid):
+                    continue
+                name = name_map.get(guid)
+                if not name:
+                    continue
+                if should_skip_prompt_stat(value_guid=guid, value_text=name):
+                    continue
+                nv = normalize_stat_value(raw_val, ut, value_text=name, value_guid=guid)
+                if nv is None:
+                    continue
+                seen.setdefault(name, _fmt_num(nv))
+            return ", ".join(f"{name}: {value}" for name, value in seen.items())
+
+        def _expand_player_segments(p) -> list[dict]:
             name_map = load_stat_name_map()
-            parts = []
-            for entry in hl:
+            hl = p.get("_heroList")
+            fallback_hg = str(p.get("heroGuid", ""))
+            if not hl or not isinstance(hl, list):
+                return [{"player": p, "hero_guid": fallback_hg, "entry": None, "name_map": name_map}]
+
+            segments = []
+            long_entries = [entry for entry in hl if isinstance(entry, dict) and float(entry.get("userTimeSec", 0) or 0) >= 60]
+            for entry in long_entries:
                 if not isinstance(entry, dict):
                     continue
                 sm = entry.get("statMap", {}) or {}
-                ut = float(entry.get("userTimeSec", 600) or 600)
-                for guid, raw_val in sm.items():
-                    name = name_map.get(guid)
-                    if not name:
-                        continue
-                    nv = normalize_stat_value(raw_val, ut, value_text=name, value_guid=guid)
-                    if nv is None:
-                        continue
-                    if nv == int(nv):
-                        parts.append(f"{name}: {int(nv)}")
-                    else:
-                        parts.append(f"{name}: {nv:.2f}")
-            return ", ".join(parts) if parts else ""
+                hg = _infer_hero_guid_from_stat_map(sm, fallback_hg, allow_fallback=(len(long_entries) == 1))
+                if not hg:
+                    continue
+                segments.append({"player": p, "hero_guid": hg, "entry": entry, "name_map": name_map})
+            if segments:
+                return segments
+            return []
 
-        def _fmt_player(p, pos, game_sec, detail=""):
-            name = str(p.get("name", "?"))
-            hg = str(p.get("heroGuid", ""))
+        def _get_segment_role(seg):
+            return HERO_DICT.get(str(seg.get("hero_guid", "")), {}).get("role", "unknown")
+
+        def _player_primary_role(player_segments: list[dict], fallback_player: dict) -> str:
+            best_role = HERO_DICT.get(str(fallback_player.get("heroGuid", "")), {}).get("role", "unknown")
+            best_time = -1.0
+            for seg in player_segments:
+                entry = seg.get("entry") or {}
+                ut = float(entry.get("userTimeSec", 0) or 0)
+                role = _get_segment_role(seg)
+                if ut > best_time:
+                    best_time = ut
+                    best_role = role
+            return best_role
+
+        def _sort_and_label_players(players):
+            indexed = []
+            for pi, p in enumerate(players):
+                if not isinstance(p, dict):
+                    continue
+                segments = _expand_player_segments(p)
+                if not segments:
+                    continue
+                role = _player_primary_role(segments, p)
+                indexed.append((ROLE_ORDER.get(role, 9), pi, role, p, segments))
+            indexed.sort(key=lambda x: (x[0], x[1]))
+            role_ct = {}
+            role_total = {}
+            for _, _, role, _, _ in indexed:
+                r = role
+                role_total[r] = role_total.get(r, 0) + 1
+            labeled = []
+            for _, _, role, p, segments in indexed:
+                r = role
+                role_ct[r] = role_ct.get(r, 0) + 1
+                lb = ROLE_LABEL.get(r, r)
+                labeled.append((p, segments, f"{lb}{role_ct[r]}" if role_total.get(r, 0) > 1 else lb))
+            return labeled
+
+        def _fmt_hero_segment(seg, include_detail: bool):
+            p = seg["player"]
+            hg = str(seg.get("hero_guid", ""))
             hn = HERO_DICT.get(hg, {}).get("name", "?")
-            display = f"*{name}" if name == target_id else name
-            parts = [f"位置: {pos}", f"玩家: {display}", f"英雄: {hn}"]
-            for k, cn in STAT_KEYS:
-                v = int(p.get(k, 0) or 0)
-                parts.append(f"{cn}/10min: {_rate(v, game_sec)}")
-            if detail:
+            entry = seg.get("entry")
+            parts = [f"英雄: {hn}"]
+            if entry:
+                ut = float(entry.get("userTimeSec", 0) or 0)
+                sm = entry.get("statMap", {}) or {}
+                parts.append(f"时长: {_fmt_minsec(ut)}")
+                for cn, guids in ENTRY_STAT_GUIDS:
+                    nv = _normalized_stat(sm, guids, ut, seg["name_map"], hg)
+                    if nv is not None:
+                        parts.append(f"{cn}: {_fmt_num(nv)}")
+                detail = _hero_detail_text(entry, hg, seg["name_map"]) if include_detail else ""
+            else:
+                for k, cn in STAT_KEYS:
+                    v = int(p.get(k, 0) or 0)
+                    parts.append(f"{cn}: {_rate(v, game_sec)}")
+                detail = ""
+            if include_detail and detail:
                 parts.append(f"详细: {{ {detail} }}")
             return "{ " + ", ".join(parts) + " }"
+
+        def _fmt_player_block(p, segments: list[dict], pos, game_sec, include_detail: bool):
+            name = str(p.get("name", "?"))
+            display = f"*{name}" if name == target_id else name
+            hero_text = ", ".join(_fmt_hero_segment(seg, include_detail) for seg in segments)
+            return f"{{ 位置: {pos}, 玩家: {display}, 英雄片段: [ {hero_text} ] }}"
+
+        def _player_ref_text(seg, player_name: str) -> str:
+            if not db_path:
+                return ""
+            hg = str(seg.get("hero_guid", ""))
+            hn = HERO_DICT.get(hg, {}).get("name", "?")
+            return build_broad_reference_text(db_path, player_name, hg, hn)
 
         result_map = {1: "胜", 0: "平", -1: "负"}
         lines = []
@@ -388,72 +537,42 @@ class ShiquManager:
 
             tm = detail_data.get("teammateList", [])
             en = detail_data.get("enemyList", [])
-            def _append_players(label, players):
+            def _append_players(label, players, *, include_detail: bool, include_reference: bool):
                 lines.append(f"  [{label}]")
                 lines.append("  [")
-                for p, pos in _sort_and_label(players):
-                    hd = _hero_detail_text(p)
-                    lines.append(f"    {_fmt_player(p, pos, game_sec, hd)},")
-                    if db_path:
-                        hg = str(p.get("heroGuid", ""))
-                        hn = HERO_DICT.get(hg, {}).get("name", "?")
-                        ref = build_reference_text(db_path, str(p.get("name", "?")), hg, hn)
-                        if ref:
-                            lines.append(f"    # 分段参考: {ref}")
+                for p, segments, pos in _sort_and_label_players(players):
+                    player_name = str(p.get("name", "?"))
+                    lines.append(f"    {_fmt_player_block(p, segments, pos, game_sec, include_detail)},")
+                    if include_reference:
+                        for seg in segments:
+                            ref = _player_ref_text(seg, player_name)
+                            if ref:
+                                lines.append(f"    # 分段参考: {ref}")
                 lines.append("  ],")
 
             if tm:
-                _append_players("队友", tm)
+                _append_players("队友", tm, include_detail=True, include_reference=True)
             if en:
-                _append_players("对手", en)
+                _append_players("对手", en, include_detail=False, include_reference=False)
             lines.append("}")
             lines.append("")
 
         n = len(matches)
 
-        # ── 队友汇总 ──
-        tm_summary = {}
+        # ── 队友 ID 汇总（只给模型识别可点评对象，不提供数据）──
+        teammate_ids = set()
         for m in matches:
             detail_data = (m.get("detail", {}) or {}).get("data") or {}
-            game_sec = float(detail_data.get("gameTimeSec", 600) or 600)
-            ret = detail_data.get("matchRet")
             for p in detail_data.get("teammateList", []):
                 if not isinstance(p, dict):
                     continue
                 name = str(p.get("name", ""))
                 if name == target_id:
                     continue
-                if name not in tm_summary:
-                    tm_summary[name] = {"games": 0, "wins": 0, "total_sec": 0, "k": 0, "d": 0, "a": 0, "dmg": 0, "heal": 0, "heroes": {}}
-                r = tm_summary[name]
-                r["games"] += 1
-                if ret == 1:
-                    r["wins"] += 1
-                r["total_sec"] += game_sec
-                r["k"] += int(p.get("kill", 0) or 0)
-                r["d"] += int(p.get("death", 0) or 0)
-                r["a"] += int(p.get("assist", 0) or 0)
-                r["dmg"] += int(p.get("heroDamage", 0) or 0)
-                r["heal"] += int(p.get("cure", 0) or 0)
-                hg = str(p.get("heroGuid", ""))
-                hn = HERO_DICT.get(hg, {}).get("name", hg)
-                r["heroes"][hn] = r["heroes"].get(hn, 0) + 1
+                if name:
+                    teammate_ids.add(name)
 
-        if tm_summary:
-            lines.append("[焦点玩家的队友（共同游戏≥2局）]")
-            lines.append("[")
-            for name in sorted(tm_summary):
-                r = tm_summary[name]
-                if r["games"] < 2:
-                    continue
-                tg = max(r["total_sec"], 1)
-                heroes = ", ".join(f"{h}x{c}" for h, c in r["heroes"].items())
-                lines.append(f"  {{ 玩家: {name}, 共同局数: {r['games']}/{n}, 胜率: {r['wins']}/{r['games']}, "
-                            f"击杀/10min: {r['k']*600/tg:.1f}, 阵亡/10min: {r['d']*600/tg:.1f}, "
-                            f"伤害/10min: {int(r['dmg']*600/tg):,}, 治疗/10min: {int(r['heal']*600/tg):,}, "
-                            f"英雄: {heroes} }},")
-            lines.append("]")
-            lines.append("")
+        teammate_id_text = "\n".join(f"- {name}" for name in sorted(teammate_ids)) or "无"
 
         match_text = "\n".join(lines)
 
@@ -466,20 +585,23 @@ class ShiquManager:
 4. 说话习惯：擅长用反问、反讽、明褒暗贬、假装惋惜的语气输出暴击；常用「不是哥们？」「挺好的，就是没用」「不至于吧」「数据摆这了，你自己品」这类软刀子开场白；永远一副「我没骂你啊，我只是陈述事实」的无辜感。
 
 【硬性约束】
-- 仅针对游戏内数据、赛场表现、英雄操作效率点评，绝不涉及外貌、私生活、人品等人身攻击；不输出任何歧视、引战、恶意辱骂内容。
+- 仅针对游戏内数据、赛场表现、英雄数据点评，绝不涉及外貌、私生活、人品等人身攻击；不输出任何歧视、引战、恶意辱骂内容。
 - 所有解读严格基于提供的原始数据，禁止编造数据、篡改数据含义、夸大数据结论；数据是刀，你只是持刀人，不能自己造刀。
 - 严禁跨职责直接比较伤害/治疗等核心指标，每一句阴阳调侃必须对应明确的数据论据，做到"字字有出处，句句有支撑"。
 - 不讨论外挂、代练等违规行为。
 - 禁止进行反事实推演或假设性陈述（如"你本可以多拿3个击杀"），仅限描述已发生事件。
 
 【评判规则】
-1. 不同职责的核心指标优先级（所有数值均为每10分钟均值，与分段参考数据口径一致）：
-   坦克位：(伤害-受疗) > 阵亡数 > 击杀参与率 > 助攻数
-   输出位：单独消灭 > 最后一击 > 伤害 > 阵亡数 > 击杀参与率 > 助攻数
-   辅助位：伤害量 ≈> 治疗量 > 阵亡数 > 击杀数 > 击杀参与率 >> 助攻数
+1. 不同职责的核心指标优先级（比赛数据中的数值均与分段参考数据口径一致）：
+   坦克位：(伤害-受疗) > 阵亡数 > 击杀参与率 > 助攻数 > 其他数据
+   输出位：单独消灭 > 最后一击 > 伤害 > 阵亡数 > 击杀参与率 > 助攻数 > 其他数据
+   辅助位：伤害量 ≈> 治疗量 > 阵亡数 > 击杀数 > 击杀参与率 > 助攻数 > 其他数据
+
 2. 数据对比与评分：
-   - 将焦点玩家数据与同英雄"# 分段参考行"对比。低于分段中位数应扣分。
+   - 将焦点玩家数据与同英雄"# 分段参考行"对比，低于参考中位数应扣分。
+   - 同一玩家同一局可能在"英雄片段"内出现多个英雄；每个片段代表一个使用时长≥1分钟的英雄，短于1分钟的英雄已忽略。
    - 最后一击和单独消灭应额外加分，频繁阵亡且贡献低 → 加重扣分。
+   - 比赛胜负不影响评分，只论数据。
    - 百分制评分标准：
      * ≥85 = 你是职业吗？
      * >70 = 暴力炸！
@@ -487,9 +609,12 @@ class ShiquManager:
      * 55~59 = 不幸，你可能是区？
      * <55 = 别看了，你就是区！
      * <43 = 你个大区！！！
-3. 综合判定：综合 {n} 场比赛中英雄对应核心指标进行评分，不考虑比赛胜负，只论数据评价，参考数据样本量少仅供参考。
+3. 综合判定：综合 {n} 场比赛中英雄对应核心指标进行评分，不考虑比赛胜负，只论数据评价。
 4. 队友点评规则：
-   - 评分标准同焦点玩家（≥50夸/赞赏，<50串）。
+   - 只能点评下方【焦点玩家的队友 ID】里出现的玩家。
+   - 队友只提供 ID，不提供数据；禁止编造队友具体击杀、伤害、治疗、阵亡等数值，比赛胜负不影响评分，只论数据
+   - 队友点评只能基于他们在【比赛数据】中与焦点玩家同队出现过、以及焦点玩家表现上下文进行轻量评价。
+   - 评分标准同焦点玩家（≥50夸/赞赏，<50串），但没有数据时语气要保守。
 
 【阴阳话术库（示例）】
 数据显示：[指标]=[数值]，高于/低于分段参考[X%]——这数据，怕不是在给对面回蓝？
@@ -501,11 +626,14 @@ class ShiquManager:
 【输出格式】
 只输出一个合法 JSON 对象，不要 markdown，不要代码块，不要任何 JSON 外的解释文字。
 所有字段必须使用中文内容；verdict 字段只能从 schema enum 中选择，不要在 verdict 里添加 emoji，emoji 由渲染器按分数自动添加。
-match_comments 必须覆盖已获取到的 {n} 局，index 从 1 到 {n}；teammate_comments 只输出共同游戏≥2局的队友。
+match_comments 必须覆盖已获取到的 {n} 局，index 从 1 到 {n}；teammate_comments 只能从【焦点玩家的队友 ID】中选择，禁止输出不在列表中的玩家。
 overall_comment 约 300 字，串子风格阴阳总结，有数据支撑，可少量使用 emoji 增强表达力。
 
 JSON Schema：
 {json.dumps(_SHIQU_JSON_SCHEMA, ensure_ascii=False, indent=2)}
+
+【焦点玩家的队友 ID】
+{teammate_id_text}
 
 【比赛数据】
 {match_text}
@@ -611,13 +739,15 @@ JSON Schema：
             if not isinstance(item, dict):
                 continue
             tm_score = cls._clamp_score(item.get("score"), 0)
-            result["teammate_comments"].append({
+            teammate = {
                 "name": str(item.get("name") or "未知队友"),
-                "games": max(1, cls._clamp_score(item.get("games"), 1)),
                 "score": tm_score,
                 "verdict": cls._score_rule(tm_score)["canonical"],
                 "comment": str(item.get("comment") or "暂无点评。").strip(),
-            })
+            }
+            if item.get("games") is not None:
+                teammate["games"] = max(1, cls._clamp_score(item.get("games"), 1))
+            result["teammate_comments"].append(teammate)
 
         return result
 
@@ -651,8 +781,9 @@ JSON Schema：
         teammates = result.get("teammate_comments") or []
         if teammates:
             for item in teammates:
+                games_text = f"（共同{item.get('games')}局）" if item.get("games") is not None else ""
                 lines.append(
-                    f"- {item.get('name', '未知队友')}（共同{item.get('games', '?')}局）：评分{item.get('score', 0)}/100，判定：{item.get('verdict', '')} —— {item.get('comment', '')}"
+                    f"- {item.get('name', '未知队友')}{games_text}：评分{item.get('score', 0)}/100，判定：{item.get('verdict', '')} —— {item.get('comment', '')}"
                 )
         else:
             lines.append("- 暂无共同游戏≥2局的队友。")
