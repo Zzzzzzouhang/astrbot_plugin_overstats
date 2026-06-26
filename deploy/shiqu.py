@@ -97,17 +97,17 @@ _SHIQU_HTML_TMPL = '''<!DOCTYPE html>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html { background:#12161e; }
-  body { width:360px; max-width:360px; background:#12161e; color:#dce1eb; font-family:"PingFang SC","Microsoft YaHei","Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif; font-size:26px; line-height:1.78; padding:24px 18px; overflow-wrap:anywhere; word-break:break-word; }
-  h1 { font-size:34px; line-height:1.35; text-align:center; color:#f0b47c; margin-bottom:10px; padding-bottom:18px; border-bottom:2px solid #2a3040; }
-  h2 { font-size:31px; color:#c9986a; margin:26px 0 12px; }
-  h3 { font-size:29px; color:#e0c090; margin:20px 0 10px; }
+  body { width:100%; min-width:0; background:#12161e; color:#dce1eb; font-family:"Noto Sans CJK SC","Microsoft YaHei","PingFang SC",Arial,sans-serif; font-size:28px; line-height:1.76; padding:30px 26px; overflow-wrap:break-word; word-break:normal; font-variant-numeric:normal; font-feature-settings:"tnum" 0; }
+  h1 { font-size:36px; line-height:1.35; text-align:center; color:#f0b47c; margin-bottom:10px; padding-bottom:18px; border-bottom:2px solid #2a3040; }
+  h2 { font-size:33px; color:#c9986a; margin:28px 0 12px; }
+  h3 { font-size:31px; color:#e0c090; margin:22px 0 10px; }
   p { margin:8px 0; }
-  p.gamen { margin:12px 0; line-height:1.78; }
+  p.gamen { margin:12px 0; line-height:1.76; }
   p.gamen b { color:#e8d5b7; }
   p.gamen span { color:#dce1eb; font-weight:normal; }
   p.mate { margin:12px 0; color:#b0bec5; }
-  .score { font-size:58px; line-height:1.15; text-align:center; color:#ffd700; font-weight:bold; margin:16px 0 8px; }
-  .verdict { display:block; font-size:38px; line-height:1.35; text-align:center; font-weight:bold; margin:8px 0 34px; }
+  .score { font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif; font-size:60px; line-height:1.15; text-align:center; color:#ffd700; font-weight:bold; margin:16px 0 8px; letter-spacing:0; }
+  .verdict { display:block; font-size:39px; line-height:1.35; text-align:center; font-weight:bold; margin:8px 0 34px; }
   .verdict.god,.iv.god { color:#e67e22; }
   .verdict.boom,.iv.boom { color:#ff6b6b; }
   .verdict.ok,.iv.ok { color:#4ecdc4; }
@@ -207,7 +207,7 @@ class ShiquManager:
         return await self._plugin.html_render(
             _SHIQU_HTML_TMPL,
             {"title": title, "body": body_html, "footer": footer},
-            options={"type": "png", "width": 396, "viewport": {"width": 396, "height": 900}},
+            options={"type": "png", "width": 520, "viewport": {"width": 520, "height": 900}},
         )
 
     async def _enqueue(self, event) -> tuple[int, int]:
@@ -487,7 +487,7 @@ class ShiquManager:
      * 55~59 = 不幸，你可能是区？
      * <55 = 别看了，你就是区！
      * <43 = 你个大区！！！
-3. 综合判定：综合 {n} 场比赛中职责对应核心指标、KDA、胜负、英雄选择等因素进行评分。
+3. 综合判定：综合 {n} 场比赛中英雄对应核心指标进行评分，不考虑比赛胜负，只论数据评价，参考数据样本量少仅供参考。
 4. 队友点评规则：
    - 评分标准同焦点玩家（≥50夸/赞赏，<50串）。
 
@@ -796,7 +796,7 @@ JSON Schema：
 
         try:
             # 仅一条进度消息
-            yield event.plain_result(f"🔍 正在生成 {target_id} 是区吗判定书")
+            yield event.plain_result(f'🔍 正在生成 {target_id} 是区吗判定书，5分钟未返回请使用<qqbot-cmd-input text="ow是区吗结果" show="ow是区吗结果" reference="false" />查询')
 
             t0 = time.time()
             _ACTIVE_META[uid] = "拉取对局数据"
