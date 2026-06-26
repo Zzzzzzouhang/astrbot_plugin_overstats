@@ -20,13 +20,7 @@ import aiohttp
 
 logger = logging.getLogger("astrbot")
 
-_CREATE_NO_WINDOW = 0x08000000
-
-
-def _creationflags():
-    if sys.platform == "win32":
-        return _CREATE_NO_WINDOW
-    return 0
+_CREATIONFLAGS = 0x08000000 if sys.platform == "win32" else 0
 
 
 class ProcessRunner:
@@ -184,7 +178,7 @@ class ProcessRunner:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                     env=env,
-                    creationflags=_creationflags(),
+                    creationflags=_CREATIONFLAGS,
                 )
             except FileNotFoundError:
                 return False, f"python 可执行文件不存在: {python_exe}"
@@ -245,7 +239,7 @@ class ProcessRunner:
                         "taskkill", "/F", "/T", "/PID", str(pid),
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
-                        creationflags=_creationflags(),
+                        creationflags=_CREATIONFLAGS,
                     )
                     await asyncio.wait_for(kill_proc.communicate(), timeout=timeout)
                     killed = True

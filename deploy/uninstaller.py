@@ -233,22 +233,4 @@ class BackendUninstaller:
         except Exception:
             pass
 
-    # ------------------------------------------------------------------ #
-    # 快捷方法
-    # ------------------------------------------------------------------ #
 
-    async def uninstall_all(self, force: bool = False) -> UninstallResult:
-        """卸载全部后端资源（代码 + venv）。"""
-        return await self.uninstall(delete_code=True, delete_venv=True, force=force)
-
-    async def stop_only(self) -> UninstallResult:
-        """仅停止后端进程，不删除任何文件。"""
-        details: list[str] = []
-        if not self._runner.is_alive:
-            return UninstallResult(True, "后端进程未运行，无需停止", ["进程未运行"])
-        try:
-            ok, msg = await self._runner.stop(timeout=10.0)
-            details.append(f"进程停止: {msg}")
-            return UninstallResult(ok, msg, details)
-        except Exception as e:
-            return UninstallResult(False, f"停止进程异常: {e}", [f"异常: {e}"])

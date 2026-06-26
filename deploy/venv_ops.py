@@ -12,13 +12,7 @@ from pathlib import Path
 
 logger = logging.getLogger("astrbot")
 
-_CREATE_NO_WINDOW = 0x08000000
-
-
-def _creationflags():
-    if sys.platform == "win32":
-        return _CREATE_NO_WINDOW
-    return 0
+_CREATIONFLAGS = 0x08000000 if sys.platform == "win32" else 0
 
 
 def get_venv_python(venv_dir: str | Path) -> Path:
@@ -27,14 +21,6 @@ def get_venv_python(venv_dir: str | Path) -> Path:
     if sys.platform == "win32":
         return venv / "Scripts" / "python.exe"
     return venv / "bin" / "python"
-
-
-def get_venv_pip(venv_dir: str | Path) -> Path:
-    """跨平台获取 venv 内的 pip 可执行文件路径（部分场景直接调用更稳）。"""
-    venv = Path(venv_dir)
-    if sys.platform == "win32":
-        return venv / "Scripts" / "pip.exe"
-    return venv / "bin" / "pip"
 
 
 def exists(venv_dir: str | Path) -> bool:
@@ -51,7 +37,7 @@ async def _run_subprocess(cmd: list[str], cwd: str | Path | None = None, timeout
             cwd=str(cwd) if cwd else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            creationflags=_creationflags(),
+            creationflags=_CREATIONFLAGS,
         )
     except FileNotFoundError:
         return 127, "", f"command not found: {cmd[0]}"

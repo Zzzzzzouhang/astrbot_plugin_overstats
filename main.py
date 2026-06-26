@@ -23,6 +23,14 @@ except ImportError:
     # 兜底：插件作为顶层模块加载时相对导入可能失败
     from deploy import DeployManager  # type: ignore[no-redef]
 
+# OW 开庭模块（独立封装，避免主文件臃肿）
+try:
+    from .deploy.court import CourtManager
+    from .deploy.shiqu import ShiquManager
+except ImportError:
+    from deploy.court import CourtManager  # type: ignore[no-redef]
+    from deploy.shiqu import ShiquManager  # type: ignore[no-redef]
+
 logger = logging.getLogger("astrbot")
 
 @register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.2.0")
@@ -97,6 +105,10 @@ class OverstatsPlugin(Star):
         self._bot_nickname_cache: str | None = None  # 自动探测的机器人昵称缓存
         # 全量适配指令分发表：指令名/别名 -> 方法引用（懒构建，避免 __init__ 时方法未绑定）
         self._full_adapt_map: dict | None = None
+
+        # OW 开庭功能模块（测试阶段，独立封装）
+        self.court_manager = CourtManager(self)
+        self.shiqu_manager = ShiquManager(self)
 
         # auto 模式下按需自动启动后端（异步，不阻塞插件初始化）
         # 保存 task 引用，便于 terminate 时取消，避免遗留异步任务
@@ -884,8 +896,11 @@ class OverstatsPlugin(Star):
         is_group = self._is_group_message(event)
 
         # 群聊必须真实@机器人（排除 QQ 官方占位@），私聊放行，防止误触发
+        # 兜底：_is_real_at_bot 可能因 self_id 与 At.qq 格式不匹配返回 False，
+        # 但框架已在 WakingCheckStage 阶段判定 is_at_or_wake_command=True，此时直接放行
         if is_group and not self._is_real_at_bot(event):
-            return
+            if not (hasattr(event, "is_at_or_wake_command") and event.is_at_or_wake_command):
+                return
 
         msg = event.message_str.strip() if event.message_str else ""
 
@@ -1067,7 +1082,7 @@ class OverstatsPlugin(Star):
 ☁️ ➤ <qqbot-cmd-input text="/快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="/竞技英雄云图 " show="竞技云图" reference="false" />
 📋 全部功能 <qqbot-cmd-input text="/owhelp " show="owhelp" reference="false" />
 
-💡 必须@机器人，不能复制纯文本识别不到"""
+💡 必须<qqbot-cmd-input text=" " show="@机器人" reference="false"/>，不能复制纯文本识别不到"""
         return self._format_markdown_by_platform(event, text)
 
     @filter.command("快速指南", alias={'快捷指令'})
@@ -1157,7 +1172,7 @@ class OverstatsPlugin(Star):
 📋 ➤ <qqbot-cmd-input text="/今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="/昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="/周度总结 " show="本周" reference="false" />
 📊 ➤ <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="/大神对局 " show="大神对局" reference="false" /> ➤ <qqbot-cmd-input text="/单局详细 " show="单局详细" reference="false" />「数字」可加 锐评关/全员关
 📈 ➤ <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" />「可选对局数」 ➤ <qqbot-cmd-input text="/竞技强度 " show="竞技强度" reference="false" />「可选对局数」 ➤ <qqbot-cmd-input text="/获取段位分布 " show="获取段位分布" reference="false" />「可选 快速/竞技 段位」
-🗺️ ➤ <qqbot-cmd-input text="/快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="/竞技英雄云图 " show="竞技云图" reference="false" />
+🗺️ ➤ <qqbot-cmd-input text="/快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="/竞技英雄云图 " show="竞技云图" reference="false" /> ➤ <qqbot-cmd-input text="/历史段位 " show="历史段位" reference="false" />
 🏆 ➤ <qqbot-cmd-input text="/省榜 " show="省榜" reference="false" />「省份」「位置」 ➤ <qqbot-cmd-input text="/绝活榜 " show="绝活榜" reference="false" />「省份」「英雄」可加 开放
 ⚔️ ➤ <qqbot-cmd-input text="/威能 " show="威能" reference="false" />「英雄名」 ➤ <qqbot-cmd-input text="/ow英雄 " show="ow 英雄" reference="false" />「英雄名」可加 快速/竞技 段位 ➤ <qqbot-cmd-input text="/banpick " show="banpick" reference="false" />「可选 快速/竞技 段位」 ➤ <qqbot-cmd-input text="/mappick " show="mappick" reference="false" />
 🌍 ➤ <qqbot-cmd-input text="/同玩查询 " show="同玩查询" reference="false" />「ID1」「ID2」 ➤ <qqbot-cmd-input text="/商店 " show="商店" reference="false" /> ➤ <qqbot-cmd-input text="/皮肤搜索 " show="皮肤搜索" reference="false" /> ➤ <qqbot-cmd-input text="/ow赛事 " show="ow 赛事" reference="false" />
@@ -1468,6 +1483,20 @@ class OverstatsPlugin(Star):
             yield self._plain_error_result(event, "❌ 处理图片请求时发生 system 错误")
         finally:
             await self._finalize_business_status_prompt(prompt_token, success)
+
+    # ── OW 开庭（测试阶段）─────────────────────────────────────
+    @filter.command("ow开庭", alias={'开庭'})
+    async def ow_court(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        """OW 开庭：AI 对单局数据进行电竞法庭风格分析（测试阶段，仅白名单/管理员可用）。"""
+        async for r in self.court_manager.run_court(event, arg1, arg2):
+            yield r
+
+    # ── OW 是区吗（测试阶段）───────────────────────────────────
+    @filter.command("ow是区吗", alias={'是区吗'})
+    async def ow_shiqu(self, event: AstrMessageEvent, arg1: str = ""):
+        """OW 是区吗：基于最近 12 场对局评估玩家是否为坑（测试阶段，仅白名单/管理员可用）。"""
+        async for r in self.shiqu_manager.run(event, arg1):
+            yield r
 
     @filter.command("历史段位", alias={'历届段位'})
     async def dashen_rank_history(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
 
 logger = logging.getLogger("astrbot")
 
@@ -77,16 +76,6 @@ PATCH_NOTES_INTERNATIONAL_PROXY = {patch_notes_proxy!r}
 
 ANALYSIS_PERSONA_PROMPT = {persona_prompt!r}
 '''
-
-
-def _escape_string(s: Any) -> str:
-    """将用户输入安全转为 Python 字符串字面量。
-
-    使用 repr() 让 Python 自行处理转义，避免注入风险。None / 空值统一转为空串。
-    """
-    if s is None:
-        return ""
-    return str(s)
 
 
 def _parse_bulk_accounts(bulk_text: str) -> list[dict]:
@@ -313,7 +302,7 @@ def generate_config(config: dict) -> str:
     Returns:
         合法的 Python 配置文件内容字符串
     """
-    host = _escape_string(config.get("backend_host", "127.0.0.1"))
+    host = str(config.get("backend_host", "127.0.0.1") or "")
     port = int(config.get("backend_port", 18081) or 18081)
     webui_accounts = config.get("dashen_accounts", []) or []
 
@@ -334,12 +323,12 @@ def generate_config(config: dict) -> str:
         accounts = webui_accounts
     dts = int(config.get("dashen_dts", 2026) or 2026)
     server = int(config.get("dashen_server", 1) or 1)
-    dashen_proxy = _escape_string(config.get("dashen_international_proxy", ""))
-    ow_esports_api_key = _escape_string(config.get("ow_esports_api_key", ""))
-    analysis_base_url = _escape_string(config.get("analysis_base_url", ""))
-    analysis_api_key = _escape_string(config.get("analysis_api_key", ""))
-    analysis_model = _escape_string(config.get("analysis_model", ""))
-    persona_prompt = _escape_string(config.get("analysis_persona_prompt", ""))
+    dashen_proxy = str(config.get("dashen_international_proxy", "") or "")
+    ow_esports_api_key = str(config.get("ow_esports_api_key", "") or "")
+    analysis_base_url = str(config.get("analysis_base_url", "") or "")
+    analysis_api_key = str(config.get("analysis_api_key", "") or "")
+    analysis_model = str(config.get("analysis_model", "") or "")
+    persona_prompt = str(config.get("analysis_persona_prompt", "") or "")
 
     # 新增可调配置项（从 AstrBot 配置读取，回退到原项目默认值）
     use_stream_response = bool(config.get("use_stream_response", True))
@@ -348,13 +337,13 @@ def generate_config(config: dict) -> str:
     dashen_rate_limit_window = float(config.get("dashen_account_rate_limit_window_seconds", 1.0) or 1.0)
     dashen_failure_cooldown = int(config.get("dashen_account_failure_cooldown_seconds", 60) or 60)
     dashen_max_concurrent = int(config.get("dashen_max_concurrent_requests", 2) or 2)
-    ow_guess_asset_root = _escape_string(config.get("ow_guess_asset_root", "ow_guess_assets"))
+    ow_guess_asset_root = str(config.get("ow_guess_asset_root", "ow_guess_assets") or "")
     dashen_current_season = int(config.get("dashen_current_season", 23) or 23)
     dashen_history_start_season = int(config.get("dashen_history_start_season", 15) or 15)
     ow_hero_leaderboard_cn_season = int(config.get("ow_hero_leaderboard_cn_season", 3) or 3)
-    analysis_proxy = _escape_string(config.get("analysis_proxy", ""))
+    analysis_proxy = str(config.get("analysis_proxy", "") or "")
     patch_notes_use_proxy = bool(config.get("patch_notes_use_international_proxy", False))
-    patch_notes_proxy = _escape_string(config.get("patch_notes_international_proxy", ""))
+    patch_notes_proxy = str(config.get("patch_notes_international_proxy", "") or "")
 
     return _CONFIG_TEMPLATE.format(
         host=host,

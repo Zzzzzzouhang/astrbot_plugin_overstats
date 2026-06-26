@@ -264,5 +264,12 @@
     "hint": "维护模式下白名单内的个人可正常使用所有功能，跳过权限拦截。注意：QQ官方机器人需填写个人openid（而非QQ号），其他平台填用户ID。",
     "obvious_hint": true,
     "default": []
+  },
+  "sqlite_db_path": {
+    "description": "SQLite 数据库路径（开庭分段参考用）",
+    "type": "string",
+    "hint": "留空则不启用。填写 Overstats 后端 match_stats.sqlite3 的完整路径（通常为 Overstats/src/db/match_stats.sqlite3），开庭时将读取本地数据库中的分段英雄统计数据，作为对局分析的参考依据。",
+    "obvious_hint": true,
+    "default": ""
   }
 }

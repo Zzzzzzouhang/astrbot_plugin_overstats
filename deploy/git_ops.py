@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import sys
 from pathlib import Path
 
 logger = logging.getLogger("astrbot")
 
 # Windows 下 subprocess 需要避免控制台窗口弹出
-_CREATE_NO_WINDOW = 0x08000000
+_CREATIONFLAGS = 0x08000000 if sys.platform == "win32" else 0
 
 # 默认 GitHub 加速代理地址（按优先级排列）
 DEFAULT_PROXY_PRIMARY = "https://gh.llkk.cc/"
@@ -39,14 +40,6 @@ _NETWORK_ERROR_PATTERNS = [
     r"Protocol error",
     r"transfer closed with outstanding read data remaining",
 ]
-
-
-def _creationflags():
-    """跨平台获取子进程创建标志，Windows 下隐藏控制台窗口。"""
-    import sys
-    if sys.platform == "win32":
-        return _CREATE_NO_WINDOW
-    return 0
 
 
 def _is_network_error(stderr: str) -> bool:
@@ -130,7 +123,7 @@ async def _run_git(args: list[str], cwd: str | Path | None = None, timeout: floa
             cwd=str(cwd) if cwd else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            creationflags=_creationflags(),
+            creationflags=_CREATIONFLAGS,
         )
     except FileNotFoundError:
         # git 未安装
