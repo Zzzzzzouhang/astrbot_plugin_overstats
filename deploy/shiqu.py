@@ -128,6 +128,8 @@ _VERDICT_BY_LABEL = {label: rule for rule in _VERDICT_RULES for label in rule["l
 
 # ── CD ──
 _SHIQU_COOLDOWN_KV_PREFIX = "ow_shiqu_cooldown"
+_SHIQU_PENDING_KV_PREFIX = "ow_shiqu_pending"
+_SHIQU_PENDING_SECONDS = 300  # 5 分钟内再发确认
 
 # ── AstrBot 文转图模板 ──────────────────────────────────────
 
@@ -970,18 +972,6 @@ JSON Schema：
     async def run(self, event, bnet_id_input: str = ""):
         uid = self._user_key(event)
 
-        # CD 检查
-        cd_ok, cd_remain = await self._check_cooldown(event)
-        if not cd_ok:
-            m, s = divmod(cd_remain, 60)
-            h, m = divmod(m, 60)
-            remain_str = f"{int(h)}时{int(m)}分{int(s)}秒" if h > 0 else f"{int(m)}分{int(s)}秒"
-            yield event.plain_result(
-                f"⏳ 是区吗冷却中，剩余 {remain_str}。\n"
-                f'请使用 <qqbot-cmd-input text="ow是区吗结果" show="ow是区吗结果" reference="false" /> 查看上次判定结果。'
-            )
-            return
-
         # 普通用户开关
         if not self._is_admin(event) and not self._plugin._is_whitelisted(event):
             cd_map = self._get_config_map()
@@ -995,6 +985,53 @@ JSON Schema：
             yield event.plain_result("❌ 请提供 BattleTag，或先使用 /绑定 绑定。\n用法：是区吗 <battle_tag>")
             return
 
+        # ── 检查 pending 状态 ──
+        pending_key = f"{_SHIQU_PENDING_KV_PREFIX}:{uid}"
+        cd_ok, cd_remain = await self._check_cooldown(event)
+        try:
+            pending_ts = await self._plugin.get_kv_data(pending_key, 0)
+        except Exception:
+            pending_ts = 0
+        is_pending = int(pending_ts or 0) > 0 and (int(time.time()) - int(pending_ts or 0)) < _SHIQU_PENDING_SECONDS
+
+        # pending 有效且无 CD → 清除 pending，执行查询
+        if is_pending and cd_ok:
+            await self._plugin.put_kv_data(pending_key, 0)
+            await self._do_query(event, uid, target_id)
+            return
+
+        # ── 首次触发：展示上次结果 + 提示 ──
+        # 先展示上次结果图片
+        record = self._load_user_record(uid)
+        result_path_str = str(record.get("result_path") or "") if record else ""
+        if result_path_str:
+            rp = Path(result_path_str)
+            if rp.exists():
+                try:
+                    result = json.loads(rp.read_text(encoding="utf-8"))
+                    if isinstance(result, dict):
+                        url = await self._render_result_image(result, generated_at=str(record.get("generated_at") or ""))
+                        _LAST_IMAGE[uid] = url
+                        yield event.image_result(url)
+                except Exception as e:
+                    logger.warning(f"[是区吗] 展示上次结果失败: {e}")
+
+        if not cd_ok:
+            # 有 CD → 展示上次结果 + CD 剩余时间
+            m, s = divmod(cd_remain, 60)
+            h, m = divmod(m, 60)
+            remain_str = f"{int(h)}时{int(m)}分{int(s)}秒" if h > 0 else f"{int(m)}分{int(s)}秒"
+            yield event.plain_result(f"⏳ 冷却中，剩余 {remain_str}，届时再发「是区吗」开启新查询。")
+        else:
+            # 无 CD → 设置 pending，提示 5 分钟内再发确认
+            try:
+                await self._plugin.put_kv_data(pending_key, int(time.time()))
+            except Exception:
+                pass
+            yield event.plain_result("👆 以上是上次判定结果。如要开启新查询，请在 **5 分钟内**再次发送「是区吗」。")
+
+    async def _do_query(self, event, uid: str, target_id: str):
+        """执行实际的是区吗查询流程。"""
         # ── 重复触发检查 ──
         async with _QUEUE_LOCK:
             if uid in _ACTIVE_META:

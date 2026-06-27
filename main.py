@@ -1507,7 +1507,7 @@ class OverstatsPlugin(Star):
     # ── OW 是区吗 ────────────────────────────────────
     @filter.command("ow是区吗", alias={'是区吗'})
     async def ow_shiqu(self, event: AstrMessageEvent, arg1: str = ""):
-        """OW 是区吗：基于最近 12 场对局评估玩家是否为坑（分级 CD：管理员 0 / 白名单 30min / 普通 4h）。"""
+        """OW 是区吗：展示上次判定结果。5 分钟内再次发送确认后开启新查询（分级 CD）。"""
         async for r in self.shiqu_manager.run(event, arg1):
             yield r
 
