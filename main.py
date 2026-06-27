@@ -1030,6 +1030,8 @@ class OverstatsPlugin(Star):
 
         仅收录业务查询指令；管理/部署类指令需真实@机器人触发（避免权限绕过）。
         表与 @filter.command 声明保持同步，新增业务指令时在此追加一行即可。
+        注意：「ow是区吗」/「ow开庭」等高成本 AI 指令不得加入此表，
+        必须通过 @机器人显式触发。
         """
         if self._full_adapt_map is not None:
             return self._full_adapt_map

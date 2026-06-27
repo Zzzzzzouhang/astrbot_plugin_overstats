@@ -282,10 +282,7 @@ def build_reference_text(
 
     parts = []
     for name, (median, samples) in by_name.items():
-        if samples > 0:
-            parts.append(f"{name}分段中位{median:.1f}({samples}样本)")
-        else:
-            parts.append(f"{name}分段中位{median:.1f}")
+        parts.append(f"{name}分段中位{median:.1f}")
 
     if not parts:
         return ""
@@ -324,10 +321,7 @@ def build_broad_reference_text(
 
     parts = []
     for name, (median, samples) in by_name.items():
-        if samples > 0:
-            parts.append(f"{name}中位{median:.1f}({samples}样本)")
-        else:
-            parts.append(f"{name}中位{median:.1f}")
+        parts.append(f"{name}中位{median:.1f}")
 
     if not parts:
         return ""

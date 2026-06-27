@@ -271,5 +271,11 @@
     "hint": "留空则不启用。填写 Overstats 后端 match_stats.sqlite3 的完整路径（通常为 Overstats/src/db/match_stats.sqlite3），开庭时将读取本地数据库中的分段英雄统计数据，作为对局分析的参考依据。",
     "obvious_hint": true,
     "default": ""
+  },
+  "shiqu_cd_map": {
+    "description": "是区吗分级CD配置（JSON）",
+    "type": "text",
+    "hint": "按角色分级的冷却时间（秒）。JSON 格式：{\"normal\": 普通用户, \"whitelist\": 白名单, \"admin\": 管理员}。默认 {\"normal\":14400,\"whitelist\":1800,\"admin\":0}。",
+    "default": "{\"normal\":14400,\"whitelist\":1800,\"admin\":0}"
   }
 }

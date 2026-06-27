@@ -63,7 +63,7 @@ def _infer_hero_guid_from_stat_map(stat_map: dict, fallback_hero_guid: str = "",
         return ""
     return fallback_hero_guid if allow_fallback else ""
 
-_VERDICT_ENUM = ["你是职业吗？", "暴力炸！", "恭喜，你不是区！", "不幸，你可能是区？", "别看了，你就是区！", "你个大区！！！"]
+_VERDICT_ENUM = ["你是职业吗？", "来了，暴力炸！", "化蛹成蝶（？）", "恭喜，你不是区！", "不幸，你可能是区？", "哦灭跌多，你就是区！", "你个大区！！！"]
 _SHIQU_JSON_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -115,15 +115,19 @@ _LAST_IMAGE: dict[str, str] = {}   # uid → 上次生成的图片文件路径�
 _QUEUE_LOCK = asyncio.Lock()
 
 _VERDICT_RULES = [
-    {"score_min": 85, "labels": ("你是职业吗？",), "canonical": "你是职业吗？", "emoji": "😱", "class": "god"},
-    {"score_min": 71, "labels": ("暴力炸！",), "canonical": "暴力炸！", "emoji": "🤤", "class": "boom"},
+    {"score_min": 83, "labels": ("你是职业吗？",), "canonical": "你是职业吗？", "emoji": "😱", "class": "god"},
+    {"score_min": 75, "labels": ("来了，暴力炸！",), "canonical": "来了，暴力炸！", "emoji": "🤤", "class": "boom"},
+    {"score_min": 68, "labels": ("化蛹成蝶（？）",), "canonical": "化蛹成蝶（？）", "emoji": "🦋", "class": "butterfly"},
     {"score_min": 60, "labels": ("恭喜，你不是区！", "恭喜，你不是区"), "canonical": "恭喜，你不是区！", "emoji": "😂", "class": "ok"},
-    {"score_min": 55, "labels": ("不幸，你可能是区？",), "canonical": "不幸，你可能是区？", "emoji": "🤔", "class": "mid"},
-    {"score_min": 43, "labels": ("别看了，你就是区！",), "canonical": "别看了，你就是区！", "emoji": "🤡", "class": "bad"},
+    {"score_min": 52, "labels": ("不幸，你可能是区？",), "canonical": "不幸，你可能是区？", "emoji": "🤔", "class": "mid"},
+    {"score_min": 43, "labels": ("哦灭跌多，你就是区！", "哦灭跌多，你就是区"), "canonical": "哦灭跌多，你就是区！", "emoji": "🎉", "class": "bad"},
     {"score_min": 0, "labels": ("你个大区！！！",), "canonical": "你个大区！！！", "emoji": "😡", "class": "terrible"},
 ]
 
 _VERDICT_BY_LABEL = {label: rule for rule in _VERDICT_RULES for label in rule["labels"]}
+
+# ── CD ──
+_SHIQU_COOLDOWN_KV_PREFIX = "ow_shiqu_cooldown"
 
 # ── AstrBot 文转图模板 ──────────────────────────────────────
 
@@ -145,6 +149,7 @@ _SHIQU_HTML_TMPL = '''<!DOCTYPE html>
   .verdict { display:block; font-size:78px; line-height:1.25; text-align:center; font-weight:bold; margin:16px 0 64px; }
   .verdict.god,.iv.god { color:#e67e22; }
   .verdict.boom,.iv.boom { color:#ff6b6b; }
+  .verdict.butterfly,.iv.butterfly { color:#a78bfa; }
   .verdict.ok,.iv.ok { color:#4ecdc4; }
   .verdict.mid,.iv.mid { color:#f9ca24; }
   .verdict.bad,.iv.bad { color:#e17055; }
@@ -174,6 +179,44 @@ class ShiquManager:
         if self._is_admin(event):
             return True
         return self._plugin._is_whitelisted(event)
+
+    # ── 分级 CD ──
+
+    def _get_cd_seconds(self, event) -> int:
+        """根据角色返回冷却秒数：管理员0 / 白名单30min / 普通4h。"""
+        # ponytail: 单行 JSON 配置，省掉三个独立配置项
+        cd_raw = self._plugin.config.get("shiqu_cd_map", "{}") or "{}"
+        try:
+            cd_map = json.loads(cd_raw) if isinstance(cd_raw, str) else cd_raw
+        except Exception:
+            cd_map = {}
+        if self._is_admin(event):
+            return max(0, int(cd_map.get("admin", 0) or 0))
+        if self._plugin._is_whitelisted(event):
+            return max(0, int(cd_map.get("whitelist", 1800) or 1800))
+        return max(0, int(cd_map.get("normal", 14400) or 14400))
+
+    async def _check_cooldown(self, event) -> tuple:
+        """返回 (ok: bool, remaining_seconds: int)。"""
+        cd = self._get_cd_seconds(event)
+        if cd <= 0:
+            return True, 0
+        key = f"{_SHIQU_COOLDOWN_KV_PREFIX}:{self._user_key(event)}"
+        try:
+            last = await self._plugin.get_kv_data(key, 0)
+            elapsed = int(time.time()) - int(last)
+            if elapsed >= cd:
+                return True, 0
+            return False, cd - elapsed
+        except Exception:
+            return True, 0
+
+    async def _set_cooldown(self, event):
+        key = f"{_SHIQU_COOLDOWN_KV_PREFIX}:{self._user_key(event)}"
+        try:
+            await self._plugin.put_kv_data(key, int(time.time()))
+        except Exception:
+            pass
 
     # ── 排队 ──
 
@@ -296,6 +339,17 @@ class ShiquManager:
 
     # ── 数据获取 ──
 
+    @staticmethod
+    def _get_match_mode(match_data: dict) -> str:
+        """从对局数据中提取 gameMode 字符串。"""
+        detail = match_data.get("detail", {}) or {}
+        detail_data = detail.get("data") or {} if isinstance(detail, dict) else {}
+        source = match_data.get("source_match", {}) or {}
+        return str(detail_data.get("gameMode") or source.get("gameMode")
+                   or source.get("instanceType") or "")
+
+    _PRESET_MODES = {"SportPreset", "LeisurePreset"}
+
     async def _fetch_one_match(self, bnet_id: str, index: int) -> Optional[dict]:
         url = f"{self._plugin.base_url}/dashen-match/detail"
         try:
@@ -310,9 +364,28 @@ class ShiquManager:
             return None
 
     async def _fetch_12_matches(self, bnet_id: str) -> list[dict]:
-        tasks = [self._fetch_one_match(bnet_id, i) for i in range(12)]
-        results = await asyncio.gather(*tasks)
-        return [r for r in results if r is not None]
+        """优先 SportPreset/LeisurePreset，不足 12 场时补充抓取。"""
+
+        # ── 第一轮：扫 0-39 共 40 场，筛预设职责 ──
+        raw = await asyncio.gather(*[self._fetch_one_match(bnet_id, i) for i in range(40)])
+        all_matches = [m for m in raw if m is not None]
+        preset = [m for m in all_matches if self._get_match_mode(m) in self._PRESET_MODES]
+
+        if len(preset) >= 12:
+            return preset[:12]
+
+        # ── 第二轮：补充其他模式（如快速对局）凑够 12 ──
+        other = [m for m in all_matches if m not in preset]
+        combined = preset + other
+        if len(combined) >= 12:
+            return combined[:12]
+
+        # ── 还不够：继续往后拉 index 40-59 ──
+        more = await asyncio.gather(*[self._fetch_one_match(bnet_id, i) for i in range(40, 60)])
+        extra = [m for m in more if m is not None]
+        combined = (preset + other + extra)[:12]
+
+        return combined
 
     async def _fetch_teammate_details(self, detail_data: dict, target_id: str, index: int) -> None:
         """串行请求焦点玩家队伍每个成员的详细英雄数据，附加 _heroList 到玩家对象。"""
@@ -603,11 +676,12 @@ class ShiquManager:
    - 最后一击和单独消灭应额外加分，频繁阵亡且贡献低 → 加重扣分。
    - 比赛胜负不影响评分，只论数据。
    - 百分制评分标准：
-     * ≥85 = 你是职业吗？
-     * >70 = 暴力炸！
-     * 60~70 = 恭喜，你不是区！
-     * 55~59 = 不幸，你可能是区？
-     * <55 = 别看了，你就是区！
+     * ≥83 = 你是职业吗？
+     * 82~75 = 来了，暴力炸！
+     * 74~68 = 化蛹成蝶（？）
+     * 67~60 = 恭喜，你不是区！
+     * 59~52 = 不幸，你可能是区？
+     * 51~43 = 哦灭跌多，你就是区！
      * <43 = 你个大区！！！
 3. 综合判定：综合 {n} 场比赛中英雄对应核心指标进行评分，不考虑比赛胜负，只论数据评价。
 4. 队友点评规则：
@@ -840,6 +914,7 @@ JSON Schema：
             c = {
                 "god": "#e67e22",
                 "boom": "#ff6b6b",
+                "butterfly": "#a78bfa",
                 "ok": "#4ecdc4",
                 "mid": "#f9ca24",
                 "bad": "#e17055",
@@ -897,6 +972,18 @@ JSON Schema：
 
         if not self.check_access(event):
             yield event.plain_result("🔒 是区吗功能处于测试阶段，仅对白名单/管理员开放。")
+            return
+
+        # CD 检查
+        cd_ok, cd_remain = await self._check_cooldown(event)
+        if not cd_ok:
+            m, s = divmod(cd_remain, 60)
+            h, m = divmod(m, 60)
+            remain_str = f"{int(h)}时{int(m)}分{int(s)}秒" if h > 0 else f"{int(m)}分{int(s)}秒"
+            yield event.plain_result(
+                f"⏳ 是区吗冷却中，剩余 {remain_str}。\n"
+                f'请使用 <qqbot-cmd-input text="ow是区吗结果" show="ow是区吗结果" reference="false" /> 查看上次判定结果。'
+            )
             return
 
         # 获取 bnet_id
@@ -986,6 +1073,9 @@ JSON Schema：
             })
             yield event.image_result(url)
             logger.info(f"[是区吗] 总耗时={time.time() - t0:.1f}s (render={time.time() - t3:.1f}s)")
+
+            # 设置 CD
+            await self._set_cooldown(event)
 
         except Exception as exc:
             logger.error(f"[是区吗] error: {exc}", exc_info=True)
