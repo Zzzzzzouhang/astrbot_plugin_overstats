@@ -146,7 +146,7 @@ _SHIQU_HTML_TMPL = '''<!DOCTYPE html>
   p.gamen { margin:24px 0; line-height:1.64; }
   p.gamen b { color:#e8d5b7; }
   p.gamen span { color:#dce1eb; font-weight:normal; }
-  p.mate { margin:24px 0; color:#b0bec5; }
+  p.mate,span.mate { color:#b0bec5; }
   .score { font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif; font-size:120px; line-height:1.12; text-align:center; color:#ffd700; font-weight:bold; margin:32px 0 16px; letter-spacing:0; }
   .verdict { display:block; font-size:78px; line-height:1.25; text-align:center; font-weight:bold; margin:16px 0 64px; }
   .verdict.god,.iv.god { color:#e67e22; }
@@ -216,6 +216,13 @@ class ShiquManager:
         key = f"{_SHIQU_COOLDOWN_KV_PREFIX}:{self._user_key(event)}"
         try:
             await self._plugin.put_kv_data(key, int(time.time()))
+        except Exception:
+            pass
+
+    async def _reset_cooldown(self, event):
+        key = f"{_SHIQU_COOLDOWN_KV_PREFIX}:{self._user_key(event)}"
+        try:
+            await self._plugin.put_kv_data(key, 0)
         except Exception:
             pass
 
@@ -863,7 +870,7 @@ JSON Schema：
             for item in teammates:
                 games_text = f"（共同{item.get('games')}局）" if item.get("games") is not None else ""
                 lines.append(
-                    f"- {item.get('name', '未知队友')}{games_text}：评分{item.get('score', 0)}/100，判定：{item.get('verdict', '')} —— {item.get('comment', '')}"
+                    f"- {item.get('name', '未知队友')}{games_text}：评分{item.get('score', 0)}/100，{item.get('verdict', '')}{item.get('comment', '')}"
                 )
         else:
             lines.append("- 暂无共同游戏≥2局的队友。")
@@ -961,9 +968,14 @@ JSON Schema：
                     buf.append(f'<p class="gamen"><b>{head}：</b><span>{tail}</span></p>')
                 else:
                     buf.append(f'<p class="gamen"><b>{s}</b></p>')
-            # 队友条目："- 玩家名...":"
+            # 队友条目："- 玩家名...":" → 名前部分正文字色，点评内容 mate 色
             elif s.startswith("- "):
-                buf.append(f'<p class="mate">{ShiquManager._decorate_inline_verdicts(s)}</p>')
+                content = s[2:]
+                if "：" in content:
+                    prefix, rest = content.split("：", 1)
+                    buf.append(f'<p>- {prefix}：<span class="mate">{ShiquManager._decorate_inline_verdicts(rest)}</span></p>')
+                else:
+                    buf.append(f'<p class="mate">{ShiquManager._decorate_inline_verdicts(s)}</p>')
             # 免责声明
             elif "功能仅限娱乐" in s:
                 buf.append(f'<p class="disclaimer">{s}</p>')
@@ -1093,12 +1105,14 @@ JSON Schema：
             _ACTIVE_META[uid] = "AI 生成判定"
             llm_text = await self._call_astrbot_llm(event, prompt)
             if not llm_text:
-                yield event.plain_result("❌ AI 判定生成失败：LLM 调用异常，请稍后重试。")
+                await self._reset_cooldown(event)
+                yield event.plain_result("❌ AI 判定生成失败：LLM 调用异常，已重置冷却，请重试。")
                 return
             self._atomic_write_text(llm_raw_path, llm_text)
             result = self._parse_llm_json_result(llm_text, target_id)
             if result is None:
-                yield event.plain_result("❌ AI 判定生成失败：返回内容不是合法 JSON，请稍后重试。")
+                await self._reset_cooldown(event)
+                yield event.plain_result("❌ AI 判定生成失败：返回内容不是合法 JSON，已重置冷却，请重试。")
                 return
             self._atomic_write_json(result_path, result)
             t3 = time.time()
