@@ -275,7 +275,7 @@
   "shiqu_cd_map": {
     "description": "是区吗分级配置（JSON）",
     "type": "text",
-    "hint": "JSON 格式：{\"normal\":普通CD秒,\"whitelist\":白名单CD秒,\"admin\":管理员CD秒,\"match_count\":抓取场数,\"normal_enabled\":普通用户开关}。默认 {\"normal\":14400,\"whitelist\":1800,\"admin\":0,\"match_count\":12,\"normal_enabled\":false}。",
+    "hint": "JSON 格式：{\"normal\":普通CD秒,\"whitelist\":白名单CD秒,\"admin\":管理员CD秒,\"match_count\":抓取场数,\"normal_enabled\":普通用户开关true 开启 / false 关闭。12场输入token大概1.9w，30场输入token大概3.3w}。默认 {\"normal\":14400,\"whitelist\":1800,\"admin\":0,\"match_count\":12,\"normal_enabled\":false}。",
     "default": "{\"normal\":14400,\"whitelist\":1800,\"admin\":0,\"match_count\":12,\"normal_enabled\":false}"
   }
 }
