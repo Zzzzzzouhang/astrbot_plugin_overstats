@@ -1004,7 +1004,8 @@ JSON Schema：
         # pending 有效且无 CD → 清除 pending，执行查询
         if is_pending and cd_ok:
             await self._plugin.put_kv_data(pending_key, 0)
-            await self._do_query(event, uid, target_id)
+            async for r in self._do_query(event, uid, target_id):
+                yield r
             return
 
         # ── 首次触发：展示上次结果 + 提示 ──
