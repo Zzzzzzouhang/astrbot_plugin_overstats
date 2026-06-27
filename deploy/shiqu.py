@@ -157,6 +157,7 @@ _SHIQU_HTML_TMPL = '''<!DOCTYPE html>
   .verdict.bad,.iv.bad { color:#e17055; }
   .verdict.terrible,.iv.terrible { color:#d63031; }
   .iv { font-weight:bold; }
+  .disclaimer { font-size:36px; color:#6e7681; opacity:0.55; text-align:center; margin:32px 0; }
   .footer { margin-top:56px; padding-top:28px; border-top:2px solid #2a3040; color:#6e7681; font-size:32px; line-height:1.45; text-align:center; }
 </style></head><body>
   <h1>{{ title }}</h1>
@@ -626,42 +627,44 @@ class ShiquManager:
 
             if tm:
                 _append_players("队友", tm, include_detail=True, include_reference=True)
-            if en:
-                _append_players("对手", en, include_detail=False, include_reference=False)
+            # ponytail: 对手数据已删除
             lines.append("}")
             lines.append("")
 
         n = len(matches)
 
-        # ── 队友 ID 汇总（只给模型识别可点评对象，不提供数据）──
-        teammate_ids = set()
+        # ── 好友 ID 汇总（同玩≥3局才列入，只给模型识别可点评对象）──
+        teammate_counts: dict[str, int] = {}
         for m in matches:
             detail_data = (m.get("detail", {}) or {}).get("data") or {}
+            seen = set()
             for p in detail_data.get("teammateList", []):
                 if not isinstance(p, dict):
                     continue
                 name = str(p.get("name", ""))
-                if name == target_id:
+                if name == target_id or name in seen:
                     continue
                 if name:
-                    teammate_ids.add(name)
+                    seen.add(name)
+                    teammate_counts[name] = teammate_counts.get(name, 0) + 1
 
-        teammate_id_text = "\n".join(f"- {name}" for name in sorted(teammate_ids)) or "无"
+        friend_ids = sorted(name for name, cnt in teammate_counts.items() if cnt >= 3)
+        friend_id_text = "\n".join(f"- {name}" for name in friend_ids) or "无"
 
         match_text = "\n".join(lines)
 
         return f"""你是守望先锋串子型数据分析师，圈内人称"数据带阴阳师"。
 
 【角色定义】
-1. 深耕守望先锋全英雄机制、版本环境、职业赛事与国服天梯生态，所有点评 100% 以游戏数据为唯一依据，拒绝空口黑屁、主观臆断。熟稔「我是区吗」全社区梗文化，对国服鱼塘到高分段的众生相了如指掌，鉴区准确率堪比官方外挂检测。
-2. 人设底色：表面永远保持「我只是个念数据的中立人」的客观嘴脸，语气平淡像读财报，实则字字藏刀、句句带刺，精准戳中玩家最痛的操作痛点；核心立场是纯纯乐子人，看数据如同看乐子，毒舌但不恶毒，嘲讽只锁死游戏表现，绝不越界人身攻击。
-3. 核心信条：数据不会说谎，但我可以用它扎心。每一句阴阳都必须有对应数据做支点，做到「字字有出处，句句能扎心」；永远不直接说「你菜」，只把数据摆出来，再贴心地帮你翻译翻译什么叫大区。
-4. 说话习惯：擅长用反问、反讽、明褒暗贬、假装惋惜的语气输出暴击；常用「不是哥们？」「挺好的，就是没用」「不至于吧」「数据摆这了，你自己品」这类软刀子开场白；永远一副「我没骂你啊，我只是陈述事实」的无辜感。
+1. 深耕守望先锋全英雄机制、版本环境、职业赛事与国服天梯生态，所有点评 100% 以游戏数据为唯一依据，拒绝空口黑屁、主观臆断。熟稔全社区梗文化，对国服鱼塘到高分段的众生相了如指掌，鉴区准确率堪比官方外挂检测。
+2. 人设底色：表面永远保持「我只是个念数据的中立人」的客观嘴脸，语气平淡像读财报，实则字字藏刀、句句带刺，精准戳中玩家最痛的操作痛点；
+3. 核心立场: 是纯纯乐子人，看数据如同看乐子，毒舌但不恶毒，嘲讽只锁死游戏表现，绝不越界人身攻击。
+4. 说话习惯：擅长用反问、反讽、明褒暗贬、假装惋惜的语气输出暴击；
 
 【硬性约束】
 - 仅针对游戏内数据、赛场表现、英雄数据点评，绝不涉及外貌、私生活、人品等人身攻击；不输出任何歧视、引战、恶意辱骂内容。
-- 所有解读严格基于提供的原始数据，禁止编造数据、篡改数据含义、夸大数据结论；数据是刀，你只是持刀人，不能自己造刀。
-- 严禁跨职责直接比较伤害/治疗等核心指标，每一句阴阳调侃必须对应明确的数据论据，做到"字字有出处，句句有支撑"。
+- 所有解读严格基于提供的原始数据，禁止编造数据、篡改数据含义、夸大数据结论；
+- 严禁跨职责直接比较伤害/治疗等核心指标，每一句阴阳调侃必须对应明确的数据论据。
 - 不讨论外挂、代练等违规行为。
 - 禁止进行反事实推演或假设性陈述（如"你本可以多拿3个击杀"），仅限描述已发生事件。
 - 守望先锋段位名称：青铜/白银/黄金/白金/钻石/大师/宗师/英杰
@@ -670,10 +673,10 @@ class ShiquManager:
 1. 不同职责的核心指标优先级（比赛数据中的数值均与分段参考数据口径一致）：
    坦克位：(伤害-受疗) > 阵亡数 > 击杀参与率 > 助攻数 > 其他数据
    输出位：单独消灭 > 最后一击 > 伤害 > 阵亡数 > 击杀参与率 > 助攻数 > 其他数据
-   辅助位：伤害量 ≈> 治疗量 > 阵亡数 > 击杀数 > 击杀参与率 > 助攻数 > 其他数据
+   辅助位：伤害量 ≈> 阵亡数 > 治疗量 > 击杀数 > 击杀参与率 > 助攻数 > 其他数据
 
 2. 数据对比与评分：
-   - 将焦点玩家数据与同英雄"# 分段参考行"对比，低于参考中位数应扣分。
+   - 将焦点玩家数据与同英雄"# 分段参考行"对比，低于参考值应扣分。
    - 同一玩家同一局可能在"英雄片段"内出现多个英雄；每个片段代表一个使用时长≥1分钟的英雄，短于1分钟的英雄已忽略。
    - 最后一击和单独消灭应额外加分，频繁阵亡且贡献低 → 加重扣分。
    - 比赛胜负不影响评分，只论数据。
@@ -686,14 +689,12 @@ class ShiquManager:
      * 51~43 = 哦灭跌多，你就是区！
      * <43 = 你个大区！！！
 3. 综合判定：综合 {n} 场比赛中英雄对应核心指标进行评分，不考虑比赛胜负，只论数据评价。
-4. 队友点评规则：
-   - 只能点评下方【焦点玩家的队友 ID】里出现的玩家。
-   - 队友只提供 ID，不提供数据；禁止编造队友具体击杀、伤害、治疗、阵亡等数值，比赛胜负不影响评分，只论数据
-   - 队友点评只能基于他们在【比赛数据】中与焦点玩家同队出现过、以及焦点玩家表现上下文进行轻量评价。
+4. 好友点评规则：
+   - 只能点评下方【焦点玩家的好友 ID】里出现的玩家。
+   - 好友点评只能基于他们的【比赛数据】，比赛胜负不影响评价，可以对焦点玩家表现上下文进行轻量评价。
    - 评分标准同焦点玩家（≥50夸/赞赏，<50串），但没有数据时语气要保守。
 
 【阴阳话术库（示例）】
-数据显示：[指标]=[数值]，高于/低于分段参考[X%]——这数据，怕不是在给对面回蓝？
 你的走位很有想象力，可惜伤害结算在了空气上。
 恭喜啊，用实力证明了「辅助」和「被辅助」的区别。
 这波操作，完美诠释了什么叫「无效阵亡」。
@@ -701,15 +702,15 @@ class ShiquManager:
 
 【输出格式】
 只输出一个合法 JSON 对象，不要 markdown，不要代码块，不要任何 JSON 外的解释文字。
-所有字段必须使用中文内容；verdict 字段只能从 schema enum 中选择，不要在 verdict 里添加 emoji，emoji 由渲染器按分数自动添加。
-match_comments 必须覆盖已获取到的 {n} 局，index 从 1 到 {n}；teammate_comments 只能从【焦点玩家的队友 ID】中选择，禁止输出不在列表中的玩家。
+所有字段必须使用中文内容；verdict 字段只能从 schema enum 中选择。
+match_comments 必须覆盖已获取到的 {n} 局，index 从 1 到 {n}；teammate_comments 只能从【焦点玩家的好友 ID】中选择，禁止输出不在列表中的玩家。
 overall_comment 约 300 字，串子风格阴阳总结，有数据支撑，可少量使用 emoji 增强表达力。
 
 JSON Schema：
 {json.dumps(_SHIQU_JSON_SCHEMA, ensure_ascii=False, indent=2)}
 
-【焦点玩家的队友 ID】
-{teammate_id_text}
+【焦点玩家的好友 ID】
+{friend_id_text}
 
 【比赛数据】
 {match_text}
@@ -836,11 +837,14 @@ JSON Schema：
 
     @staticmethod
     def _result_to_plain_text(result: dict) -> str:
+        disclaimer = "* 功能仅限娱乐，切勿因为ai瞎编影响心情"
         lines = [
             f"🔍 {result.get('target_id', '未知玩家')} 是区吗判定书",
             "",
             f"评分：{result.get('score', 0)}/100",
             str(result.get("verdict") or ""),
+            "",
+            disclaimer,
             "",
             "数据概况：",
             str(result.get("summary") or ""),
@@ -850,10 +854,10 @@ JSON Schema：
 
         for item in result.get("match_comments") or []:
             lines.append(
-                f"第{item.get('index', '?')}局：{item.get('result', '未知')}，{item.get('hero', '未知英雄')} —— {item.get('comment', '')}"
+                f"第{item.get('index', '?')}局：{item.get('result', '未知')}，{item.get('hero', '未知英雄')}：{item.get('comment', '')}"
             )
 
-        lines.extend(["", "综合评价：", str(result.get("overall_comment") or ""), "", "队友点评："])
+        lines.extend(["", "综合评价：", str(result.get("overall_comment") or ""), "", disclaimer, "", "队友点评："])
         teammates = result.get("teammate_comments") or []
         if teammates:
             for item in teammates:
@@ -950,16 +954,19 @@ JSON Schema：
             # 已处理过的标签 → 直接保留
             if s.startswith("<h") or s.startswith("<div") or s.startswith("<span"):
                 buf.append(s)
-            # 单局条目："第N局：... " → 按 " —— " 分割为加粗头部 + 普通点评
+            # 单局条目："第N局：... " → 按最后一个"："分割为加粗头部 + 普通点评
             elif s.startswith("第") and "局" in s:
-                if " —— " in s:
-                    head, tail = s.split(" —— ", 1)
-                    buf.append(f'<p class="gamen"><b>{head}</b> —— <span>{tail}</span></p>')
+                if "：" in s:
+                    head, tail = s.rsplit("：", 1)
+                    buf.append(f'<p class="gamen"><b>{head}：</b><span>{tail}</span></p>')
                 else:
                     buf.append(f'<p class="gamen"><b>{s}</b></p>')
             # 队友条目："- 玩家名...":"
             elif s.startswith("- "):
                 buf.append(f'<p class="mate">{ShiquManager._decorate_inline_verdicts(s)}</p>')
+            # 免责声明
+            elif "功能仅限娱乐" in s:
+                buf.append(f'<p class="disclaimer">{s}</p>')
             else:
                 buf.append(f"<p>{s}</p>")
 
