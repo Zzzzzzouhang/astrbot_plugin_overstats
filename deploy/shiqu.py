@@ -371,30 +371,18 @@ class ShiquManager:
             logger.warning(f"[是区吗] 拉取 index={index} 失败: {e}")
             return None
 
-    async def _fetch_12_matches(self, bnet_id: str, target: int = 12) -> list[dict]:
-        """优先 SportPreset/LeisurePreset，不足时补充抓取。"""
+    async def _fetch_matches(self, bnet_id: str, target: int = 12) -> list[dict]:
+        """仅抓取 SportPreset/LeisurePreset，不足则逐批往后拉，最多 100 场。"""
         if target <= 0:
             target = 12
-        # ── 第一轮：扫 0-39 共 40 场，筛预设职责 ──
-        raw = await asyncio.gather(*[self._fetch_one_match(bnet_id, i) for i in range(40)])
-        all_matches = [m for m in raw if m is not None]
-        preset = [m for m in all_matches if self._get_match_mode(m) in self._PRESET_MODES]
-
-        if len(preset) >= target:
-            return preset[:target]
-
-        # ── 第二轮：补充其他模式凑够 target ──
-        other = [m for m in all_matches if m not in preset]
-        combined = preset + other
-        if len(combined) >= target:
-            return combined[:target]
-
-        # ── 还不够：继续往后拉 index 40-59 ──
-        more = await asyncio.gather(*[self._fetch_one_match(bnet_id, i) for i in range(40, 60)])
-        extra = [m for m in more if m is not None]
-        combined = (preset + other + extra)[:target]
-
-        return combined
+        preset = []
+        idx = 0
+        while idx < 100 and len(preset) < target:
+            end = min(idx + 20, 100)
+            raw = await asyncio.gather(*[self._fetch_one_match(bnet_id, i) for i in range(idx, end)])
+            preset.extend(m for m in raw if m is not None and self._get_match_mode(m) in self._PRESET_MODES)
+            idx = end
+        return preset[:target]
 
     async def _fetch_teammate_details(self, detail_data: dict, target_id: str, index: int) -> None:
         """串行请求焦点玩家队伍每个成员的详细英雄数据，附加 _heroList 到玩家对象。"""
@@ -684,9 +672,10 @@ class ShiquManager:
 
 2. 数据对比与评分：
    - 将焦点玩家数据与同英雄"# 分段参考行"对比，低于参考值应扣分。
-   - 同一玩家同一局可能在"英雄片段"内出现多个英雄；每个片段代表一个使用时长≥1分钟的英雄，短于1分钟的英雄已忽略。
+   - 同一玩家同一局可能在"英雄片段"内出现多个英雄。
    - 最后一击和单独消灭应额外加分，频繁阵亡且贡献低 → 加重扣分。
    - 比赛胜负不影响评分，只论数据。
+   - 若某局数据异常（如焦点玩家和队友，英雄全部为空，全部字段为空），该局不参与评分，comment 写"数据缺失，无法评价"。
    - 百分制评分标准：
      * ≥83 = 你是职业吗？
      * 82~75 = 来了，暴力炸！
@@ -712,6 +701,7 @@ class ShiquManager:
 所有字段必须使用中文内容；verdict 字段只能从 schema enum 中选择。
 match_comments 必须覆盖已获取到的 {n} 局，index 从 1 到 {n}；teammate_comments 只能从【焦点玩家的好友 ID】中选择，禁止输出不在列表中的玩家。
 overall_comment 约 300 字，串子风格阴阳总结，有数据支撑，可少量使用 emoji 增强表达力。
+所有字符串值内禁止出现双引号（\"），如需引用改用单引号「」。
 
 JSON Schema：
 {json.dumps(_SHIQU_JSON_SCHEMA, ensure_ascii=False, indent=2)}
@@ -767,6 +757,35 @@ JSON Schema：
     # ── 结构化结果 → 渲染文本 → HTML ──
 
     @staticmethod
+    def _repair_json(text: str) -> str:
+        """修复 LLM JSON 常见错误：字符串值内未转义的双引号。"""
+        result = []
+        i, n = 0, len(text)
+        in_string = False
+        while i < n:
+            ch = text[i]
+            if not in_string:
+                result.append(ch)
+                if ch == '"' and (i == 0 or text[i - 1] != '\\'):
+                    in_string = True
+            else:
+                if ch == '\\' and i + 1 < n:
+                    result.append(text[i:i + 2])
+                    i += 1
+                elif ch == '"':
+                    # 闭合引号后面必须是 JSON 分隔符或空白
+                    rest = text[i + 1:].lstrip()
+                    if not rest or rest[0] in ',:}]':
+                        in_string = False
+                    else:
+                        ch = '\\"'
+                    result.append(ch)
+                else:
+                    result.append(ch)
+            i += 1
+        return ''.join(result)
+
+    @staticmethod
     def _extract_json_object(text: str) -> Optional[dict]:
         cleaned = (text or "").strip()
         if cleaned.startswith("```"):
@@ -776,7 +795,12 @@ JSON Schema：
             data = json.loads(cleaned)
             return data if isinstance(data, dict) else None
         except Exception:
-            pass
+            try:
+                repaired = ShiquManager._repair_json(cleaned)
+                data = json.loads(repaired)
+                return data if isinstance(data, dict) else None
+            except Exception:
+                pass
 
         start = cleaned.find("{")
         end = cleaned.rfind("}")
@@ -785,7 +809,12 @@ JSON Schema：
                 data = json.loads(cleaned[start:end + 1])
                 return data if isinstance(data, dict) else None
             except Exception:
-                return None
+                try:
+                    repaired = ShiquManager._repair_json(cleaned[start:end + 1])
+                    data = json.loads(repaired)
+                    return data if isinstance(data, dict) else None
+                except Exception:
+                    return None
         return None
 
     @staticmethod
@@ -1022,6 +1051,7 @@ JSON Schema：
 
         # ── 首次触发：展示上次结果 + 提示 ──
         # 先展示上次结果图片
+        has_last = False
         record = self._load_user_record(uid)
         result_path_str = str(record.get("result_path") or "") if record else ""
         if result_path_str:
@@ -1033,6 +1063,7 @@ JSON Schema：
                         url = await self._render_result_image(result, generated_at=str(record.get("generated_at") or ""))
                         _LAST_IMAGE[uid] = url
                         yield event.image_result(url)
+                        has_last = True
                 except Exception as e:
                     logger.warning(f"[是区吗] 展示上次结果失败: {e}")
 
@@ -1048,7 +1079,10 @@ JSON Schema：
                 await self._plugin.put_kv_data(pending_key, int(time.time()))
             except Exception:
                 pass
-            yield event.plain_result("👆 以上是上次判定结果。如要开启新查询，请在 **5 分钟内**再次发送「是区吗」。")
+            if has_last:
+                yield event.plain_result("👆 以上是上次判定结果。如要开启新查询，请在 **5 分钟内**再次发送「是区吗」。")
+            else:
+                yield event.plain_result("👋 你是第一次使用此功能吗？在 **5 分钟内**再次发送「是区吗」开启新查询。")
 
     async def _do_query(self, event, uid: str, target_id: str):
         """执行实际的是区吗查询流程。"""
@@ -1079,7 +1113,7 @@ JSON Schema：
             t0 = time.time()
             _ACTIVE_META[uid] = "拉取对局数据"
             target_count = int(self._get_config_map().get("match_count", 12) or 12)
-            matches = await self._fetch_12_matches(target_id, target=target_count)
+            matches = await self._fetch_matches(target_id, target=target_count)
             t1 = time.time()
             logger.info(f"📊 已获取 {len(matches)} 场 ({(t1 - t0):.1f}s)")
 
@@ -1099,7 +1133,14 @@ JSON Schema：
             db_path = str(getattr(self._plugin, "config", {}).get("sqlite_db_path", "") or "").strip()
             prompt = self._build_prompt(matches, target_id, db_path=db_path)
             self._atomic_write_text(prompt_path, prompt)
-            logger.info(f"✅ Prompt 已生成 ({len(prompt)} 字符)")
+            prompt_kb = len(prompt.encode("utf-8")) / 1024
+            logger.info(f"✅ Prompt 已生成 ({len(prompt)} 字符, {prompt_kb:.1f}KB)")
+
+            # 提示词过小 → 数据不足，放弃
+            if len(prompt.encode("utf-8")) < 10240:
+                await self._reset_cooldown(event)
+                yield event.plain_result("❌ 数据抓取量异常，可能没有足够的预设比赛对局，[6v6，决斗领域]暂未适配，已重置冷却。")
+                return
 
             # ── 调用 LLM ──
             _ACTIVE_META[uid] = "AI 生成判定"
