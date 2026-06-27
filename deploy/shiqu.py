@@ -175,21 +175,19 @@ class ShiquManager:
         except Exception:
             return False
 
-    def check_access(self, event) -> bool:
-        if self._is_admin(event):
-            return True
-        return self._plugin._is_whitelisted(event)
-
     # ── 分级 CD ──
+
+    def _get_config_map(self) -> dict:
+        """解析 shiqu_cd_map JSON 配置，失败返回空 dict。"""
+        cd_raw = self._plugin.config.get("shiqu_cd_map", "{}") or "{}"
+        try:
+            return json.loads(cd_raw) if isinstance(cd_raw, str) else cd_raw
+        except Exception:
+            return {}
 
     def _get_cd_seconds(self, event) -> int:
         """根据角色返回冷却秒数：管理员0 / 白名单30min / 普通4h。"""
-        # ponytail: 单行 JSON 配置，省掉三个独立配置项
-        cd_raw = self._plugin.config.get("shiqu_cd_map", "{}") or "{}"
-        try:
-            cd_map = json.loads(cd_raw) if isinstance(cd_raw, str) else cd_raw
-        except Exception:
-            cd_map = {}
+        cd_map = self._get_config_map()
         if self._is_admin(event):
             return max(0, int(cd_map.get("admin", 0) or 0))
         if self._plugin._is_whitelisted(event):
@@ -363,27 +361,28 @@ class ShiquManager:
             logger.warning(f"[是区吗] 拉取 index={index} 失败: {e}")
             return None
 
-    async def _fetch_12_matches(self, bnet_id: str) -> list[dict]:
-        """优先 SportPreset/LeisurePreset，不足 12 场时补充抓取。"""
-
+    async def _fetch_12_matches(self, bnet_id: str, target: int = 12) -> list[dict]:
+        """优先 SportPreset/LeisurePreset，不足时补充抓取。"""
+        if target <= 0:
+            target = 12
         # ── 第一轮：扫 0-39 共 40 场，筛预设职责 ──
         raw = await asyncio.gather(*[self._fetch_one_match(bnet_id, i) for i in range(40)])
         all_matches = [m for m in raw if m is not None]
         preset = [m for m in all_matches if self._get_match_mode(m) in self._PRESET_MODES]
 
-        if len(preset) >= 12:
-            return preset[:12]
+        if len(preset) >= target:
+            return preset[:target]
 
-        # ── 第二轮：补充其他模式（如快速对局）凑够 12 ──
+        # ── 第二轮：补充其他模式凑够 target ──
         other = [m for m in all_matches if m not in preset]
         combined = preset + other
-        if len(combined) >= 12:
-            return combined[:12]
+        if len(combined) >= target:
+            return combined[:target]
 
         # ── 还不够：继续往后拉 index 40-59 ──
         more = await asyncio.gather(*[self._fetch_one_match(bnet_id, i) for i in range(40, 60)])
         extra = [m for m in more if m is not None]
-        combined = (preset + other + extra)[:12]
+        combined = (preset + other + extra)[:target]
 
         return combined
 
@@ -663,6 +662,7 @@ class ShiquManager:
 - 严禁跨职责直接比较伤害/治疗等核心指标，每一句阴阳调侃必须对应明确的数据论据，做到"字字有出处，句句有支撑"。
 - 不讨论外挂、代练等违规行为。
 - 禁止进行反事实推演或假设性陈述（如"你本可以多拿3个击杀"），仅限描述已发生事件。
+- 守望先锋段位名称：青铜/白银/黄金/白金/钻石/大师/宗师/英杰
 
 【评判规则】
 1. 不同职责的核心指标优先级（比赛数据中的数值均与分段参考数据口径一致）：
@@ -970,10 +970,6 @@ JSON Schema：
     async def run(self, event, bnet_id_input: str = ""):
         uid = self._user_key(event)
 
-        if not self.check_access(event):
-            yield event.plain_result("🔒 是区吗功能处于测试阶段，仅对白名单/管理员开放。")
-            return
-
         # CD 检查
         cd_ok, cd_remain = await self._check_cooldown(event)
         if not cd_ok:
@@ -985,6 +981,13 @@ JSON Schema：
                 f'请使用 <qqbot-cmd-input text="ow是区吗结果" show="ow是区吗结果" reference="false" /> 查看上次判定结果。'
             )
             return
+
+        # 普通用户开关
+        if not self._is_admin(event) and not self._plugin._is_whitelisted(event):
+            cd_map = self._get_config_map()
+            if not cd_map.get("normal_enabled", False):
+                yield event.plain_result("🔒 是区吗功能暂未对普通用户开放。")
+                return
 
         # 获取 bnet_id
         target_id = await self._plugin._get_bnet_id(event, bnet_id_input)
@@ -1018,7 +1021,8 @@ JSON Schema：
 
             t0 = time.time()
             _ACTIVE_META[uid] = "拉取对局数据"
-            matches = await self._fetch_12_matches(target_id)
+            target_count = int(self._get_config_map().get("match_count", 12) or 12)
+            matches = await self._fetch_12_matches(target_id, target=target_count)
             t1 = time.time()
             logger.info(f"📊 已获取 {len(matches)} 场 ({(t1 - t0):.1f}s)")
 
@@ -1085,9 +1089,6 @@ JSON Schema：
 
     async def last_result(self, event):
         """读取用户上次结构化判定结果，重新渲染图片返回。"""
-        if not self.check_access(event):
-            yield event.plain_result("🔒 是区吗功能处于测试阶段，仅对白名单/管理员开放。")
-            return
         uid = self._user_key(event)
         record = self._load_user_record(uid)
         if not record:

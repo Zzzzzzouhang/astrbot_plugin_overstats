@@ -1135,6 +1135,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("多图测试")
     async def multi_image_test(self, event: AstrMessageEvent):
+        """多图测试：发送多张测试图片。"""
         imgs_list = []
         for img_name in ["test1.png", "test2.png", "test3.png"]:
             img_path = self.plugin_data_dir / img_name
@@ -1154,6 +1155,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("单图测试")
     async def single_image_test(self, event: AstrMessageEvent):
+        """单图测试：发送单张 test1.png 测试图片。"""
         img_path = self.plugin_data_dir / "test1.png"
         if not img_path.exists():
             yield self._plain_error_result(event, "❌ 未能读取到测试图片 test1.png。")
@@ -1169,6 +1171,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("owhelp", alias={'ow菜单', 'ow帮助', 'OW帮助', 'help'})
     async def ow_help(self, event: AstrMessageEvent):
+        """显示 Overstats 查询菜单，列出所有常用指令入口。"""
         help_text = """📌 Overstats 查询菜单
 🔗 ➤ <qqbot-cmd-input text="/绑定 " show="绑定" reference="false" />示例：/绑定 Player#12345
 📋 ➤ <qqbot-cmd-input text="/今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="/昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="/周度总结 " show="本周" reference="false" />
@@ -1179,6 +1182,7 @@ class OverstatsPlugin(Star):
 ⚔️ ➤ <qqbot-cmd-input text="/威能 " show="威能" reference="false" />「英雄名」 ➤ <qqbot-cmd-input text="/ow英雄 " show="ow 英雄" reference="false" />「英雄名」可加 快速/竞技 段位 ➤ <qqbot-cmd-input text="/banpick " show="banpick" reference="false" />「可选 快速/竞技 段位」 ➤ <qqbot-cmd-input text="/mappick " show="mappick" reference="false" />
 🌍 ➤ <qqbot-cmd-input text="/同玩查询 " show="同玩查询" reference="false" />「ID1」「ID2」 ➤ <qqbot-cmd-input text="/商店 " show="商店" reference="false" /> ➤ <qqbot-cmd-input text="/皮肤搜索 " show="皮肤搜索" reference="false" /> ➤ <qqbot-cmd-input text="/ow赛事 " show="ow 赛事" reference="false" />
 📰 ➤ <qqbot-cmd-input text="/ow更新 " show="ow更新" reference="false" />「latest/small/big」
+🧪 ➤ <qqbot-cmd-input text="/ow是区吗 " show="ow是区吗" reference="false" />「战网ID」 ➤ <qqbot-cmd-input text="/ow是区吗结果 " show="ow是区吗结果" reference="false" />
 🎁 ➤ 段位关键词：青铜/白银/黄金/白金/钻石/大师/宗师/英杰
 💡 发送 <qqbot-cmd-input text="/别称 " show="别称" reference="false" /> 可查看所有指令对应别称列表。"""
         
@@ -1186,6 +1190,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("大神绑定", alias={'绑定'})
     async def dashen_bind(self, event: AstrMessageEvent, bnet_id: str):
+        """绑定战网账号，格式：/绑定 Player#12345。"""
         user_id = event.get_sender_id()
         
         new_bind_id = bnet_id.strip()
@@ -1204,6 +1209,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("今日总结", alias={'今日', '今日数据'})
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = ""):
+        """生成过去 24 小时内的对局大数据总结卡片。"""
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/今日总结 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
@@ -1247,6 +1253,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("昨日总结", alias={'昨日', '昨日数据', '昨天数据', '昨天'})
     async def dashen_yesterday(self, event: AstrMessageEvent, bnet_id: str = "", _skip_status_prompt: bool = False):
+        """统计并生成昨日战绩数据卡片。"""
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/昨日总结 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
@@ -1281,6 +1288,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("周度总结", alias={'本周总结', '本周数据', '本周'})
     async def dashen_week(self, event: AstrMessageEvent, bnet_id: str = ""):
+        """统计本周战绩大数据总结，耗时较长（约 30-60 秒）。"""
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/周度总结 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
@@ -1310,6 +1318,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("大神数据", alias={'详情卡片', '战绩查询', '数据'})
     async def dashen_profile(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        """查看玩家详情卡片（支持 快速/竞技 模式）。"""
         bnet_id, mode = self._parse_profile_args(arg1, arg2)
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
@@ -1338,6 +1347,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("大神对局", alias={'最近对局', '战绩', '对局'})
     async def dashen_match(self, event: AstrMessageEvent, bnet_id: str = ""):
+        """拉取最近 20 局的对局列表。"""
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
             yield self._plain_error_result(event, "❌ 请输入战网ID，如：/大神对局 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
@@ -1366,6 +1376,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("单局详细", alias={'单局'})
     async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = "", arg2: str = "", arg3: str = ""):
+        """查看指定序号的单局多图详细战绩（可加 锐评关/全员关 控制开关）。"""
         # 先识别中文关键词：锐评关 / 全员关 / 锐评（默认即锐评，可显式给）
         positional, kw = self._extract_keywords([arg1, arg2, arg3])
         index = 0
@@ -1493,10 +1504,10 @@ class OverstatsPlugin(Star):
         async for r in self.court_manager.run_court(event, arg1, arg2):
             yield r
 
-    # ── OW 是区吗（测试阶段）───────────────────────────────────
+    # ── OW 是区吗 ────────────────────────────────────
     @filter.command("ow是区吗", alias={'是区吗'})
     async def ow_shiqu(self, event: AstrMessageEvent, arg1: str = ""):
-        """OW 是区吗：基于最近 12 场对局评估玩家是否为坑（测试阶段，仅白名单/管理员可用）。"""
+        """OW 是区吗：基于最近 12 场对局评估玩家是否为坑（分级 CD：管理员 0 / 白名单 30min / 普通 4h）。"""
         async for r in self.shiqu_manager.run(event, arg1):
             yield r
 
@@ -1508,6 +1519,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("历史段位", alias={'历届段位'})
     async def dashen_rank_history(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        """追溯玩家的历史天梯段位记录（可选赛季范围）。"""
         # /历史段位            /历史段位 Player#12345
         # /历史段位 15 22（起始赛季 终止赛季）       /历史段位 Player#12345 15 22
         positional, _kw = self._extract_keywords([arg1, arg2])
@@ -1561,6 +1573,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("同玩查询", alias={'开黑胜率'})
     async def dashen_sameplay(self, event: AstrMessageEvent, p1: str, p2: str):
+        """深度分析两位玩家一同游玩开黑时的战绩与胜率。"""
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"👥 正在分析 {p1} 与 {p2} 的同玩胜率...")
         if status_text:
             yield event.plain_result(status_text)
@@ -1585,6 +1598,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("快速强度", alias={'快速强度指数'})
     async def quick_strength(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        """评估玩家快速模式下的强度指数（可选对局数 3-12）。"""
         # /快速强度            /快速强度 Player#12345         /快速强度 8（对局数3-12）
         # /快速强度 Player#12345 8
         positional, _kw = self._extract_keywords([arg1, arg2])
@@ -1627,6 +1641,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("竞技强度", alias={'竞技强度指数'})
     async def competitive_strength(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        """评估玩家竞技天梯模式下的强度指数（可选对局数 3-12）。"""
         # /竞技强度            /竞技强度 Player#12345         /竞技强度 8（对局数3-12）
         # /竞技强度 Player#12345 8
         positional, _kw = self._extract_keywords([arg1, arg2])
@@ -1669,6 +1684,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("快速英雄云图", alias={'快速云图'})
     async def quick_hero_treemap(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        """获取快速模式英雄使用率矩形树图（可选赛季）。"""
         bnet_id, season = self._parse_treemap_args(arg1, arg2)
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
@@ -1701,6 +1717,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("竞技英雄云图", alias={'竞技云图'})
     async def competitive_hero_treemap(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        """获取竞技模式英雄使用率矩形树图（可选赛季）。"""
         bnet_id, season = self._parse_treemap_args(arg1, arg2)
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
@@ -1733,6 +1750,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("威能")
     async def ow_hero_perk(self, event: AstrMessageEvent, hero_name: str):
+        """提取指定英雄的核心威能、机制数据图。"""
         if not hero_name:
             yield self._plain_error_result(event, "❌ 请输入英雄名称，如：/威能 闪光")
             return
@@ -1756,6 +1774,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("ow英雄")
     async def ow_hero_pick(self, event: AstrMessageEvent, arg1: str = "", arg2: str = "", arg3: str = ""):
+        """读取指定英雄在当前天梯的 Pick 率历史走势图（可选模式/段位）。"""
         # /ow英雄 安娜  /ow英雄 安娜 快速  /ow英雄 安娜 大师  /ow英雄 安娜 快速 大师
         positional, kw = self._extract_keywords([arg1, arg2, arg3])
         hero_name = positional[0] if positional else ""
@@ -1794,6 +1813,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("商店", alias={'ow商店'})
     async def ow_shop(self, event: AstrMessageEvent):
+        """拉取今日精选商店在售皮肤商品。"""
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, "🛍️ 正在获取今日精选商店皮肤商品...")
         if status_text:
             yield event.plain_result(status_text)
@@ -1814,6 +1834,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("ow赛事", alias={'赛事'})
     async def ow_esports(self, event: AstrMessageEvent):
+        """获取实时职业赛事对阵及赛程信息。"""
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, "🎮 正在从 Pandascore 获取实时赛事对阵...")
         if status_text:
             yield event.plain_result(status_text)
@@ -1834,6 +1855,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("获取段位分布")
     async def get_rank_distribution(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        """统计天梯全服大盘全英雄数据排行与天梯环境分布（可选模式/段位）。"""
         # /获取段位分布        /获取段位分布 快速       /获取段位分布 快速 大师       /获取段位分布 大师
         _positional, kw = self._extract_keywords([arg1, arg2])
         game_mode = kw.get("game_mode", "competitive")
@@ -1863,6 +1885,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("ow活动", alias={'活动'})
     async def ow_activities(self, event: AstrMessageEvent):
+        """拉取当前版本限时节日或赛季大活动公告卡片。"""
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, "🎉 正在拉取当前版本限时节日/赛季大活动公告卡片...")
         if status_text:
             yield event.plain_result(status_text)
@@ -1885,6 +1908,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("banpick", alias={'全英雄排行'})
     async def ban_pick_stats(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        """获取本周天梯英雄大盘的选禁用排行（可选模式/段位）。"""
         # /banpick        /banpick 快速       /banpick 快速 黄金       /banpick 黄金
         _positional, kw = self._extract_keywords([arg1, arg2])
         game_mode = kw.get("game_mode", "competitive")
@@ -1914,6 +1938,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("mappick")
     async def map_pick_stats(self, event: AstrMessageEvent):
+        """从最新补丁中检索当前赛季地图池与轮换出场情况。"""
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, "🗺️ 正在从最新版本补丁中检索当前赛季地图池与轮换出场...")
         if status_text:
             yield event.plain_result(status_text)
@@ -1934,6 +1959,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("皮肤搜索")
     async def skin_search(self, event: AstrMessageEvent, keyword: str = ""):
+        """检索包含指定关键词的精选上架皮肤商品卡片。"""
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🔍 正在检索包含关键词【{keyword or '最新'}】的精选上架皮肤商品卡片...")
         if status_text:
             yield event.plain_result(status_text)
@@ -1954,6 +1980,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("ow更新", alias={'版本更新'})
     async def ow_patch_notes(self, event: AstrMessageEvent, kind: str = "latest"):
+        """拉取外服更新日志卡片（参数：latest / small / big）。"""
         valid_kinds = ["latest", "small", "big"]
         if kind not in valid_kinds:
             yield self._plain_error_result(event, "❌ 参数错误。支持的日志类型：latest, small, big\n例如：/ow更新 small")
@@ -1979,6 +2006,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("省榜", alias={'排行'})
     async def ow_rank_leaderboard(self, event: AstrMessageEvent, province: str, role: str):
+        """获取指定地区的大神天梯省榜（位置：tank / dps / healer / open）。"""
         if not province or not role:
             yield self._plain_error_result(event, "❌ 请输入省份名称 and 职责位置，例如：/省榜 北京 tank\n(支持的位置: tank / dps / healer / open)")
             return
@@ -2465,6 +2493,7 @@ class OverstatsPlugin(Star):
 
     @filter.command("绝活榜", alias={'英雄省榜'})
     async def ow_hero_leaderboard(self, event: AstrMessageEvent, province: str, hero: str, arg3: str = ""):
+        """获取指定地区特定英雄的大神专精绝活榜（可选开放队列模式）。"""
         # /绝活榜 北京 猎空        /绝活榜 北京 猎空 开放（开放=开放队列模式）
         _positional, kw = self._extract_keywords([province, hero, arg3])
         # 关键词识别后还原省/英雄（关键词被剔除，剩下的前两个就是省份与英雄）

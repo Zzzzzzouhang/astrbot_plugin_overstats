@@ -273,9 +273,9 @@
     "default": ""
   },
   "shiqu_cd_map": {
-    "description": "是区吗分级CD配置（JSON）",
+    "description": "是区吗分级配置（JSON）",
     "type": "text",
-    "hint": "按角色分级的冷却时间（秒）。JSON 格式：{\"normal\": 普通用户, \"whitelist\": 白名单, \"admin\": 管理员}。默认 {\"normal\":14400,\"whitelist\":1800,\"admin\":0}。",
-    "default": "{\"normal\":14400,\"whitelist\":1800,\"admin\":0}"
+    "hint": "JSON 格式：{\"normal\":普通CD秒,\"whitelist\":白名单CD秒,\"admin\":管理员CD秒,\"match_count\":抓取场数,\"normal_enabled\":普通用户开关}。默认 {\"normal\":14400,\"whitelist\":1800,\"admin\":0,\"match_count\":12,\"normal_enabled\":false}。",
+    "default": "{\"normal\":14400,\"whitelist\":1800,\"admin\":0,\"match_count\":12,\"normal_enabled\":false}"
   }
 }
