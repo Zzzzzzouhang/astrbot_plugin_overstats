@@ -1013,6 +1013,9 @@ JSON Schema：
                     buf.append(f'<p>- {prefix}：<span class="mate">{ShiquManager._decorate_inline_verdicts(rest)}</span></p>')
                 else:
                     buf.append(f'<p class="mate">{ShiquManager._decorate_inline_verdicts(s)}</p>')
+            # 队友点评续行：缩进的判定+点评
+            elif s.startswith("\u3000"):
+                buf.append(f'<p><span class="mate">{ShiquManager._decorate_inline_verdicts(s[1:])}</span></p>')
             # 免责声明
             elif "功能仅限娱乐" in s:
                 buf.append(f'<p class="disclaimer">{s}</p>')
