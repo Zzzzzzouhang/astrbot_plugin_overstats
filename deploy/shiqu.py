@@ -907,7 +907,7 @@ JSON Schema：
             for item in teammates:
                 games_text = f"（共同{item.get('games')}局）" if item.get("games") is not None else ""
                 lines.append(
-                    f"- {item.get('name', '未知队友')}{games_text}：评分{item.get('score', 0)}/100\n　{item.get('verdict', '')}：{item.get('comment', '')}"
+                    f"- {item.get('name', '未知队友')}{games_text}：评分{item.get('score', 0)}/100\n{item.get('verdict', '')}{item.get('comment', '')}"
                 )
         else:
             lines.append("- 暂无共同游戏≥2局的队友。")
@@ -1013,9 +1013,9 @@ JSON Schema：
                     buf.append(f'<p>- {prefix}：<span class="mate">{ShiquManager._decorate_inline_verdicts(rest)}</span></p>')
                 else:
                     buf.append(f'<p class="mate">{ShiquManager._decorate_inline_verdicts(s)}</p>')
-            # 队友点评续行：缩进的判定+点评
-            elif s.startswith("\u3000"):
-                buf.append(f'<p><span class="mate">{ShiquManager._decorate_inline_verdicts(s[1:])}</span></p>')
+            # 队友点评续行：以判定标签开头
+            elif any(s.startswith(label) for label in _VERDICT_BY_LABEL):
+                buf.append(f'<p class="mate">{ShiquManager._decorate_inline_verdicts(s)}</p>')
             # 免责声明
             elif "功能仅限娱乐" in s:
                 buf.append(f'<p class="disclaimer">{s}</p>')
