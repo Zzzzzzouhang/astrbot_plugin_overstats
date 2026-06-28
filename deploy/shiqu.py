@@ -130,6 +130,7 @@ _VERDICT_BY_LABEL = {label: rule for rule in _VERDICT_RULES for label in rule["l
 _SHIQU_COOLDOWN_KV_PREFIX = "ow_shiqu_cooldown"
 _SHIQU_PENDING_KV_PREFIX = "ow_shiqu_pending"
 _SHIQU_PENDING_SECONDS = 300  # 5 分钟内再发确认
+_SHIQU_BTN = '<qqbot-cmd-input text="是区吗" show="是区吗" reference="false" />'
 
 # ── AstrBot 文转图模板 ──────────────────────────────────────
 
@@ -223,6 +224,13 @@ class ShiquManager:
         key = f"{_SHIQU_COOLDOWN_KV_PREFIX}:{self._user_key(event)}"
         try:
             await self._plugin.put_kv_data(key, 0)
+        except Exception:
+            pass
+
+    async def _set_pending(self, event):
+        key = f"{_SHIQU_PENDING_KV_PREFIX}:{self._user_key(event)}"
+        try:
+            await self._plugin.put_kv_data(key, int(time.time()))
         except Exception:
             pass
 
@@ -899,7 +907,7 @@ JSON Schema：
             for item in teammates:
                 games_text = f"（共同{item.get('games')}局）" if item.get("games") is not None else ""
                 lines.append(
-                    f"- {item.get('name', '未知队友')}{games_text}：评分{item.get('score', 0)}/100，{item.get('verdict', '')}{item.get('comment', '')}"
+                    f"- {item.get('name', '未知队友')}{games_text}：评分{item.get('score', 0)}/100\n　{item.get('verdict', '')}：{item.get('comment', '')}"
                 )
         else:
             lines.append("- 暂无共同游戏≥2局的队友。")
@@ -1030,7 +1038,7 @@ JSON Schema：
         # 获取 bnet_id
         target_id = await self._plugin._get_bnet_id(event, bnet_id_input)
         if not target_id:
-            yield event.plain_result("❌ 请提供 BattleTag，或先使用 /绑定 绑定。\n用法：是区吗 <battle_tag>")
+            yield event.plain_result(f"❌ 请提供 BattleTag，或先使用 /绑定 绑定。\n用法：{_SHIQU_BTN} &lt;battle_tag&gt;")
             return
 
         # ── 检查 pending 状态 ──
@@ -1049,40 +1057,34 @@ JSON Schema：
                 yield r
             return
 
-        # ── 首次触发：展示上次结果 + 提示 ──
-        # 先展示上次结果图片
-        has_last = False
+        # ── 首次触发：文字先行，图片后发（图片渲染需要时间）──
         record = self._load_user_record(uid)
         result_path_str = str(record.get("result_path") or "") if record else ""
-        if result_path_str:
-            rp = Path(result_path_str)
-            if rp.exists():
-                try:
-                    result = json.loads(rp.read_text(encoding="utf-8"))
-                    if isinstance(result, dict):
-                        url = await self._render_result_image(result, generated_at=str(record.get("generated_at") or ""))
-                        _LAST_IMAGE[uid] = url
-                        yield event.image_result(url)
-                        has_last = True
-                except Exception as e:
-                    logger.warning(f"[是区吗] 展示上次结果失败: {e}")
+        has_last = bool(result_path_str) and Path(result_path_str).exists()
 
+        # 1. 文字先发
         if not cd_ok:
-            # 有 CD → 展示上次结果 + CD 剩余时间
             m, s = divmod(cd_remain, 60)
             h, m = divmod(m, 60)
             remain_str = f"{int(h)}时{int(m)}分{int(s)}秒" if h > 0 else f"{int(m)}分{int(s)}秒"
-            yield event.plain_result(f"⏳ 冷却中，剩余 {remain_str}，届时再发「是区吗」开启新查询。")
+            yield event.plain_result(f"⏳ 冷却中，剩余 {remain_str}，届时再发 {_SHIQU_BTN} 开启新查询。")
         else:
-            # 无 CD → 设置 pending，提示 5 分钟内再发确认
-            try:
-                await self._plugin.put_kv_data(pending_key, int(time.time()))
-            except Exception:
-                pass
+            await self._set_pending(event)
             if has_last:
-                yield event.plain_result("👆 以上是上次判定结果。如要开启新查询，请在 **5 分钟内**再次发送「是区吗」。")
+                yield event.plain_result(f"👇 以下是上次判定结果。如要开启新查询，请在 **5 分钟内**再次发送 {_SHIQU_BTN}。")
             else:
-                yield event.plain_result("👋 你是第一次使用此功能吗？在 **5 分钟内**再次发送「是区吗」开启新查询。")
+                yield event.plain_result(f"👋 你是第一次使用此功能吗？在 **5 分钟内**再次发送 {_SHIQU_BTN} 开启新查询。")
+
+        # 2. 图片后渲染发送
+        if has_last:
+            try:
+                result = json.loads(Path(result_path_str).read_text(encoding="utf-8"))
+                if isinstance(result, dict):
+                    url = await self._render_result_image(result, generated_at=str(record.get("generated_at") or ""))
+                    _LAST_IMAGE[uid] = url
+                    yield event.image_result(url)
+            except Exception as e:
+                logger.warning(f"[是区吗] 展示上次结果失败: {e}")
 
     async def _do_query(self, event, uid: str, target_id: str):
         """执行实际的是区吗查询流程。"""
@@ -1118,7 +1120,7 @@ JSON Schema：
             logger.info(f"📊 已获取 {len(matches)} 场 ({(t1 - t0):.1f}s)")
 
             if len(matches) < 2:
-                yield event.plain_result(f"❌ {target_id} 仅获取到 {len(matches)} 场对局，至少需要 2 场。")
+                yield event.plain_result(f"❌ {target_id}{_SHIQU_BTN} 仅获取到 {len(matches)} 场对局，至少需要 2 场。")
                 return
 
             _ACTIVE_META[uid] = "拉取队友详细数据"
@@ -1139,7 +1141,8 @@ JSON Schema：
             # 提示词过小 → 数据不足，放弃
             if len(prompt.encode("utf-8")) < 10240:
                 await self._reset_cooldown(event)
-                yield event.plain_result("❌ 数据抓取量异常，可能没有足够的预设比赛对局，[6v6，决斗领域]暂未适配，已重置冷却。")
+                await self._set_pending(event)
+                yield event.plain_result(f"❌ 数据抓取量异常，可能没有足够的预设比赛对局，[6v6，决斗领域]暂未适配，{_SHIQU_BTN} 已重置冷却。")
                 return
 
             # ── 调用 LLM ──
@@ -1147,13 +1150,15 @@ JSON Schema：
             llm_text = await self._call_astrbot_llm(event, prompt)
             if not llm_text:
                 await self._reset_cooldown(event)
-                yield event.plain_result("❌ AI 判定生成失败：LLM 调用异常，已重置冷却，请重试。")
+                await self._set_pending(event)
+                yield event.plain_result(f"❌ AI 判定生成失败：大模型调用异常，token不足 / 网络波动，已重置冷却，请重试 {_SHIQU_BTN} 。")
                 return
             self._atomic_write_text(llm_raw_path, llm_text)
             result = self._parse_llm_json_result(llm_text, target_id)
             if result is None:
                 await self._reset_cooldown(event)
-                yield event.plain_result("❌ AI 判定生成失败：返回内容不是合法 JSON，已重置冷却，请重试。")
+                await self._set_pending(event)
+                yield event.plain_result(f"❌ AI 判定生成失败：返回内容不是合法 JSON，已重置冷却，请重试 {_SHIQU_BTN} 。")
                 return
             self._atomic_write_json(result_path, result)
             t3 = time.time()
@@ -1183,20 +1188,30 @@ JSON Schema：
 
         except Exception as exc:
             logger.error(f"[是区吗] error: {exc}", exc_info=True)
-            yield event.plain_result(f"❌ 生成判定书失败：{exc}")
+            yield event.plain_result(f"❌ 生成判定书失败 {_SHIQU_BTN} ：{exc}")
         finally:
             await self._dequeue(uid)
 
     async def last_result(self, event):
         """读取用户上次结构化判定结果，重新渲染图片返回。"""
         uid = self._user_key(event)
+
+        # 正在走流程 → 先告知当前状态，再展示上次结果
+        async with _QUEUE_LOCK:
+            if uid in _ACTIVE_META:
+                yield event.plain_result(f"⏳ 判定书正在生成中，当前步骤：{_ACTIVE_META[uid]}，请稍候…")
+            elif uid in _ACTIVE:
+                yield event.plain_result("⏳ 判定书正在生成中，请稍候…")
+
         record = self._load_user_record(uid)
         if not record:
-            yield event.plain_result("❌ 没有找到上次的判定书结果，请先用「是区吗」生成一份。")
+            await self._set_pending(event)
+            yield event.plain_result(f"❌ 没有找到上次的判定书结果，请先用 {_SHIQU_BTN} 生成一份。")
             return
         result_path = Path(str(record.get("result_path") or ""))
         if not result_path.exists():
-            yield event.plain_result("❌ 上次的判定结果文件不存在，请重新生成一份。")
+            await self._set_pending(event)
+            yield event.plain_result(f"❌ 上次的判定结果文件不存在，请用 {_SHIQU_BTN} 重新生成一份。")
             return
         try:
             result = json.loads(result_path.read_text(encoding="utf-8"))
