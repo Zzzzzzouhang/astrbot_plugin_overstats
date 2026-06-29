@@ -132,6 +132,7 @@ _SHIQU_PENDING_KV_PREFIX = "ow_shiqu_pending"
 _SHIQU_PENDING_SECONDS = 300  # 5 分钟内再发确认
 _SHIQU_BTN = '<qqbot-cmd-input text="是区吗" show="是区吗" reference="false" />'
 
+
 # ── AstrBot 文转图模板 ──────────────────────────────────────
 
 _SHIQU_HTML_TMPL = '''<!DOCTYPE html>
@@ -234,6 +235,31 @@ class ShiquManager:
         except Exception:
             pass
 
+    @staticmethod
+    def _get_today_4am_ts() -> int:
+        """返回最近一次凌晨 4:00 的 Unix 时间戳（本地时间）。"""
+        now = time.time()
+        local = time.localtime(now)
+        today_4am = time.mktime((local.tm_year, local.tm_mon, local.tm_mday, 4, 0, 0, local.tm_wday, local.tm_yday, local.tm_isdst))
+        # 如果当前时间还没到凌晨4点，则"今天"从昨天凌晨4点算起
+        if now < today_4am:
+            today_4am -= 86400
+        return int(today_4am)
+
+    def _is_first_today(self, uid: str) -> bool:
+        """通过用户记录中的 generated_at 判断今天（凌晨4点重置）是否首次使用。"""
+        record = self._load_user_record(uid)
+        if not record:
+            return True
+        gen_at = str(record.get("generated_at", ""))
+        if not gen_at:
+            return True
+        try:
+            gen_ts = int(time.mktime(time.strptime(gen_at, "%Y-%m-%d %H:%M:%S")))
+            return gen_ts < self._get_today_4am_ts()
+        except Exception:
+            return True
+
     # ── 排队 ──
 
     def _user_key(self, event) -> str:
@@ -266,16 +292,14 @@ class ShiquManager:
     def _user_record_path(self, uid: str) -> Path:
         return self._data_dir() / "users" / f"{self._safe_filename(uid, 'user')}.json"
 
-    def _new_artifact_paths(self, uid: str, target_id: str) -> tuple[Path, Path, Path, Path]:
+    def _new_artifact_paths(self, uid: str, target_id: str) -> tuple[Path, Path]:
         data_dir = self._data_dir() / "results"
         ts = time.strftime("%Y%m%d_%H%M%S")
         ms = int((time.time() * 1000) % 1000)
         base = f"{ts}_{ms:03d}_{self._safe_filename(uid, 'user')}_{self._safe_filename(target_id, 'target')}"
         return (
-            data_dir / f"{base}_12matches.json",
             data_dir / f"{base}_prompt.txt",
             data_dir / f"{base}_llm_raw.txt",
-            data_dir / f"{base}_result.json",
         )
 
     def _save_user_record(self, uid: str, record: dict) -> None:
@@ -364,7 +388,7 @@ class ShiquManager:
         return str(detail_data.get("gameMode") or source.get("gameMode")
                    or source.get("instanceType") or "")
 
-    _PRESET_MODES = {"SportPreset", "LeisurePreset"}
+    _PRESET_MODES = {"SportPreset", "LeisurePreset", "Sport6v6", "Leisure6v6"}
 
     async def _fetch_one_match(self, bnet_id: str, index: int) -> Optional[dict]:
         url = f"{self._plugin.base_url}/dashen-match/detail"
@@ -379,8 +403,22 @@ class ShiquManager:
             logger.warning(f"[是区吗] 拉取 index={index} 失败: {e}")
             return None
 
+    async def _fetch_match_by_token_match_id(self, customer_token: str, match_id: str) -> Optional[dict]:
+        """用队友的 customer_token + 比赛 match_id 直接查同一局详情，获取 heroList。"""
+        url = f"{self._plugin.base_url}/dashen-match/detail"
+        try:
+            session = await self._plugin._get_http_session()
+            async with session.post(url, json={"customer_token": customer_token, "match_id": match_id}) as resp:
+                data = await resp.json()
+                if data.get("ok") and data.get("detail"):
+                    return data
+                return None
+        except Exception as e:
+            logger.warning(f"[是区吗] 按 match_id={match_id[:12]} 拉取队友详情失败: {e}")
+            return None
+
     async def _fetch_matches(self, bnet_id: str, target: int = 12) -> list[dict]:
-        """仅抓取 SportPreset/LeisurePreset，不足则逐批往后拉，最多 100 场。"""
+        """仅抓取 SportPreset/LeisurePreset/Sport6v6/Leisure6v6，不足则逐批往后拉，最多 100 场。"""
         if target <= 0:
             target = 12
         preset = []
@@ -392,8 +430,10 @@ class ShiquManager:
             idx = end
         return preset[:target]
 
-    async def _fetch_teammate_details(self, detail_data: dict, target_id: str, index: int) -> None:
-        """串行请求焦点玩家队伍每个成员的详细英雄数据，附加 _heroList 到玩家对象。"""
+    async def _fetch_teammate_details(self, detail_data: dict, target_id: str, index: int,
+                                       focus_match_id: str = "") -> None:
+        """用队友自身的 customer_token + 比赛 match_id 查同一局详细数据。
+        相比按 name+index 查询，这种方式不受各玩家比赛排序差异影响，100% 精确。"""
         tm_list = detail_data.get("teammateList", [])
         for p in tm_list:
             if not isinstance(p, dict):
@@ -401,8 +441,11 @@ class ShiquManager:
             name = p.get("name", "")
             if p.get("_heroList"):
                 continue
+            teammate_token = str(p.get("customerToken", ""))
+            if not teammate_token or not focus_match_id:
+                continue
             try:
-                data = await self._fetch_one_match(name, index)
+                data = await self._fetch_match_by_token_match_id(teammate_token, focus_match_id)
                 if data:
                     pd = (data.get("detail", {}) or {}).get("data") or {}
                     hl = pd.get("heroList", [])
@@ -416,7 +459,8 @@ class ShiquManager:
         for idx, m in enumerate(matches):
             detail_data = (m.get("detail", {}) or {}).get("data") or {}
             if isinstance(detail_data, dict):
-                await self._fetch_teammate_details(detail_data, target_id, idx)
+                await self._fetch_teammate_details(detail_data, target_id, idx,
+                                                   focus_match_id=str(m.get("match_id", "")))
 
     # ── Prompt 构建 ──
 
@@ -512,6 +556,11 @@ class ShiquManager:
             long_entries = [entry for entry in hl if isinstance(entry, dict) and float(entry.get("userTimeSec", 0) or 0) >= 60]
             for entry in long_entries:
                 if not isinstance(entry, dict):
+                    continue
+                # 优先使用 _heroList 中明确的 heroId，避免从 statMap 推断错误
+                hg = str(entry.get("heroId", ""))
+                if hg:
+                    segments.append({"player": p, "hero_guid": hg, "entry": entry, "name_map": name_map})
                     continue
                 sm = entry.get("statMap", {}) or {}
                 hg = _infer_hero_guid_from_stat_map(sm, fallback_hg, allow_fallback=(len(long_entries) == 1))
@@ -1038,15 +1087,36 @@ JSON Schema：
                 yield event.plain_result("🔒 是区吗功能暂未对普通用户开放。")
                 return
 
+        # ── 正在走流程 → 告知当前状态，不进入新流程 ──
+        async with _QUEUE_LOCK:
+            if uid in _ACTIVE_META:
+                yield event.plain_result(f"⏳ 判定书正在生成中，当前步骤：{_ACTIVE_META[uid]}，请稍候…")
+                return
+            if uid in _ACTIVE:
+                yield event.plain_result("⏳ 判定书正在生成中，请稍候…")
+                return
+            for euid, _ in _QUEUE:
+                if euid == uid:
+                    yield event.plain_result("⏳ 您的判定书正在排队中，请稍候…")
+                    return
+
         # 获取 bnet_id
         target_id = await self._plugin._get_bnet_id(event, bnet_id_input)
         if not target_id:
             yield event.plain_result(f"❌ 请提供 BattleTag，或先使用 /绑定 绑定。\n用法：{_SHIQU_BTN} &lt;battle_tag&gt;")
             return
 
+        # ── 每日首次使用（凌晨4点重置）→ 直接开启查询，跳过确认 ──
+        cd_ok, cd_remain = await self._check_cooldown(event)
+        is_first_today = self._is_first_today(uid)
+
+        if is_first_today and cd_ok:
+            async for r in self._do_query(event, uid, target_id):
+                yield r
+            return
+
         # ── 检查 pending 状态 ──
         pending_key = f"{_SHIQU_PENDING_KV_PREFIX}:{uid}"
-        cd_ok, cd_remain = await self._check_cooldown(event)
         try:
             pending_ts = await self._plugin.get_kv_data(pending_key, 0)
         except Exception:
@@ -1060,10 +1130,9 @@ JSON Schema：
                 yield r
             return
 
-        # ── 首次触发：文字先行，图片后发（图片渲染需要时间）──
+        # ── 非首次触发：文字先行，图片后发 ──
         record = self._load_user_record(uid)
-        result_path_str = str(record.get("result_path") or "") if record else ""
-        has_last = bool(result_path_str) and Path(result_path_str).exists()
+        cached_image = str(record.get("image_path") or "") if record else ""
 
         # 1. 文字先发
         if not cd_ok:
@@ -1073,21 +1142,12 @@ JSON Schema：
             yield event.plain_result(f"⏳ 冷却中，剩余 {remain_str}，届时再发 {_SHIQU_BTN} 开启新查询。")
         else:
             await self._set_pending(event)
-            if has_last:
-                yield event.plain_result(f"👇 以下是上次判定结果。如要开启新查询，请在 **5 分钟内**再次发送 {_SHIQU_BTN}。")
-            else:
-                yield event.plain_result(f"👋 你是第一次使用此功能吗？在 **5 分钟内**再次发送 {_SHIQU_BTN} 开启新查询。")
+            yield event.plain_result(f'👋 如要开启新查询，请在 **5 分钟内**再次发送 {_SHIQU_BTN}。')
 
-        # 2. 图片后渲染发送
-        if has_last:
-            try:
-                result = json.loads(Path(result_path_str).read_text(encoding="utf-8"))
-                if isinstance(result, dict):
-                    url = await self._render_result_image(result, generated_at=str(record.get("generated_at") or ""))
-                    _LAST_IMAGE[uid] = url
-                    yield event.image_result(url)
-            except Exception as e:
-                logger.warning(f"[是区吗] 展示上次结果失败: {e}")
+        # 2. 图片直发（不重新渲染）
+        if cached_image:
+            _LAST_IMAGE[uid] = cached_image
+            yield event.image_result(cached_image)
 
     async def _do_query(self, event, uid: str, target_id: str):
         """执行实际的是区吗查询流程。"""
@@ -1131,8 +1191,7 @@ JSON Schema：
             t2 = time.time()
             logger.info(f"📊 队友数据拉取完成 ({(t2 - t1):.1f}s)")
 
-            matches_path, prompt_path, llm_raw_path, result_path = self._new_artifact_paths(uid, target_id)
-            self._atomic_write_json(matches_path, matches)
+            prompt_path, llm_raw_path = self._new_artifact_paths(uid, target_id)
 
             # 构建 prompt
             db_path = str(getattr(self._plugin, "config", {}).get("sqlite_db_path", "") or "").strip()
@@ -1145,7 +1204,7 @@ JSON Schema：
             if len(prompt.encode("utf-8")) < 10240:
                 await self._reset_cooldown(event)
                 await self._set_pending(event)
-                yield event.plain_result(f"❌ 数据抓取量异常，可能没有足够的预设比赛对局，[6v6，决斗领域]暂未适配，{_SHIQU_BTN} 已重置冷却。")
+                yield event.plain_result(f"❌ 数据抓取量异常，可能没有足够的预设/6v6比赛对局，[决斗领域]暂未适配，{_SHIQU_BTN} 已重置冷却。")
                 return
 
             # ── 调用 LLM ──
@@ -1163,7 +1222,6 @@ JSON Schema：
                 await self._set_pending(event)
                 yield event.plain_result(f"❌ AI 判定生成失败：返回内容不是合法 JSON，已重置冷却，请重试 {_SHIQU_BTN} 。")
                 return
-            self._atomic_write_json(result_path, result)
             t3 = time.time()
             logger.info(f"[是区吗] LLM done ({len(prompt)}→{len(llm_text)}ch, llm={t3 - t2:.1f}s)")
 
@@ -1177,11 +1235,10 @@ JSON Schema：
                 "uid": uid,
                 "target_id": target_id,
                 "generated_at": generated_at,
-                "matches_path": str(matches_path),
                 "prompt_path": str(prompt_path),
                 "llm_raw_path": str(llm_raw_path),
-                "result_path": str(result_path),
                 "image_path": str(url),
+                "result": result,
             })
             yield event.image_result(url)
             logger.info(f"[是区吗] 总耗时={time.time() - t0:.1f}s (render={time.time() - t3:.1f}s)")
@@ -1196,35 +1253,48 @@ JSON Schema：
             await self._dequeue(uid)
 
     async def last_result(self, event):
-        """读取用户上次结构化判定结果，重新渲染图片返回。"""
+        """读取用户上次判定结果图片直接返回，不重新渲染。"""
         uid = self._user_key(event)
 
-        # 正在走流程 → 先告知当前状态，再展示上次结果
+        # ── 正在走流程 → 告知当前状态，不展示上次结果 ──
         async with _QUEUE_LOCK:
             if uid in _ACTIVE_META:
                 yield event.plain_result(f"⏳ 判定书正在生成中，当前步骤：{_ACTIVE_META[uid]}，请稍候…")
-            elif uid in _ACTIVE:
+                return
+            if uid in _ACTIVE:
                 yield event.plain_result("⏳ 判定书正在生成中，请稍候…")
+                return
+            for euid, _ in _QUEUE:
+                if euid == uid:
+                    yield event.plain_result("⏳ 您的判定书正在排队中，请稍候…")
+                    return
 
         record = self._load_user_record(uid)
         if not record:
             await self._set_pending(event)
             yield event.plain_result(f"❌ 没有找到上次的判定书结果，请先用 {_SHIQU_BTN} 生成一份。")
             return
-        result_path = Path(str(record.get("result_path") or ""))
-        if not result_path.exists():
-            await self._set_pending(event)
-            yield event.plain_result(f"❌ 上次的判定结果文件不存在，请用 {_SHIQU_BTN} 重新生成一份。")
+
+        # 有缓存图片 → 直接发
+        cached_image = str(record.get("image_path") or "")
+        if cached_image:
+            _LAST_IMAGE[uid] = cached_image
+            yield event.image_result(cached_image)
             return
-        try:
-            result = json.loads(result_path.read_text(encoding="utf-8"))
-            if not isinstance(result, dict):
-                raise ValueError("result json is not an object")
-            url = await self._render_result_image(result, generated_at=str(record.get("generated_at") or ""))
-            _LAST_IMAGE[uid] = url
-            record["image_path"] = str(url)
-            self._save_user_record(uid, record)
-            yield event.image_result(url)
-        except Exception as exc:
-            logger.error(f"[是区吗] 重新渲染结果失败: {exc}", exc_info=True)
-            yield event.plain_result(f"❌ 重新渲染判定书失败：{exc}")
+
+        # 无缓存图片但 result 还在 → 重新渲染
+        result = record.get("result")
+        if isinstance(result, dict):
+            try:
+                url = await self._render_result_image(result, generated_at=str(record.get("generated_at") or ""))
+                _LAST_IMAGE[uid] = url
+                record["image_path"] = str(url)
+                self._save_user_record(uid, record)
+                yield event.image_result(url)
+            except Exception as exc:
+                logger.error(f"[是区吗] 重新渲染结果失败: {exc}", exc_info=True)
+                yield event.plain_result(f"❌ 重新渲染判定书失败：{exc}")
+            return
+
+        await self._set_pending(event)
+        yield event.plain_result(f"❌ 上次的判定结果不存在，请用 {_SHIQU_BTN} 重新生成一份。")

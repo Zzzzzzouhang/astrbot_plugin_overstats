@@ -490,6 +490,10 @@ class OverstatsPlugin(Star):
         """统一的 ID 解析失败提示文案，修改 id_resolve_error_hint 即可全局生效"""
         return f"❌ {prefix}：{self.id_resolve_error_hint}"
 
+    def _bnet_err(self, cmd: str) -> str:
+        """ponytail: 10 处重复的战网ID必填错误提示，统一收敛到此"""
+        return f"❌ 请输入战网ID，如：/{cmd} Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345"
+
     async def _prepare_business_status_prompt(self, event: AstrMessageEvent, base_text: str) -> tuple[str | None, str | None, bool]:
         """准备业务状态提示。返回 (提示文本, 跟踪token, 是否应提前终止)。
 
@@ -926,9 +930,40 @@ class OverstatsPlugin(Star):
                 event.stop_event()
                 return
 
+        # 无空格指令识别：/今日总结Player#12345 → 按已知命令前缀匹配拆分（必须在 bind 之前，否则会误绑）
+        adapt_map = self._ensure_full_adapt_map()
+        for cmd_name in sorted(adapt_map.keys(), key=len, reverse=True):  # 长命令优先
+            if cmd_name in ("大神绑定", "绑定"):  # 交由下方 bind 检测处理
+                continue
+            method = adapt_map[cmd_name]
+            for prefix in (f"/{cmd_name}", cmd_name):
+                if not msg.startswith(prefix) or len(msg) <= len(prefix):
+                    continue
+                rest = msg[len(prefix):]
+                bnet_m = re.match(r'^([^#＃\s]+[#＃]\d+)$', rest)  # 纯战网ID格式
+                if not bnet_m:
+                    continue
+                bnet_id = bnet_m.group(1)
+                try:
+                    params = [p for p in inspect.signature(method).parameters.values()
+                              if p.name not in ("self", "event")]
+                except Exception:
+                    params = []
+                if not params:
+                    continue
+                args = [bnet_id] + [""] * (len(params) - 1)
+                try:
+                    async for r in method(event, *args[:len(params)]):
+                        yield r
+                    event.stop_event()
+                    return
+                except Exception as e:
+                    logger.debug(f"无空格指令派发失败（{cmd_name}）: {e}")
+                    return
+
         bind_match = re.match(r"^(?:/?(?:大神)?绑定\s+)?(?:/?(?:大神)?绑定)?\s*([^#＃\s]+[#＃]\d+)$", msg)
         if bind_match:
-            clean_bnet_id = bind_match.group(1)  # 极其精准地提取真正的战网 ID
+            clean_bnet_id = bind_match.group(1)
             async for result in self.dashen_bind(event, bnet_id=clean_bnet_id):
                 yield result
             event.stop_event()
@@ -985,6 +1020,37 @@ class OverstatsPlugin(Star):
                 yield r
             event.stop_event()
             return
+
+        # 无空格指令识别：@昵称 今日总结Player#12345 → 按已知命令前缀匹配（必须在 bind 之前，否则会误绑）
+        adapt_map = self._ensure_full_adapt_map()
+        for cmd_name in sorted(adapt_map.keys(), key=len, reverse=True):
+            if cmd_name in ("大神绑定", "绑定"):
+                continue
+            method = adapt_map[cmd_name]
+            for prefix in (cmd_name,):  # full_adaptation 场景不带 / 前缀
+                if not cmd_text.startswith(prefix) or len(cmd_text) <= len(prefix):
+                    continue
+                rest = cmd_text[len(prefix):]
+                bnet_m = re.match(r'^([^#＃\s]+[#＃]\d+)$', rest)
+                if not bnet_m:
+                    continue
+                bnet_id = bnet_m.group(1)
+                try:
+                    params = [p for p in inspect.signature(method).parameters.values()
+                              if p.name not in ("self", "event")]
+                except Exception:
+                    params = []
+                if not params:
+                    continue
+                args = [bnet_id] + [""] * (len(params) - 1)
+                try:
+                    async for r in method(event, *args[:len(params)]):
+                        yield r
+                    event.stop_event()
+                    return
+                except Exception as e:
+                    logger.debug(f"全量适配无空格派发失败（{cmd_name}）: {e}")
+                    return
 
         # 绑定快捷：@昵称 Player#12345
         bind_m = re.match(r"^(?:/?(?:大神)?绑定\s+)?(?:/?(?:大神)?绑定)?\s*([^#＃\s]+[#＃]\d+)$", cmd_text)
@@ -1212,7 +1278,7 @@ class OverstatsPlugin(Star):
         """生成过去 24 小时内的对局大数据总结卡片。"""
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/今日总结 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
+            yield self._plain_error_result(event, self._bnet_err("今日总结"))
             return
 
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"⏳ 正在计算 {target_id} 的今日战绩总结...")
@@ -1256,7 +1322,7 @@ class OverstatsPlugin(Star):
         """统计并生成昨日战绩数据卡片。"""
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/昨日总结 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
+            yield self._plain_error_result(event, self._bnet_err("昨日总结"))
             return
         prompt_token = None
         _maintenance_stop = False
@@ -1291,7 +1357,7 @@ class OverstatsPlugin(Star):
         """统计本周战绩大数据总结，耗时较长（约 30-60 秒）。"""
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/周度总结 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
+            yield self._plain_error_result(event, self._bnet_err("周度总结"))
             return
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"📊 正在生成 {target_id} 的本周战绩大数据总结...")
         if status_text:
@@ -1322,7 +1388,7 @@ class OverstatsPlugin(Star):
         bnet_id, mode = self._parse_profile_args(arg1, arg2)
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/大神数据 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
+            yield self._plain_error_result(event, self._bnet_err("大神数据"))
             return
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🔍 正在生成 {target_id} 的玩家详情...")
         if status_text:
@@ -1350,7 +1416,7 @@ class OverstatsPlugin(Star):
         """拉取最近 20 局的对局列表。"""
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/大神对局 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
+            yield self._plain_error_result(event, self._bnet_err("大神对局"))
             return
 
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"📊 正在拉取 {target_id} 的最近对局...")
@@ -1533,7 +1599,7 @@ class OverstatsPlugin(Star):
 
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/历史段位 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345\n可选附加 起始 终止 赛季，如 /历史段位 Player#12345 15 22")
+            yield self._plain_error_result(event, self._bnet_err("历史段位") + "\n可选附加 起始 终止 赛季，如 /历史段位 Player#12345 15 22")
             return
 
         season_hint = ""
@@ -1612,7 +1678,7 @@ class OverstatsPlugin(Star):
 
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/快速强度 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345\n可选附加对局数（3-12），如 /快速强度 Player#12345 8")
+            yield self._plain_error_result(event, self._bnet_err("快速强度") + "\n可选附加对局数（3-12），如 /快速强度 Player#12345 8")
             return
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"⚡ 正在评估 {target_id} 的快速强度指数...")
         if status_text:
@@ -1655,7 +1721,7 @@ class OverstatsPlugin(Star):
 
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/竞技强度 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345\n可选附加对局数（3-12），如 /竞技强度 Player#12345 8")
+            yield self._plain_error_result(event, self._bnet_err("竞技强度") + "\n可选附加对局数（3-12），如 /竞技强度 Player#12345 8")
             return
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🏆 正在评估 {target_id} 的竞技天梯强度指数...")
         if status_text:
@@ -1688,7 +1754,7 @@ class OverstatsPlugin(Star):
         bnet_id, season = self._parse_treemap_args(arg1, arg2)
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/快速英雄云图 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
+            yield self._plain_error_result(event, self._bnet_err("快速英雄云图"))
             return
 
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"📊 正在获取 {target_id} 的快速模式英雄云图...")
@@ -1721,7 +1787,7 @@ class OverstatsPlugin(Star):
         bnet_id, season = self._parse_treemap_args(arg1, arg2)
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
-            yield self._plain_error_result(event, "❌ 请输入战网ID，如：/竞技英雄云图 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345")
+            yield self._plain_error_result(event, self._bnet_err("竞技英雄云图"))
             return
 
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"🏆 正在获取 {target_id} 的竞技模式英雄云图...")

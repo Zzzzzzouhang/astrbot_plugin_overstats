@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.4.1 (2026-06-29)
+
+### ✨ 新增
+- **无空格指令识别**：支持 `/{命令}{战网ID}` 格式（如 `/今日总结Player#12345`），自动拆分并派发
+
+### 🔧 优化
+- **是区吗扩充 6v6 模式**：抓取范围从 `SportPreset/LeisurePreset` 扩展到 `Sport6v6/Leisure6v6`
+- **队友英雄识别修复**：`_expand_player_segments` 改为优先使用 `_heroList.heroId`，避免从 statMap 推断错误
+- **队友数据查询重构**：改用 `customer_token + match_id` 查同一局（对齐后端 `_build_all_player_details`），替代不可靠的 index 匹配
+- **战网ID错误提示收敛**：`_bnet_err` 统一 10 处重复的错误文案
+
 ## v2.3.2 (2026-06-27)
 
 ### ✨ 新增
