@@ -67,15 +67,16 @@ def _infer_hero_guid_from_stat_map(stat_map: dict, fallback_hero_guid: str = "",
         return ""
     return fallback_hero_guid if allow_fallback else ""
 
-_VERDICT_ENUM = ["你是职业吗？", "来了，暴力炸！", "化蛹成蝶（？）", "恭喜，你不是区！", "不幸，你可能是区？", "哦灭跌多，你就是区！", "你个大区！！！"]
+# ponytail: 移除 verdict 字段（顶层 + teammate_comments），由 score 经 _score_rule 反推。
+# 原 schema 同时让 LLM 输出 score 和 verdict，但 _normalize_result 仍按 score 重算 verdict，
+# 等于让模型多背一个 enum 约束却丢弃其输出，徒增 JSON 解析失败概率。
 _SHIQU_JSON_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["target_id", "score", "verdict", "summary", "match_comments", "overall_comment", "teammate_comments"],
+    "required": ["target_id", "score", "summary", "match_comments", "overall_comment", "teammate_comments"],
     "properties": {
         "target_id": {"type": "string"},
         "score": {"type": "integer", "minimum": 0, "maximum": 100},
-        "verdict": {"type": "string", "enum": _VERDICT_ENUM},
         "summary": {"type": "string", "minLength": 1},
         "match_comments": {
             "type": "array",
@@ -98,12 +99,11 @@ _SHIQU_JSON_SCHEMA = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["name", "games", "score", "verdict", "comment"],
+                "required": ["name", "games", "score", "comment"],
                 "properties": {
                     "name": {"type": "string"},
                     "games": {"type": "integer", "minimum": 1},
                     "score": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "verdict": {"type": "string", "enum": _VERDICT_ENUM},
                     "comment": {"type": "string", "minLength": 1},
                 },
             },
@@ -886,12 +886,14 @@ class ShiquManager:
 建议把「最后一击」截图珍藏，毕竟这种高光时刻不多见。
 
 【输出格式】
-只输出一个合法 JSON 对象，不要 markdown，不要代码块，不要任何 JSON 外的解释文字。
-所有字段必须使用中文内容；verdict 字段只能从 schema enum 中选择。
-match_comments 必须覆盖已获取到的 {n} 局，index 从 1 到 {n}；teammate_comments 必须为【焦点玩家的好友 ID】中的每一位好友都生成一条点评，缺一不可，禁止输出不在列表中的玩家。
-overall_comment 约 300 字，串子风格阴阳总结，有数据支撑，可少量使用 emoji 增强表达力。
-所有字符串值内禁止出现双引号（\"），如需引用改用单引号「」。
-score/games/index 字段必须是纯整数数字，严禁输出任何文字、算式或描述性文本。
+严格输出符合下方 JSON Schema 的合法 JSON 对象，禁止输出 markdown 代码块、注释或任何 JSON 之外的文字。
+
+字段规范（schema 未表达的部分）：
+- 所有字符串使用中文，内容简练。字符串内禁止英文双引号，引用请用「」或『』，emoji 可正常使用。
+- result 仅可取值：胜 / 负 / 平 / 未知。
+- match_comments 必须覆盖【比赛数据】全部 {n} 局，index 从 1 递增到 {n}，禁止跳号或重复。
+- teammate_comments 必须为【焦点玩家的好友 ID】中的每一位好友都生成一条点评，缺一不可，禁止输出列表外的玩家。
+- overall_comment 约 300 字，串子风格阴阳总结，需有数据支撑，可少量使用 emoji。
 
 JSON Schema：
 {json.dumps(_SHIQU_JSON_SCHEMA, ensure_ascii=False, indent=2)}
@@ -943,7 +945,14 @@ JSON Schema：
 
                     if not use_stream:
                         data = await resp.json()
-                        return ((data.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip() or None
+                        choices = data.get("choices") if isinstance(data, dict) else None
+                        if not isinstance(choices, list) or not choices:
+                            logger.error(f"[是区吗] LLM 非流式响应 choices 异常: {str(data)[:500]}")
+                            return None
+                        msg = choices[0] if isinstance(choices[0], dict) else {}
+                        msg = msg.get("message") or {}
+                        msg = msg if isinstance(msg, dict) else {}
+                        return (str(msg.get("content") or "")).strip() or None
 
                     # SSE 流式累积
                     parts = []
@@ -954,16 +963,30 @@ JSON Schema：
                         chunk = line[6:]
                         if chunk == "[DONE]":
                             break
+                        # ponytail: 单个 chunk 结构异常不能毁掉整条流。
+                        # 原 except 只接 JSONDecodeError，choices 为 dict/null/None 等
+                        # 会抛 IndexError/AttributeError/TypeError 冒泡到外层 → 整条响应作废。
                         try:
-                            delta = (json.loads(chunk).get("choices") or [{}])[0].get("delta", {})
+                            obj = json.loads(chunk)
+                            if not isinstance(obj, dict):
+                                continue
+                            choices = obj.get("choices")
+                            if not isinstance(choices, list) or not choices:
+                                continue
+                            first = choices[0]
+                            if not isinstance(first, dict):
+                                continue
+                            delta = first.get("delta") or {}
+                            delta = delta if isinstance(delta, dict) else {}
                             if "content" in delta:
                                 parts.append(delta["content"])
-                        except json.JSONDecodeError:
+                        except Exception as chunk_err:
+                            logger.debug(f"[是区吗] SSE chunk 跳过: {chunk_err} | {chunk[:200]}")
                             continue
 
                     return "".join(parts) or None
             except Exception as e:
-                logger.error(f"[是区吗] LLM 调用异常: {e}")
+                logger.error(f"[是区吗] LLM 调用异常: {e}", exc_info=True)
                 return None
 
     async def test_connectivity(self):

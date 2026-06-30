@@ -33,7 +33,7 @@ except ImportError:
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.3.1")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.6.2")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -537,7 +537,7 @@ class OverstatsPlugin(Star):
             return f"{int(h)}小时{int(m)}分钟"
         return f"{int(m)}分钟{int(s)}秒"
 
-    _VIOLATION_BAN_MSG = "⛔ 您之前【{command}】查询的图片内容违规，该指令已被禁用{remain}，请勿再试。"
+    _VIOLATION_BAN_MSG = "⛔ 【极少数情况】您之前【{command}】查询返回的图片包含违规内容（来自qq官方接口返回提示，可能：违规id，等），该指令已被自动禁用{remain}。请勿再试，如有疑问请联系管理员：2338127903。"
 
     def _is_group_message(self, event: AstrMessageEvent) -> bool:
         try:
@@ -930,19 +930,18 @@ class OverstatsPlugin(Star):
         except asyncio.CancelledError:
             pass
 
-    def _send_image_result(self, event: AstrMessageEvent, img_bytes: bytes, fallback_text: str = ""):
+    def _build_image_chain(self, event: AstrMessageEvent, img_bytes: bytes, fallback_text: str = ""):
+        """构建图片消息链（同步，不含违规检测）。"""
         if not img_bytes:
             return self._plain_error_result(event, fallback_text or "❌ 图片生成失败")
         try:
             user_id = event.get_sender_id()
             if self._save_image_locally:
-                # 本地保存模式：先写临时文件再用 fromFileSystem 发送（原有行为）
                 img_hash = abs(hash(img_bytes))
                 img_path = self.temp_image_dir / f"{img_hash}.png"
                 img_path.write_bytes(img_bytes)
                 image_comp = Comp.Image.fromFileSystem(str(img_path))
             else:
-                # 直接发送模式：bytes 转 base64，不落盘
                 image_comp = Comp.Image.fromBytes(img_bytes)
             chain = [Comp.At(qq=user_id), Comp.Plain("\n" if not fallback_text else f"\n{fallback_text}\n"), image_comp]
             return event.chain_result(chain)
@@ -950,9 +949,9 @@ class OverstatsPlugin(Star):
             logger.error(f"构建图片消息链时发生错误: {e}")
             return self._plain_error_result(event, fallback_text or "❌ 机器人构建图片组件失败")
 
-    async def _yield_image_result(self, event: AstrMessageEvent, img_bytes: bytes, command: str, fallback_text: str = ""):
+    async def _send_image_result(self, event: AstrMessageEvent, img_bytes: bytes, command: str, fallback_text: str = ""):
         """发送单张图片，自动捕获违规异常并封禁该指令。"""
-        result = self._send_image_result(event, img_bytes, fallback_text)
+        result = self._build_image_chain(event, img_bytes, fallback_text)
         try:
             yield result
         except Exception as exc:
@@ -1360,7 +1359,8 @@ class OverstatsPlugin(Star):
             logger.error(f"读取测试图片 test1.png 失败: {e}")
             yield self._plain_error_result(event, "❌ 读取测试图片失败。")
             return
-        yield self._send_image_result(event, img_bytes)
+        async for r in self._send_image_result(event, img_bytes, "单图测试"):
+            yield r
 
     @filter.command("owhelp", alias={'ow菜单', 'ow帮助', 'OW帮助', 'help'})
     async def ow_help(self, event: AstrMessageEvent):
@@ -1427,13 +1427,15 @@ class OverstatsPlugin(Star):
 
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "今日总结"):
+                    yield r
             elif error_data and error_data.get("error") == "summary_empty" and error_data.get("details", {}).get("scope") == "today":
                 yield event.plain_result(f"ℹ️ {target_id} 在过去的 24 小时内没有对局记录，尝试生成昨日总结...")
                 img_bytes, error_data = await self._fetch_image("/dashen-summary/yesterday/image", {"bnet_id": target_id})
                 if img_bytes:
                     success = True
-                    yield self._send_image_result(event, img_bytes)
+                    async for r in self._send_image_result(event, img_bytes, "今日总结"):
+                        yield r
                 else:
                     err_msg = error_data.get("message") if error_data else "获取昨日总结失败，可能昨日没有对局记录。"
                     if err_msg and "Could not resolve customerToken" in err_msg:
@@ -1474,7 +1476,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/dashen-summary/yesterday/image", {"bnet_id": target_id})
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "昨日总结"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "获取昨日总结失败，可能昨日未登录游戏。"
                 if err_msg and "Could not resolve customerToken" in err_msg:
@@ -1504,7 +1507,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/dashen-summary/week/image", {"bnet_id": target_id}, timeout=900)
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "周度总结"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "获取周度总结失败，请检查服务日志或是否请求超时。"
                 if err_msg and "Could not resolve customerToken" in err_msg:
@@ -1535,7 +1539,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/dashen-profile/image", {"bnet_id": target_id, "mode": mode})
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "大神数据"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "获取玩家详情卡片失败。"
                 if err_msg and "Could not resolve customerToken" in err_msg:
@@ -1564,7 +1569,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/dashen-match/image", {"bnet_id": target_id})
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "大神对局"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "获取最近对局列表失败。"
                 if err_msg and "Could not resolve customerToken" in err_msg:
@@ -1780,7 +1786,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/dashen-rank-history/image", payload)
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "历史段位"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "获取历史段位失败。"
                 if err_msg and "Could not resolve customerToken" in err_msg:
@@ -1805,7 +1812,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/dashen-sameplay/image", payload)
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "同玩查询"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "无法获取同玩查询数据，请检查两个ID是否输入正确。"
                 if err_msg and "Could not resolve customerToken" in err_msg:
@@ -1848,7 +1856,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/dashen-quick-strength/image", payload)
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "快速强度"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "获取快速强度指数失败。"
                 if err_msg and "Could not resolve customerToken" in err_msg:
@@ -1891,7 +1900,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/dashen-competitive-strength/image", payload)
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "竞技强度"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "获取竞技强度指数失败。"
                 if err_msg and "Could not resolve customerToken" in err_msg:
@@ -1924,7 +1934,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/dashen-hero-treemap/image", payload)
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "快速英雄云图"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "获取快速英雄云图失败。"
                 if err_msg and "Could not resolve customerToken" in err_msg:
@@ -1957,7 +1968,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/dashen-hero-treemap/image", payload)
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "竞技英雄云图"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "获取竞技英雄云图失败。"
                 if err_msg and "Could not resolve customerToken" in err_msg:
@@ -1984,7 +1996,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/ow-hero-perk/image", {"hero": hero_name})
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "威能"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else f"未能找到英雄【{hero_name}】的威能图。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
@@ -2023,7 +2036,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/ow-hero-pick-rate/image", payload)
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "ow英雄"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else f"暂时无法获取英雄 {hero_name} 的数据走势。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
@@ -2044,7 +2058,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/ow-shop/image")
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "商店"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "获取精选商店图片失败。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
@@ -2065,7 +2080,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/ow-esports/image")
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "ow赛事"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "赛事信息获取失败。请检查后台是否正确配置了 `OW_ESPORTS_API_KEY`。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
@@ -2095,7 +2111,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/ow-hero-pick-rate/image", payload)
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "获取段位分布"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "无法获取全服天梯分布排行。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
@@ -2118,7 +2135,8 @@ class OverstatsPlugin(Star):
                 img_bytes, error_data = await self._fetch_image("/patch-notes/image", {"patch_kind": "latest"})
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "ow活动"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "暂无正在进行的版本活动公告。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
@@ -2148,7 +2166,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/ow-hero-pick-rate/image", payload)
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "banpick"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "无法获取全英雄排行。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
@@ -2169,7 +2188,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/patch-notes/image", {"patch_kind": "latest"})
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "mappick"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "无法拉取最新地图池分布。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
@@ -2190,7 +2210,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/ow-shop/image")
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "皮肤搜索"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "无法获取精选皮肤卡片。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
@@ -2216,7 +2237,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/patch-notes/image", {"patch_kind": kind})
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "ow更新"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "获取更新日志失败。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
@@ -2243,7 +2265,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/dashen-rank-leaderboard/image", payload)
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "省榜"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "获取天梯省榜失败。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
@@ -2713,6 +2736,10 @@ class OverstatsPlugin(Star):
 • <qqbot-cmd-input text="/维护 " show="/维护 内容" reference="false" /> 开启维护模式（如：/维护 服务升级中，暂停服务）
 • <qqbot-cmd-input text="/维护 取消 " show="/维护 取消" reference="false" /> 关闭维护模式
 
+⛔ **违规封禁管理：**
+• <qqbot-cmd-input text="/ow违禁封禁 " show="/ow违禁封禁 用户ID 指令名" reference="false" /> 封禁用户指定指令12h（如：/ow违禁封禁 qqofficial:1170599013 单局详细）
+• <qqbot-cmd-input text="/ow违禁解封 " show="/ow违禁解封 用户ID 指令名" reference="false" /> 解除用户指定指令封禁
+
 ⚙️ **群组配置：**
 • <qqbot-cmd-input text="/群设置 " show="/群设置" reference="false" /> 查看当前群组功能配置
 • <qqbot-cmd-input text="/群设置 提示 开 " show="/群设置 提示 开" reference="false" /> / <qqbot-cmd-input text="/群设置 提示 关 " show="/群设置 提示 关" reference="false" /> 切换首次提示后不再提示
@@ -2770,7 +2797,8 @@ class OverstatsPlugin(Star):
             img_bytes, error_data = await self._fetch_image("/dashen-hero-leaderboard/image", payload)
             if img_bytes:
                 success = True
-                yield self._send_image_result(event, img_bytes)
+                async for r in self._send_image_result(event, img_bytes, "绝活榜"):
+                    yield r
             else:
                 err_msg = error_data.get("message") if error_data else "获取英雄绝活榜失败。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
