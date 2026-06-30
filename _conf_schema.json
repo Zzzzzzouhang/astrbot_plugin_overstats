@@ -272,6 +272,30 @@
     "obvious_hint": true,
     "default": ""
   },
+  "shiqu_llm_api_base": {
+    "description": "是区吗 LLM API Base URL",
+    "type": "string",
+    "hint": "OpenAI 兼容接口地址，例如 https://api.deepseek.com/v1。留空则回退使用 AstrBot 内置 LLM。",
+    "default": ""
+  },
+  "shiqu_llm_api_key": {
+    "description": "是区吗 LLM API Key",
+    "type": "string",
+    "hint": "对应 API Base URL 的密钥。",
+    "default": ""
+  },
+  "shiqu_llm_model": {
+    "description": "是区吗 LLM 模型名",
+    "type": "string",
+    "hint": "例如 deepseek-ai/DeepSeek-V3.2。",
+    "default": ""
+  },
+  "shiqu_llm_stream": {
+    "description": "是区吗 LLM 流式传输",
+    "type": "bool",
+    "hint": "开启后使用 SSE 流式接收 LLM 响应，降低超时风险。",
+    "default": true
+  },
   "shiqu_cd_map": {
     "description": "是区吗分级配置（JSON）",
     "type": "text",

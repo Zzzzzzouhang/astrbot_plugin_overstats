@@ -16,6 +16,9 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
+import aiohttp
+from astrbot.api.message_components import Image
+
 logger = logging.getLogger("astrbot")
 
 try:
@@ -113,6 +116,7 @@ _ACTIVE: set = set()
 _ACTIVE_META: dict[str, str] = {}  # uid → 当前步骤描述，用于重复触发时告知进度
 _LAST_IMAGE: dict[str, str] = {}   # uid → 上次生成的图片文件路径（进程内加速用，持久记录以 JSON 为准）
 _QUEUE_LOCK = asyncio.Lock()
+_LLM_SEMAPHORE = asyncio.Semaphore(2)  # ponytail: LLM API 并发上限，防上游限流
 
 _VERDICT_RULES = [
     {"score_min": 83, "labels": ("你是职业吗？",), "canonical": "你是职业吗？", "emoji": "😱", "class": "god"},
@@ -313,20 +317,47 @@ class ShiquManager:
             data = json.loads(path.read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else None
         except Exception as e:
-            logger.warning(f"[是区吗] 读取用户结果记录失败: {e}")
+            logger.warning(f"[是区吗][uid={uid}] 读取用户结果记录失败: {e}")
             return None
 
-    async def _render_result_image(self, result: dict, generated_at: str = "") -> str:
+    async def _render_result_image(self, result: dict, generated_at: str = "", uid: str = "") -> str:
+        """渲染是区吗判定书并下载到本地持久化目录，返回本地文件路径。
+
+        避免直接缓存 text2img 服务临时 URL（服务端可能随时清理导致 404）。
+        """
         target_id = str(result.get("target_id") or "未知玩家")
         title = f"是区吗判定书 · {target_id}"
         footer_time = generated_at or time.strftime("%Y-%m-%d %H:%M:%S")
         footer = f"生成时间：{footer_time}  ·  AI 数据带阴阳师 (Astrbot LLM)"
-        body_html = self._plain_to_html(self._result_to_plain_text(result))
-        return await self._plugin.html_render(
+        body_html = self._plain_to_html(self._result_to_plain_text(result, generated_at=generated_at))
+        render_url = await self._plugin.html_render(
             _SHIQU_HTML_TMPL,
             {"title": title, "body": body_html, "footer": footer},
             options={"type": "png", "width": 520, "viewport": {"width": 520, "height": 900}},
         )
+
+        # 从 text2img 服务下载图片字节，保存到本地持久化目录
+        try:
+            session = await self._plugin._get_http_session()
+            async with session.get(render_url) as resp:
+                if resp.status == 200:
+                    img_bytes = await resp.read()
+                else:
+                    logger.error(f"[是区吗] 从 text2img 下载图片失败 HTTP {resp.status}")
+                    return ""
+        except Exception as e:
+            logger.error(f"[是区吗] 从 text2img 下载图片异常: {e}")
+            return ""
+
+        # 保存到本地持久化目录
+        img_dir = self._data_dir() / "images"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        ts = int(time.time() * 1000)
+        safe_uid = self._safe_filename(uid, "user")
+        local_path = img_dir / f"shiqu_{safe_uid}_{ts}.png"
+        local_path.write_bytes(img_bytes)
+        logger.info(f"[是区吗] 判定书图片已保存到本地: {local_path}")
+        return str(local_path)
 
     async def _enqueue(self, event) -> tuple[int, int]:
         """加入队列，返回 (排号, 总人数)。排号 0 表示立即执行。"""
@@ -400,7 +431,7 @@ class ShiquManager:
                     return data
                 return None
         except Exception as e:
-            logger.warning(f"[是区吗] 拉取 index={index} 失败: {e}")
+            logger.warning(f"[是区吗][bnet={bnet_id}] 拉取 index={index} 失败: {e}")
             return None
 
     async def _fetch_match_by_token_match_id(self, customer_token: str, match_id: str) -> Optional[dict]:
@@ -414,7 +445,7 @@ class ShiquManager:
                     return data
                 return None
         except Exception as e:
-            logger.warning(f"[是区吗] 按 match_id={match_id[:12]} 拉取队友详情失败: {e}")
+            logger.warning(f"[是区吗][match={match_id[:12]}] 拉取队友详情失败: {e}")
             return None
 
     async def _fetch_matches(self, bnet_id: str, target: int = 12) -> list[dict]:
@@ -452,7 +483,7 @@ class ShiquManager:
                     if hl:
                         p["_heroList"] = hl
             except Exception as e:
-                logger.warning(f"[是区吗] 获取队友 {name} 详细失败: {e}")
+                logger.warning(f"[是区吗][target={target_id}] 获取队友 {name} 详细失败: {e}")
 
     async def _serial_fetch_all_teammate_details(self, matches: list[dict], target_id: str) -> None:
         """对所有对局串行拉取队友详细数据。"""
@@ -743,7 +774,7 @@ class ShiquManager:
      * <43 = 你个大区！！！
 3. 综合判定：综合 {n} 场比赛中英雄对应核心指标进行评分，不考虑比赛胜负，只论数据评价。
 4. 好友点评规则：
-   - 只能点评下方【焦点玩家的好友 ID】里出现的玩家。
+   - 必须点评下方【焦点玩家的好友 ID】中出现的每一位好友，缺一不可。
    - 好友点评只能基于他们的【比赛数据】，比赛胜负不影响评价，可以对焦点玩家表现上下文进行轻量评价。
    - 评分标准同焦点玩家（≥50夸/赞赏，<50串），但没有数据时语气要保守。
 
@@ -756,9 +787,10 @@ class ShiquManager:
 【输出格式】
 只输出一个合法 JSON 对象，不要 markdown，不要代码块，不要任何 JSON 外的解释文字。
 所有字段必须使用中文内容；verdict 字段只能从 schema enum 中选择。
-match_comments 必须覆盖已获取到的 {n} 局，index 从 1 到 {n}；teammate_comments 只能从【焦点玩家的好友 ID】中选择，禁止输出不在列表中的玩家。
+match_comments 必须覆盖已获取到的 {n} 局，index 从 1 到 {n}；teammate_comments 必须为【焦点玩家的好友 ID】中的每一位好友都生成一条点评，缺一不可，禁止输出不在列表中的玩家。
 overall_comment 约 300 字，串子风格阴阳总结，有数据支撑，可少量使用 emoji 增强表达力。
 所有字符串值内禁止出现双引号（\"），如需引用改用单引号「」。
+score/games/index 字段必须是纯整数数字，严禁输出任何文字、算式或描述性文本。
 
 JSON Schema：
 {json.dumps(_SHIQU_JSON_SCHEMA, ensure_ascii=False, indent=2)}
@@ -772,44 +804,107 @@ JSON Schema：
 
     # ── LLM 调用 ──
 
-    async def _call_astrbot_llm(self, event, prompt: str) -> Optional[str]:
-        """通过 AstrBot 内置 LLM 生成是区吗判定。"""
-        try:
-            umo = event.unified_msg_origin
-            provider_id = None
-            try:
-                provider_id = await self._plugin.context.get_current_chat_provider_id(umo=umo)
-            except Exception:
-                try:
-                    provider_id = await self._plugin.context.get_current_chat_provider_id()
-                except Exception:
-                    pass
+    async def _call_llm(self, prompt: str) -> Optional[str]:
+        """直接调用 OpenAI 兼容 API（可配置），支持 SSE 流式传输。
 
-            if not provider_id:
-                logger.error("[是区吗] LLM provider_id not found")
+        配置项：shiqu_llm_api_base / shiqu_llm_api_key / shiqu_llm_model / shiqu_llm_stream
+        """
+        api_base = str(self._plugin.config.get("shiqu_llm_api_base", "") or "").strip().rstrip("/")
+        api_key = str(self._plugin.config.get("shiqu_llm_api_key", "") or "").strip()
+        model = str(self._plugin.config.get("shiqu_llm_model", "") or "").strip()
+        use_stream = bool(self._plugin.config.get("shiqu_llm_stream", True))
+
+        if not api_base or not api_key or not model:
+            logger.error("[是区吗] LLM 配置不完整，请在插件配置中填写 shiqu_llm_api_base / shiqu_llm_api_key / shiqu_llm_model")
+            return None
+
+        url = f"{api_base}/chat/completions"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": use_stream,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "shiqu_result", "strict": True, "schema": _SHIQU_JSON_SCHEMA},
+            },
+        }
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+        async with _LLM_SEMAPHORE:
+            try:
+                session = await self._plugin._get_http_session()
+                async with session.post(url, json=payload, headers=headers,
+                                         timeout=aiohttp.ClientTimeout(total=600)) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        logger.error(f"[是区吗] LLM API HTTP {resp.status}: {body[:500]}")
+                        return None
+
+                    if not use_stream:
+                        data = await resp.json()
+                        return (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip() or None
+
+                    # SSE 流式累积
+                    parts = []
+                    async for line in resp.content:
+                        line = line.decode("utf-8").strip()
+                        if not line.startswith("data: "):
+                            continue
+                        chunk = line[6:]
+                        if chunk == "[DONE]":
+                            break
+                        try:
+                            delta = json.loads(chunk).get("choices", [{}])[0].get("delta", {})
+                            if "content" in delta:
+                                parts.append(delta["content"])
+                        except json.JSONDecodeError:
+                            continue
+
+                    return "".join(parts) or None
+            except Exception as e:
+                logger.error(f"[是区吗] LLM 调用异常: {e}")
                 return None
 
-            llm_kwargs = {
-                "chat_provider_id": provider_id,
-                "prompt": prompt,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "shiqu_result",
-                        "strict": True,
-                        "schema": _SHIQU_JSON_SCHEMA,
-                    },
-                },
-            }
-            try:
-                resp = await self._plugin.context.llm_generate(**llm_kwargs)
-            except Exception as e:
-                logger.warning(f"[是区吗] json_schema 调用失败，降级为普通 JSON prompt: {e}")
-                resp = await self._plugin.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
-            return (resp.completion_text if resp else None) or None
+    async def test_connectivity(self):
+        """测试 LLM 连通性，返回 (ok, message)。"""
+        api_base = str(self._plugin.config.get("shiqu_llm_api_base", "") or "").strip().rstrip("/")
+        api_key = str(self._plugin.config.get("shiqu_llm_api_key", "") or "").strip()
+        model = str(self._plugin.config.get("shiqu_llm_model", "") or "").strip()
+
+        if not api_base or not api_key or not model:
+            return False, "❌ 是区吗 LLM 配置不完整，请先填写 shiqu_llm_api_base / shiqu_llm_api_key / shiqu_llm_model"
+
+        url = f"{api_base}/chat/completions"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+        }
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+        try:
+            t0 = time.time()
+            session = await self._plugin._get_http_session()
+            async with session.post(url, json=payload, headers=headers,
+                                     timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                elapsed = (time.time() - t0) * 1000
+                if resp.status != 200:
+                    body = await resp.text()
+                    return False, f"❌ HTTP {resp.status} ({elapsed:.0f}ms)\n{body[:300]}"
+
+                data = await resp.json()
+                content = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+                usage = data.get("usage", {})
+                return True, (
+                    f"✅ 连通正常 ({elapsed:.0f}ms)\n"
+                    f"模型: {model}\n"
+                    f"响应: {content or '(空)'}\n"
+                    f"Token: prompt={usage.get('prompt_tokens', '?')} "
+                    f"completion={usage.get('completion_tokens', '?')} "
+                    f"total={usage.get('total_tokens', '?')}"
+                )
         except Exception as e:
-            logger.error(f"[是区吗] 调用 AstrBot LLM 失败: {e}")
-            return None
+            return False, f"❌ 连接异常: {e}"
 
     # ── 结构化结果 → 渲染文本 → HTML ──
 
@@ -843,18 +938,51 @@ JSON Schema：
         return ''.join(result)
 
     @staticmethod
+    def _repair_json_structure(text: str) -> str:
+        """修复 JSON 结构错误：孤立的 ] [ 和多余尾逗号。"""
+        # 移除字符串值后孤立的 ]： "..." ] , "..." → "..." , "..."
+        text = re.sub(r'"\s*\]\s*,(\s*")', r'",\1', text)
+        # 移除字符串值后孤立的 [： "..." [ , "..." → "..." , "..."
+        text = re.sub(r'"\s*\[\s*,(\s*")', r'",\1', text)
+        # 移除 ] 或 } 前的多余尾逗号
+        text = re.sub(r',\s*([}\]])', r'\1', text)
+        return text
+
+    @staticmethod
+    def _repair_json_values(text: str) -> str:
+        """修复 LLM JSON 值错误：非法值替换为默认值。
+
+        旧正则 [^\\d\\s,\\}\\]\\]+ 遇到中文描述中的数字（如 "15局"）会截断，
+        导致残留文本破坏 JSON。改为匹配到下一个 JSON 分隔符为止，
+        并用负向前瞻保留已是合法数字的字段。
+        """
+        # index 字段 → 非数字替换为 1
+        text = re.sub(r'"index"\s*:\s*(?!\s*\d+\s*[,}\]])[^,\}\]]+', '"index": 1', text)
+        # score 字段 → 非数字替换为 50
+        text = re.sub(r'"score"\s*:\s*(?!\s*\d+\s*[,}\]])[^,\}\]]+', '"score": 50', text)
+        # games 字段 → 非数字替换为 1
+        text = re.sub(r'"games"\s*:\s*(?!\s*\d+\s*[,}\]])[^,\}\]]+', '"games": 1', text)
+        return text
+
+    @staticmethod
     def _extract_json_object(text: str) -> Optional[dict]:
         cleaned = (text or "").strip()
         if cleaned.startswith("```"):
             cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
             cleaned = re.sub(r"\s*```$", "", cleaned)
-        try:
-            data = json.loads(cleaned)
-            return data if isinstance(data, dict) else None
-        except Exception:
+
+        attempts = [
+            cleaned,
+            ShiquManager._repair_json(cleaned),
+            ShiquManager._repair_json_structure(cleaned),
+            ShiquManager._repair_json_values(cleaned),
+            ShiquManager._repair_json(ShiquManager._repair_json_structure(cleaned)),
+            ShiquManager._repair_json(ShiquManager._repair_json_values(cleaned)),
+            ShiquManager._repair_json_structure(ShiquManager._repair_json_values(cleaned)),
+        ]
+        for attempt in attempts:
             try:
-                repaired = ShiquManager._repair_json(cleaned)
-                data = json.loads(repaired)
+                data = json.loads(attempt)
                 return data if isinstance(data, dict) else None
             except Exception:
                 pass
@@ -862,16 +990,21 @@ JSON Schema：
         start = cleaned.find("{")
         end = cleaned.rfind("}")
         if start >= 0 and end > start:
-            try:
-                data = json.loads(cleaned[start:end + 1])
-                return data if isinstance(data, dict) else None
-            except Exception:
+            attempts = [
+                cleaned[start:end + 1],
+                ShiquManager._repair_json(cleaned[start:end + 1]),
+                ShiquManager._repair_json_structure(cleaned[start:end + 1]),
+                ShiquManager._repair_json_values(cleaned[start:end + 1]),
+                ShiquManager._repair_json(ShiquManager._repair_json_structure(cleaned[start:end + 1])),
+                ShiquManager._repair_json(ShiquManager._repair_json_values(cleaned[start:end + 1])),
+                ShiquManager._repair_json_structure(ShiquManager._repair_json_values(cleaned[start:end + 1])),
+            ]
+            for attempt in attempts:
                 try:
-                    repaired = ShiquManager._repair_json(cleaned[start:end + 1])
-                    data = json.loads(repaired)
+                    data = json.loads(attempt)
                     return data if isinstance(data, dict) else None
                 except Exception:
-                    return None
+                    pass
         return None
 
     @staticmethod
@@ -929,8 +1062,9 @@ JSON Schema：
         return cls._normalize_result(data, target_id)
 
     @staticmethod
-    def _result_to_plain_text(result: dict) -> str:
+    def _result_to_plain_text(result: dict, generated_at: str = "") -> str:
         disclaimer = "* 功能仅限娱乐，切勿因为ai瞎编影响心情"
+        gen_time = generated_at or time.strftime("%Y-%m-%d %H:%M:%S")
         lines = [
             f"🔍 {result.get('target_id', '未知玩家')} 是区吗判定书",
             "",
@@ -938,6 +1072,7 @@ JSON Schema：
             str(result.get("verdict") or ""),
             "",
             disclaimer,
+            f"生成时间：{gen_time}",
             "",
             "数据概况：",
             str(result.get("summary") or ""),
@@ -1050,7 +1185,7 @@ JSON Schema：
             # 单局条目："第N局：... " → 按最后一个"："分割为加粗头部 + 普通点评
             elif s.startswith("第") and "局" in s:
                 if "：" in s:
-                    head, tail = s.rsplit("：", 1)
+                    head, tail = s.split("：", 1)
                     buf.append(f'<p class="gamen"><b>{head}：</b><span>{tail}</span></p>')
                 else:
                     buf.append(f'<p class="gamen"><b>{s}</b></p>')
@@ -1065,8 +1200,8 @@ JSON Schema：
             # 队友点评续行：以判定标签开头
             elif any(s.startswith(label) for label in _VERDICT_BY_LABEL):
                 buf.append(f'<p class="mate">{ShiquManager._decorate_inline_verdicts(s)}</p>')
-            # 免责声明
-            elif "功能仅限娱乐" in s:
+            # 免责声明 / 生成时间
+            elif "功能仅限娱乐" in s or s.startswith("生成时间："):
                 buf.append(f'<p class="disclaimer">{s}</p>')
             else:
                 buf.append(f"<p>{s}</p>")
@@ -1141,13 +1276,43 @@ JSON Schema：
             remain_str = f"{int(h)}时{int(m)}分{int(s)}秒" if h > 0 else f"{int(m)}分{int(s)}秒"
             yield event.plain_result(f"⏳ 冷却中，剩余 {remain_str}，届时再发 {_SHIQU_BTN} 开启新查询。")
         else:
+            # ── 错误恢复：cooldown 被 _reset_cooldown 置零 → 跳过确认直接查 ──
+            cd_key = f"{_SHIQU_COOLDOWN_KV_PREFIX}:{uid}"
+            try:
+                cd_raw = await self._plugin.get_kv_data(cd_key, -1)
+            except Exception:
+                cd_raw = -1
+            if cd_raw == 0:
+                async for r in self._do_query(event, uid, target_id):
+                    yield r
+                return
+
             await self._set_pending(event)
-            yield event.plain_result(f'👋 如要开启新查询，请在 **5 分钟内**再次发送 {_SHIQU_BTN}。')
+            yield event.plain_result(f'👋 以下是上次的结果，如要开启新查询，请在 **5 分钟内**再次发送 {_SHIQU_BTN}。')
 
         # 2. 图片直发（不重新渲染）
         if cached_image:
-            _LAST_IMAGE[uid] = cached_image
-            yield event.image_result(cached_image)
+            # 兼容旧记录中可能是远程 URL 的情况，检查本地文件是否存在
+            if cached_image.startswith("http://") or cached_image.startswith("https://"):
+                logger.warning(f"[是区吗][uid={uid}] 缓存图片为远程 URL（旧格式），尝试重新渲染本地副本")
+                result_data = record.get("result") if record else None
+                if isinstance(result_data, dict):
+                    try:
+                        cached_image = await self._render_result_image(
+                            result_data,
+                            generated_at=str(record.get("generated_at") or ""),
+                            uid=uid,
+                        )
+                        record["image_path"] = str(cached_image)
+                        self._save_user_record(uid, record)
+                    except Exception as e:
+                        logger.error(f"[是区吗][uid={uid}] 旧 URL 迁移重新渲染失败: {e}")
+                        cached_image = ""
+                else:
+                    cached_image = ""
+            if cached_image:
+                _LAST_IMAGE[uid] = cached_image
+                yield event.chain_result([Image.fromFileSystem(cached_image)])
 
     async def _do_query(self, event, uid: str, target_id: str):
         """执行实际的是区吗查询流程。"""
@@ -1173,14 +1338,14 @@ JSON Schema：
 
         try:
             # 仅一条进度消息
-            yield event.plain_result(f'🔍 正在生成 {target_id} 是区吗判定书，5分钟未返回请使用<qqbot-cmd-input text="ow是区吗结果" show="ow是区吗结果" reference="false" />查询')
+            yield event.plain_result(f'🔍 正在生成 {target_id} 是区吗判定书，未自动返回请使用<qqbot-cmd-input text="ow是区吗结果" show="ow是区吗结果" reference="false" />查询')
 
             t0 = time.time()
             _ACTIVE_META[uid] = "拉取对局数据"
             target_count = int(self._get_config_map().get("match_count", 12) or 12)
             matches = await self._fetch_matches(target_id, target=target_count)
             t1 = time.time()
-            logger.info(f"📊 已获取 {len(matches)} 场 ({(t1 - t0):.1f}s)")
+            logger.info(f"[是区吗][uid={uid}] 📊 已获取 {len(matches)} 场 ({(t1 - t0):.1f}s)")
 
             if len(matches) < 2:
                 yield event.plain_result(f"❌ {target_id}{_SHIQU_BTN} 仅获取到 {len(matches)} 场对局，至少需要 2 场。")
@@ -1189,7 +1354,7 @@ JSON Schema：
             _ACTIVE_META[uid] = "拉取队友详细数据"
             await self._serial_fetch_all_teammate_details(matches, target_id)
             t2 = time.time()
-            logger.info(f"📊 队友数据拉取完成 ({(t2 - t1):.1f}s)")
+            logger.info(f"[是区吗][uid={uid}] 📊 队友数据拉取完成 ({(t2 - t1):.1f}s)")
 
             prompt_path, llm_raw_path = self._new_artifact_paths(uid, target_id)
 
@@ -1198,7 +1363,7 @@ JSON Schema：
             prompt = self._build_prompt(matches, target_id, db_path=db_path)
             self._atomic_write_text(prompt_path, prompt)
             prompt_kb = len(prompt.encode("utf-8")) / 1024
-            logger.info(f"✅ Prompt 已生成 ({len(prompt)} 字符, {prompt_kb:.1f}KB)")
+            logger.info(f"[是区吗][uid={uid}] ✅ Prompt 已生成 ({len(prompt)} 字符, {prompt_kb:.1f}KB)")
 
             # 提示词过小 → 数据不足，放弃
             if len(prompt.encode("utf-8")) < 10240:
@@ -1207,47 +1372,52 @@ JSON Schema：
                 yield event.plain_result(f"❌ 数据抓取量异常，可能没有足够的预设/6v6比赛对局，[决斗领域]暂未适配，{_SHIQU_BTN} 已重置冷却。")
                 return
 
-            # ── 调用 LLM ──
+            # ── 调用 LLM（含 NewAPI 自动切模型重试）──
             _ACTIVE_META[uid] = "AI 生成判定"
-            llm_text = await self._call_astrbot_llm(event, prompt)
-            if not llm_text:
+            result = None
+            for attempt in range(1, 4):  # 首次 + 2 次重试
+                llm_text = await self._call_llm(prompt)
+                result = self._parse_llm_json_result(llm_text or "", target_id) if llm_text else None
+                if result:
+                    break
+                if attempt < 3:
+                    logger.warning(f"[是区吗][uid={uid}] LLM 尝试 {attempt}/3 失败，等待 40 秒后重试...")
+                    await asyncio.sleep(40)
+            if not result:
                 await self._reset_cooldown(event)
                 await self._set_pending(event)
-                yield event.plain_result(f"❌ AI 判定生成失败：大模型调用异常，token不足 / 网络波动，已重置冷却，请重试 {_SHIQU_BTN} 。")
+                yield event.plain_result(f"❌ AI 判定生成失败：大模型调用异常 / 返回内容不是合法 JSON，已重置冷却，请重试 {_SHIQU_BTN} 。")
                 return
             self._atomic_write_text(llm_raw_path, llm_text)
-            result = self._parse_llm_json_result(llm_text, target_id)
-            if result is None:
-                await self._reset_cooldown(event)
-                await self._set_pending(event)
-                yield event.plain_result(f"❌ AI 判定生成失败：返回内容不是合法 JSON，已重置冷却，请重试 {_SHIQU_BTN} 。")
-                return
             t3 = time.time()
-            logger.info(f"[是区吗] LLM done ({len(prompt)}→{len(llm_text)}ch, llm={t3 - t2:.1f}s)")
+            logger.info(f"[是区吗][uid={uid}] LLM done ({len(prompt)}→{len(llm_text)}ch, llm={t3 - t2:.1f}s)")
 
             # ── 渲染图片 ──
             _ACTIVE_META[uid] = "渲染图片"
             generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
-            url = await self._render_result_image(result, generated_at=generated_at)
+            image_path = await self._render_result_image(result, generated_at=generated_at, uid=uid)
             # 缓存图片路径，供「是区吗结果」复用
-            _LAST_IMAGE[uid] = url
+            _LAST_IMAGE[uid] = image_path
             self._save_user_record(uid, {
                 "uid": uid,
                 "target_id": target_id,
                 "generated_at": generated_at,
                 "prompt_path": str(prompt_path),
                 "llm_raw_path": str(llm_raw_path),
-                "image_path": str(url),
+                "image_path": str(image_path),
                 "result": result,
             })
-            yield event.image_result(url)
-            logger.info(f"[是区吗] 总耗时={time.time() - t0:.1f}s (render={time.time() - t3:.1f}s)")
+            if image_path:
+                yield event.chain_result([Image.fromFileSystem(image_path)])
+            else:
+                yield event.plain_result(f"❌ 判定书图片渲染失败，请稍后重试 {_SHIQU_BTN} 。")
+            logger.info(f"[是区吗][uid={uid}] 总耗时={time.time() - t0:.1f}s (render={time.time() - t3:.1f}s)")
 
             # 设置 CD
             await self._set_cooldown(event)
 
         except Exception as exc:
-            logger.error(f"[是区吗] error: {exc}", exc_info=True)
+            logger.error(f"[是区吗][uid={uid}] error: {exc}", exc_info=True)
             yield event.plain_result(f"❌ 生成判定书失败 {_SHIQU_BTN} ：{exc}")
         finally:
             await self._dequeue(uid)
@@ -1278,21 +1448,46 @@ JSON Schema：
         # 有缓存图片 → 直接发
         cached_image = str(record.get("image_path") or "")
         if cached_image:
-            _LAST_IMAGE[uid] = cached_image
-            yield event.image_result(cached_image)
-            return
+            # 兼容旧记录中可能是远程 URL 的情况
+            if cached_image.startswith("http://") or cached_image.startswith("https://"):
+                logger.warning(f"[是区吗][uid={uid}] 缓存图片为远程 URL（旧格式），尝试重新渲染")
+                result_data = record.get("result")
+                if isinstance(result_data, dict):
+                    try:
+                        cached_image = await self._render_result_image(
+                            result_data,
+                            generated_at=str(record.get("generated_at") or ""),
+                            uid=uid,
+                        )
+                        if cached_image:
+                            record["image_path"] = str(cached_image)
+                            self._save_user_record(uid, record)
+                    except Exception as e:
+                        logger.error(f"[是区吗][uid={uid}] 旧 URL 迁移重新渲染失败: {e}")
+                        cached_image = ""
+                else:
+                    cached_image = ""
+            if cached_image and Path(cached_image).is_file():
+                _LAST_IMAGE[uid] = cached_image
+                yield event.chain_result([Image.fromFileSystem(cached_image)])
+                return
+            else:
+                logger.warning(f"[是区吗][uid={uid}] 缓存图片路径无效: {cached_image}")
 
         # 无缓存图片但 result 还在 → 重新渲染
         result = record.get("result")
         if isinstance(result, dict):
             try:
-                url = await self._render_result_image(result, generated_at=str(record.get("generated_at") or ""))
-                _LAST_IMAGE[uid] = url
-                record["image_path"] = str(url)
-                self._save_user_record(uid, record)
-                yield event.image_result(url)
+                image_path = await self._render_result_image(result, generated_at=str(record.get("generated_at") or ""), uid=uid)
+                if image_path:
+                    _LAST_IMAGE[uid] = image_path
+                    record["image_path"] = str(image_path)
+                    self._save_user_record(uid, record)
+                    yield event.chain_result([Image.fromFileSystem(image_path)])
+                else:
+                    yield event.plain_result(f"❌ 重新渲染判定书失败，请稍后重试 {_SHIQU_BTN} 。")
             except Exception as exc:
-                logger.error(f"[是区吗] 重新渲染结果失败: {exc}", exc_info=True)
+                logger.error(f"[是区吗][uid={uid}] 重新渲染结果失败: {exc}", exc_info=True)
                 yield event.plain_result(f"❌ 重新渲染判定书失败：{exc}")
             return
 

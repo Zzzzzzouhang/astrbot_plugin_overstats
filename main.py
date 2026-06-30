@@ -601,11 +601,20 @@ class OverstatsPlugin(Star):
 
     def _is_qq_official(self, event: AstrMessageEvent) -> bool:
         """判断当前消息是否来自 QQ 官方机器人平台"""
+        # 优先用 get_platform_name（可靠返回 "qq_official" / "qq_official_webhook"）
+        try:
+            pn = event.get_platform_name()
+            if pn and "qq_official" in str(pn).lower():
+                return True
+        except Exception:
+            pass
+        # 兜底：unified_msg_origin / message_obj（兼容不带下划线 qqofficial 等写法）
         umo = event.unified_msg_origin
-        if "qq_official" in str(umo).lower():
+        if "qq_official" in str(umo).lower() or "qqofficial" in str(umo).lower():
             return True
         if hasattr(event, "message_obj") and event.message_obj:
-            if "qq_official" in str(event.message_obj).lower():
+            s = str(event.message_obj).lower()
+            if "qq_official" in s or "qqofficial" in s:
                 return True
         return False
 
@@ -1582,6 +1591,12 @@ class OverstatsPlugin(Star):
         """OW 是区吗结果：返回上次生成的判定书图片。"""
         async for r in self.shiqu_manager.last_result(event):
             yield r
+
+    @filter.command("owAI检测", alias={'AI检测'})
+    async def ow_ai_test(self, event: AstrMessageEvent):
+        """测试是区吗 LLM API 连通性。"""
+        ok, msg = await self.shiqu_manager.test_connectivity()
+        yield event.plain_result(msg)
 
     @filter.command("历史段位", alias={'历届段位'})
     async def dashen_rank_history(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
