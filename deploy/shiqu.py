@@ -12,6 +12,7 @@ import json
 import re
 import time
 import logging
+from logging.handlers import RotatingFileHandler
 from collections import deque
 from pathlib import Path
 from typing import Optional
@@ -100,7 +101,7 @@ _SHIQU_JSON_SCHEMA = {
                 "required": ["name", "games", "score", "verdict", "comment"],
                 "properties": {
                     "name": {"type": "string"},
-                    "games": {"type": ["integer", "null"], "minimum": 1},
+                    "games": {"type": "integer", "minimum": 1},
                     "score": {"type": "integer", "minimum": 0, "maximum": 100},
                     "verdict": {"type": "string", "enum": _VERDICT_ENUM},
                     "comment": {"type": "string", "minLength": 1},
@@ -135,6 +136,10 @@ _SHIQU_COOLDOWN_KV_PREFIX = "ow_shiqu_cooldown"
 _SHIQU_PENDING_KV_PREFIX = "ow_shiqu_pending"
 _SHIQU_PENDING_SECONDS = 300  # 5 分钟内再发确认
 _SHIQU_BTN = '<qqbot-cmd-input text="是区吗" show="是区吗" reference="false" />'
+
+# ── 违规封禁 ──
+_SHIQU_VIOLATION_BAN_SECONDS = 43200  # 12 小时
+_SHIQU_VIOLATION_BAN_FILE = "violation_bans.json"
 
 
 # ── AstrBot 文转图模板 ──────────────────────────────────────
@@ -175,6 +180,42 @@ _SHIQU_HTML_TMPL = '''<!DOCTYPE html>
 class ShiquManager:
     def __init__(self, plugin):
         self._plugin = plugin
+        self._setup_logger()
+
+    def _setup_logger(self):
+        """设置是区吗专用日志，JSONL 格式，20MB 自动轮转。"""
+        log_dir = self._data_dir()
+        log_path = log_dir / "shiqu_calls.log"
+        self._call_logger = logging.getLogger("astrbot.shiqu.call")
+        self._call_logger.propagate = False
+        self._call_logger.setLevel(logging.INFO)
+        if self._call_logger.handlers:
+            return  # 已初始化
+        handler = RotatingFileHandler(
+            str(log_path), maxBytes=20 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        )
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        self._call_logger.addHandler(handler)
+
+    @staticmethod
+    def _shiqu_log_entry(*, openid: str, uid: str, target_id: str, success: bool,
+                         attempt: int = 0, verdict: str = "", score: int = 0,
+                         llm_chars: int = 0, llm_response: str = "",
+                         error: str = "", duration_ms: int = 0) -> str:
+        return json.dumps({
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "openid": openid,
+            "uid": uid,
+            "target_id": target_id,
+            "success": success,
+            "attempt": attempt,
+            "verdict": verdict,
+            "score": score,
+            "llm_chars": llm_chars,
+            "llm_response": llm_response[:65536],  # 单行上限 64KB，防日志膨胀
+            "error": error,
+            "duration_ms": duration_ms,
+        }, ensure_ascii=False)
 
     # ── 权限 ──
 
@@ -183,6 +224,66 @@ class ShiquManager:
             return self._plugin._is_astrbot_admin(event)
         except Exception:
             return False
+
+    # ── 违规封禁 ──
+
+    def _violation_ban_path(self) -> Path:
+        return self._data_dir() / _SHIQU_VIOLATION_BAN_FILE
+
+    def _load_violation_bans(self) -> dict:
+        """加载违规封禁记录 JSON 文件，返回 {user_key: ban_timestamp}。"""
+        path = self._violation_ban_path()
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_violation_bans(self, bans: dict) -> None:
+        """保存违规封禁记录到 JSON 文件（原子写入）。"""
+        self._atomic_write_json(self._violation_ban_path(), bans)
+
+    async def _check_violation_ban(self, event) -> tuple[bool, int]:
+        """检查用户是否处于违规封禁中。返回 (is_banned: bool, remaining_seconds: int)。"""
+        try:
+            user_key = self._user_key(event)
+            bans = self._load_violation_bans()
+            ban_ts = bans.get(user_key, 0)
+            if not ban_ts:
+                return False, 0
+            elapsed = int(time.time()) - int(ban_ts)
+            if elapsed >= _SHIQU_VIOLATION_BAN_SECONDS:
+                # 封禁已过期，自动清除
+                bans.pop(user_key, None)
+                self._save_violation_bans(bans)
+                return False, 0
+            return True, _SHIQU_VIOLATION_BAN_SECONDS - elapsed
+        except Exception:
+            return False, 0
+
+    async def _set_violation_ban(self, event) -> None:
+        """设置用户违规封禁（12小时）。"""
+        try:
+            user_key = self._user_key(event)
+            bans = self._load_violation_bans()
+            bans[user_key] = int(time.time())
+            self._save_violation_bans(bans)
+            logger.warning(f"[是区吗] 已对用户 {user_key} 设置违规封禁（12小时）")
+        except Exception as e:
+            logger.error(f"[是区吗] 设置违规封禁失败: {e}")
+
+    async def _clear_violation_ban(self, event) -> None:
+        """清除用户违规封禁。"""
+        try:
+            user_key = self._user_key(event)
+            bans = self._load_violation_bans()
+            bans.pop(user_key, None)
+            self._save_violation_bans(bans)
+            logger.info(f"[是区吗] 已清除用户 {user_key} 的违规封禁")
+        except Exception as e:
+            logger.error(f"[是区吗] 清除违规封禁失败: {e}")
 
     # ── 分级 CD ──
 
@@ -842,7 +943,7 @@ JSON Schema：
 
                     if not use_stream:
                         data = await resp.json()
-                        return (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip() or None
+                        return ((data.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip() or None
 
                     # SSE 流式累积
                     parts = []
@@ -854,7 +955,7 @@ JSON Schema：
                         if chunk == "[DONE]":
                             break
                         try:
-                            delta = json.loads(chunk).get("choices", [{}])[0].get("delta", {})
+                            delta = (json.loads(chunk).get("choices") or [{}])[0].get("delta", {})
                             if "content" in delta:
                                 parts.append(delta["content"])
                         except json.JSONDecodeError:
@@ -1215,6 +1316,18 @@ JSON Schema：
     async def run(self, event, bnet_id_input: str = ""):
         uid = self._user_key(event)
 
+        # ── 违规封禁检查 ──
+        banned, ban_remain = await self._check_violation_ban(event)
+        if banned:
+            h, remainder = divmod(ban_remain, 3600)
+            m, s = divmod(remainder, 60)
+            remain_str = f"{int(h)}小时{int(m)}分钟" if h > 0 else f"{int(m)}分钟{int(s)}秒"
+            yield event.plain_result(
+                f"⛔ 您之前查询返回的图片内容包含违规信息，已被禁止使用是区吗指令 {remain_str}。\n"
+                f"请勿再次尝试查询违规内容。"
+            )
+            return
+
         # 普通用户开关
         if not self._is_admin(event) and not self._plugin._is_whitelisted(event):
             cd_map = self._get_config_map()
@@ -1312,7 +1425,16 @@ JSON Schema：
                     cached_image = ""
             if cached_image:
                 _LAST_IMAGE[uid] = cached_image
-                yield event.chain_result([Image.fromFileSystem(cached_image)])
+                try:
+                    yield event.chain_result([Image.fromFileSystem(cached_image)])
+                except Exception as exc:
+                    err_msg = str(exc)
+                    logger.error(f"[是区吗][uid={uid}] 发送缓存图片失败: {err_msg}")
+                    if "违规" in err_msg or "violation" in err_msg.lower():
+                        await self._set_violation_ban(event)
+                        yield event.plain_result(
+                            "⛔ 查询返回的图片内容包含违规信息，该指令已被禁用12小时，请勿再次尝试。"
+                        )
 
     async def _do_query(self, event, uid: str, target_id: str):
         """执行实际的是区吗查询流程。"""
@@ -1336,11 +1458,11 @@ JSON Schema：
             yield event.plain_result(f"⏳ 排队中：第 {pos}/{total} 位，请稍候…")
             return
 
+        last_attempt = 0
+        t0 = time.time()
         try:
             # 仅一条进度消息
             yield event.plain_result(f'🔍 正在生成 {target_id} 是区吗判定书，未自动返回请使用<qqbot-cmd-input text="ow是区吗结果" show="ow是区吗结果" reference="false" />查询')
-
-            t0 = time.time()
             _ACTIVE_META[uid] = "拉取对局数据"
             target_count = int(self._get_config_map().get("match_count", 12) or 12)
             matches = await self._fetch_matches(target_id, target=target_count)
@@ -1376,6 +1498,7 @@ JSON Schema：
             _ACTIVE_META[uid] = "AI 生成判定"
             result = None
             for attempt in range(1, 4):  # 首次 + 2 次重试
+                last_attempt = attempt
                 llm_text = await self._call_llm(prompt)
                 result = self._parse_llm_json_result(llm_text or "", target_id) if llm_text else None
                 if result:
@@ -1384,6 +1507,13 @@ JSON Schema：
                     logger.warning(f"[是区吗][uid={uid}] LLM 尝试 {attempt}/3 失败，等待 40 秒后重试...")
                     await asyncio.sleep(40)
             if not result:
+                self._call_logger.info(self._shiqu_log_entry(
+                    openid=str(event.get_sender_id()), uid=uid, target_id=target_id,
+                    success=False, attempt=last_attempt,
+                    llm_response=llm_text or "",
+                    error="LLM 调用异常 / 返回内容不是合法 JSON",
+                    duration_ms=int((time.time() - t0) * 1000),
+                ))
                 await self._reset_cooldown(event)
                 await self._set_pending(event)
                 yield event.plain_result(f"❌ AI 判定生成失败：大模型调用异常 / 返回内容不是合法 JSON，已重置冷却，请重试 {_SHIQU_BTN} 。")
@@ -1408,7 +1538,19 @@ JSON Schema：
                 "result": result,
             })
             if image_path:
-                yield event.chain_result([Image.fromFileSystem(image_path)])
+                try:
+                    yield event.chain_result([Image.fromFileSystem(image_path)])
+                except Exception as exc:
+                    err_msg = str(exc)
+                    logger.error(f"[是区吗][uid={uid}] 发送判定书图片失败: {err_msg}")
+                    if "违规" in err_msg or "violation" in err_msg.lower():
+                        await self._set_violation_ban(event)
+                        yield event.plain_result(
+                            "⛔ 查询返回的图片内容包含违规信息，该指令已被禁用12小时，请勿再次尝试。"
+                        )
+                    else:
+                        yield event.plain_result(f"❌ 发送判定书图片失败，请稍后重试 {_SHIQU_BTN} 。")
+                    return
             else:
                 yield event.plain_result(f"❌ 判定书图片渲染失败，请稍后重试 {_SHIQU_BTN} 。")
             logger.info(f"[是区吗][uid={uid}] 总耗时={time.time() - t0:.1f}s (render={time.time() - t3:.1f}s)")
@@ -1416,8 +1558,25 @@ JSON Schema：
             # 设置 CD
             await self._set_cooldown(event)
 
+            self._call_logger.info(self._shiqu_log_entry(
+                openid=str(event.get_sender_id()), uid=uid, target_id=target_id,
+                success=True, attempt=last_attempt,
+                verdict=str(result.get("verdict", "")),
+                score=int(result.get("score", 0)),
+                llm_chars=len(llm_text),
+                llm_response=llm_text,
+                duration_ms=int((time.time() - t0) * 1000),
+            ))
+
         except Exception as exc:
             logger.error(f"[是区吗][uid={uid}] error: {exc}", exc_info=True)
+            self._call_logger.info(self._shiqu_log_entry(
+                openid=str(event.get_sender_id()), uid=uid, target_id=target_id,
+                success=False, attempt=last_attempt,
+                llm_response=locals().get("llm_text", ""),
+                error=str(exc),
+                duration_ms=int((time.time() - t0) * 1000),
+            ))
             yield event.plain_result(f"❌ 生成判定书失败 {_SHIQU_BTN} ：{exc}")
         finally:
             await self._dequeue(uid)
@@ -1425,6 +1584,18 @@ JSON Schema：
     async def last_result(self, event):
         """读取用户上次判定结果图片直接返回，不重新渲染。"""
         uid = self._user_key(event)
+
+        # ── 违规封禁检查 ──
+        banned, ban_remain = await self._check_violation_ban(event)
+        if banned:
+            h, remainder = divmod(ban_remain, 3600)
+            m, s = divmod(remainder, 60)
+            remain_str = f"{int(h)}小时{int(m)}分钟" if h > 0 else f"{int(m)}分钟{int(s)}秒"
+            yield event.plain_result(
+                f"⛔ 您之前查询返回的图片内容包含违规信息，已被禁止使用是区吗指令 {remain_str}。\n"
+                f"请勿再次尝试查询违规内容。"
+            )
+            return
 
         # ── 正在走流程 → 告知当前状态，不展示上次结果 ──
         async with _QUEUE_LOCK:
@@ -1469,7 +1640,16 @@ JSON Schema：
                     cached_image = ""
             if cached_image and Path(cached_image).is_file():
                 _LAST_IMAGE[uid] = cached_image
-                yield event.chain_result([Image.fromFileSystem(cached_image)])
+                try:
+                    yield event.chain_result([Image.fromFileSystem(cached_image)])
+                except Exception as exc:
+                    err_msg = str(exc)
+                    logger.error(f"[是区吗][uid={uid}] 发送结果图片失败: {err_msg}")
+                    if "违规" in err_msg or "violation" in err_msg.lower():
+                        await self._set_violation_ban(event)
+                        yield event.plain_result(
+                            "⛔ 查询返回的图片内容包含违规信息，该指令已被禁用12小时，请勿再次尝试。"
+                        )
                 return
             else:
                 logger.warning(f"[是区吗][uid={uid}] 缓存图片路径无效: {cached_image}")
@@ -1483,7 +1663,18 @@ JSON Schema：
                     _LAST_IMAGE[uid] = image_path
                     record["image_path"] = str(image_path)
                     self._save_user_record(uid, record)
-                    yield event.chain_result([Image.fromFileSystem(image_path)])
+                    try:
+                        yield event.chain_result([Image.fromFileSystem(image_path)])
+                    except Exception as send_exc:
+                        err_msg = str(send_exc)
+                        logger.error(f"[是区吗][uid={uid}] 发送重渲染图片失败: {err_msg}")
+                        if "违规" in err_msg or "violation" in err_msg.lower():
+                            await self._set_violation_ban(event)
+                            yield event.plain_result(
+                                "⛔ 查询返回的图片内容包含违规信息，该指令已被禁用12小时，请勿再次尝试。"
+                            )
+                        else:
+                            yield event.plain_result(f"❌ 重新渲染判定书发送失败，请稍后重试 {_SHIQU_BTN} 。")
                 else:
                     yield event.plain_result(f"❌ 重新渲染判定书失败，请稍后重试 {_SHIQU_BTN} 。")
             except Exception as exc:

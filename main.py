@@ -448,6 +448,97 @@ class OverstatsPlugin(Star):
                 pass
         return False
 
+    # ── 违规封禁（JSON 文件存储，按 用户+指令 隔离，12小时）──
+
+    _VIOLATION_BAN_SECONDS = 43200  # 12 小时
+    _VIOLATION_BAN_FILE = "violation_bans.json"
+
+    def _violation_ban_path(self) -> Path:
+        return self.plugin_data_dir / self._VIOLATION_BAN_FILE
+
+    def _load_violation_bans(self) -> dict:
+        """加载违规封禁记录 JSON，结构 { "平台:ID|指令名": 封禁时间戳 }。"""
+        path = self._violation_ban_path()
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_violation_bans(self, bans: dict) -> None:
+        """原子写入 JSON。"""
+        path = self._violation_ban_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.tmp")
+        tmp.write_text(json.dumps(bans, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+
+    def _user_key(self, event: AstrMessageEvent) -> str:
+        """获取用户唯一标识（平台:ID）。"""
+        try:
+            return f"{event.get_platform_name()}:{event.get_sender_id()}"
+        except Exception:
+            return str(event.get_sender_id())
+
+    @staticmethod
+    def _violation_ban_key(user_key: str, command: str) -> str:
+        """生成封禁 JSON key：用户|指令名。"""
+        return f"{user_key}|{command}"
+
+    async def _check_violation_ban(self, event: AstrMessageEvent, command: str) -> tuple[bool, int]:
+        """检查 用户+指令 是否被封。返回 (is_banned, remaining_seconds)。过期自动清除。"""
+        try:
+            user_key = self._user_key(event)
+            ban_key = self._violation_ban_key(user_key, command)
+            bans = self._load_violation_bans()
+            ban_ts = bans.get(ban_key, 0)
+            if not ban_ts:
+                return False, 0
+            elapsed = int(time.time()) - int(ban_ts)
+            if elapsed >= self._VIOLATION_BAN_SECONDS:
+                bans.pop(ban_key, None)
+                self._save_violation_bans(bans)
+                return False, 0
+            return True, self._VIOLATION_BAN_SECONDS - elapsed
+        except Exception:
+            return False, 0
+
+    async def _set_violation_ban(self, event: AstrMessageEvent, command: str) -> None:
+        """封禁 用户+指令 12小时。"""
+        try:
+            user_key = self._user_key(event)
+            ban_key = self._violation_ban_key(user_key, command)
+            bans = self._load_violation_bans()
+            bans[ban_key] = int(time.time())
+            self._save_violation_bans(bans)
+            logger.warning(f"[ViolationBan] 封禁 {ban_key}（12小时）")
+        except Exception as e:
+            logger.error(f"[ViolationBan] 设置封禁失败: {e}")
+
+    async def _clear_violation_ban(self, event: AstrMessageEvent, command: str) -> None:
+        """解除 用户+指令 封禁。"""
+        try:
+            user_key = self._user_key(event)
+            ban_key = self._violation_ban_key(user_key, command)
+            bans = self._load_violation_bans()
+            bans.pop(ban_key, None)
+            self._save_violation_bans(bans)
+            logger.info(f"[ViolationBan] 解封 {ban_key}")
+        except Exception as e:
+            logger.error(f"[ViolationBan] 解封失败: {e}")
+
+    @staticmethod
+    def _violation_ban_remain_str(seconds: int) -> str:
+        h, remainder = divmod(seconds, 3600)
+        m, s = divmod(remainder, 60)
+        if h > 0:
+            return f"{int(h)}小时{int(m)}分钟"
+        return f"{int(m)}分钟{int(s)}秒"
+
+    _VIOLATION_BAN_MSG = "⛔ 您之前【{command}】查询的图片内容违规，该指令已被禁用{remain}，请勿再试。"
+
     def _is_group_message(self, event: AstrMessageEvent) -> bool:
         try:
             if getattr(event, "message_obj", None) and getattr(event.message_obj, "group_id", ""):
@@ -859,7 +950,23 @@ class OverstatsPlugin(Star):
             logger.error(f"构建图片消息链时发生错误: {e}")
             return self._plain_error_result(event, fallback_text or "❌ 机器人构建图片组件失败")
 
-    async def _send_multiple_images_result(self, event: AstrMessageEvent, imgs_list: list[bytes]):
+    async def _yield_image_result(self, event: AstrMessageEvent, img_bytes: bytes, command: str, fallback_text: str = ""):
+        """发送单张图片，自动捕获违规异常并封禁该指令。"""
+        result = self._send_image_result(event, img_bytes, fallback_text)
+        try:
+            yield result
+        except Exception as exc:
+            err_msg = str(exc)
+            logger.error(f"发送图片消息失败[{command}]: {err_msg}")
+            if "违规" in err_msg or "violation" in err_msg.lower():
+                await self._set_violation_ban(event, command)
+                yield event.plain_result(
+                    self._VIOLATION_BAN_MSG.format(command=command, remain="12小时")
+                )
+            else:
+                yield event.plain_result("❌ 发送图片失败，请稍后重试。")
+
+    async def _send_multiple_images_result(self, event: AstrMessageEvent, imgs_list: list[bytes], command: str):
         try:
             user_id = event.get_sender_id()
             
@@ -878,7 +985,18 @@ class OverstatsPlugin(Star):
                 else:
                     # 直接发送模式：bytes 转 base64，不落盘
                     chain.append(Comp.Image.fromBytes(img_bytes))
-            yield event.chain_result(chain)
+            try:
+                yield event.chain_result(chain)
+            except Exception as send_exc:
+                err_msg = str(send_exc)
+                logger.error(f"发送多图消息失败[{command}]: {err_msg}")
+                if "违规" in err_msg or "violation" in err_msg.lower():
+                    await self._set_violation_ban(event, command)
+                    yield event.plain_result(
+                        self._VIOLATION_BAN_MSG.format(command=command, remain="12小时")
+                    )
+                else:
+                    yield self._plain_error_result(event, "❌ 发送图片失败")
                 
         except Exception as e:
             logger.error(f"多图发送逻辑错误: {e}")
@@ -1225,7 +1343,7 @@ class OverstatsPlugin(Star):
             yield self._plain_error_result(event, "❌ 未能读取到测试图片。")
             return
             
-        async for r in self._send_multiple_images_result(event, imgs_list):
+        async for r in self._send_multiple_images_result(event, imgs_list, "多图测试"):
             yield r
 
     @filter.command("单图测试")
@@ -1285,6 +1403,13 @@ class OverstatsPlugin(Star):
     @filter.command("今日总结", alias={'今日', '今日数据'})
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = ""):
         """生成过去 24 小时内的对局大数据总结卡片。"""
+        CMD = "今日总结"
+        # ── 违规封禁检查 ──
+        banned, ban_remain = await self._check_violation_ban(event, CMD)
+        if banned:
+            yield event.plain_result(self._VIOLATION_BAN_MSG.format(command=CMD, remain=self._violation_ban_remain_str(ban_remain)))
+            return
+
         target_id = await self._get_bnet_id(event, bnet_id)
         if not target_id:
             yield self._plain_error_result(event, self._bnet_err("今日总结"))
@@ -1452,6 +1577,13 @@ class OverstatsPlugin(Star):
     @filter.command("单局详细", alias={'单局'})
     async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = "", arg2: str = "", arg3: str = ""):
         """查看指定序号的单局多图详细战绩（可加 锐评关/全员关 控制开关）。"""
+        CMD = "单局详细"
+        # ── 违规封禁检查 ──
+        banned, ban_remain = await self._check_violation_ban(event, CMD)
+        if banned:
+            yield event.plain_result(self._VIOLATION_BAN_MSG.format(command=CMD, remain=self._violation_ban_remain_str(ban_remain)))
+            return
+
         # 先识别中文关键词：锐评关 / 全员关 / 锐评（默认即锐评，可显式给）
         positional, kw = self._extract_keywords([arg1, arg2, arg3])
         index = 0
@@ -1564,7 +1696,7 @@ class OverstatsPlugin(Star):
 
                 if collected_images:
                     success = True
-                    async for r in self._send_multiple_images_result(event, collected_images):
+                    async for r in self._send_multiple_images_result(event, collected_images, CMD):
                         yield r
         except Exception as e:
             logger.error(f"处理单局详细图片异常：{e}")
@@ -1576,6 +1708,12 @@ class OverstatsPlugin(Star):
     @filter.command("ow开庭", alias={'开庭'})
     async def ow_court(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
         """OW 开庭：AI 对单局数据进行电竞法庭风格分析（测试阶段，仅白名单/管理员可用）。"""
+        CMD = "开庭"
+        # ── 违规封禁检查 ──
+        banned, ban_remain = await self._check_violation_ban(event, CMD)
+        if banned:
+            yield event.plain_result(self._VIOLATION_BAN_MSG.format(command=CMD, remain=self._violation_ban_remain_str(ban_remain)))
+            return
         async for r in self.court_manager.run_court(event, arg1, arg2):
             yield r
 
@@ -2138,6 +2276,39 @@ class OverstatsPlugin(Star):
 
         await self._set_maintenance(True, action)
         yield event.plain_result(f"✅ 维护模式已开启，内容：{action}")
+
+    # ── 违规封禁管理指令 ──
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("ow违禁封禁")
+    async def violation_ban_cmd(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        """管理员封禁 用户+指令（12小时）。用法：/ow违禁封禁 <用户ID> <指令名>"""
+        if not arg1 or not arg2:
+            yield event.plain_result("❌ 用法：/ow违禁封禁 <用户ID> <指令名>\n如：/ow违禁封禁 qqofficial:1170599013 单局详细")
+            return
+        ban_key = self._violation_ban_key(str(arg1), str(arg2))
+        bans = self._load_violation_bans()
+        bans[ban_key] = int(time.time())
+        self._save_violation_bans(bans)
+        logger.warning(f"[ViolationBan] 管理员封禁 {ban_key}（12小时）")
+        yield event.plain_result(f"⛔ 已封禁用户 {arg1} 的【{arg2}】指令（12小时）。")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("ow违禁解封")
+    async def violation_unban_cmd(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+        """管理员解除 用户+指令 封禁。用法：/ow违禁解封 <用户ID> <指令名>"""
+        if not arg1 or not arg2:
+            yield event.plain_result("❌ 用法：/ow违禁解封 <用户ID> <指令名>\n如：/ow违禁解封 qqofficial:1170599013 单局详细")
+            return
+        ban_key = self._violation_ban_key(str(arg1), str(arg2))
+        bans = self._load_violation_bans()
+        if ban_key in bans:
+            bans.pop(ban_key)
+            self._save_violation_bans(bans)
+            logger.info(f"[ViolationBan] 管理员解封 {ban_key}")
+            yield event.plain_result(f"✅ 已解封用户 {arg1} 的【{arg2}】指令。")
+        else:
+            yield event.plain_result(f"ℹ️ 用户 {arg1} 的【{arg2}】指令当前未被封禁。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ow连接测试")
