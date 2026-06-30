@@ -1,6 +1,6 @@
 name: astrbot_plugin_overstats 
 display_name: overstats 
 desc: overstats对接qq机器人 
-version: v2.5.0 
+version: v2.6.0 
 author: Zzzzzzouhang
 repo: https://github.com/Zzzzzzouhang/astrbot_plugin_overstats 
