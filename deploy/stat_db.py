@@ -287,7 +287,7 @@ def build_reference_text(
     if not parts:
         return ""
 
-    return f"  {player_name}（{hero_name}）分段参考: " + ", ".join(parts)
+    return f"  {player_name}（{hero_name}）" + ", ".join(parts)
 
 
 def build_broad_reference_text(
@@ -325,7 +325,7 @@ def build_broad_reference_text(
 
     if not parts:
         return ""
-    return f"  {player_name}（{hero_name}）参考: " + ", ".join(parts)
+    return f"  {player_name}（{hero_name}）" + ", ".join(parts)
 
 
 

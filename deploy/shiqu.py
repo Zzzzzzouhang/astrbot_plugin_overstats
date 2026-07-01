@@ -156,10 +156,8 @@ _SHIQU_HTML_TMPL = '''<!DOCTYPE html>
   p { margin:16px 0; }
   p.gamen { margin:24px 0; line-height:1.64; }
   p.gamen b { color:#e8d5b7; }
-  p.gamen span { color:#dce1eb; font-weight:normal; }
-  p.mate,span.mate { color:#b0bec5; }
   .score { font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif; font-size:120px; line-height:1.12; text-align:center; color:#ffd700; font-weight:bold; margin:32px 0 16px; letter-spacing:0; }
-  .verdict { display:block; font-size:78px; line-height:1.25; text-align:center; font-weight:bold; margin:16px 0 64px; }
+  .verdict { display:block; font-size:78px; line-height:1.25; text-align:center; font-weight:bold; margin:16px 0 48px; }
   .verdict.god,.iv.god { color:#e67e22; }
   .verdict.boom,.iv.boom { color:#ff6b6b; }
   .verdict.butterfly,.iv.butterfly { color:#a78bfa; }
@@ -168,7 +166,21 @@ _SHIQU_HTML_TMPL = '''<!DOCTYPE html>
   .verdict.bad,.iv.bad { color:#e17055; }
   .verdict.terrible,.iv.terrible { color:#d63031; }
   .iv { font-weight:bold; }
+  .result-win { color:#5cef34; font-weight:bold; }
+  .result-loss { color:#ec6e72; font-weight:bold; }
+  .result-draw { color:#faad14; font-weight:bold; }
+  .result-unknown { color:#8c8c8c; font-weight:bold; }
+  .hero-name { color:#e8d5b7; font-weight:bold; }
+  .sep { color:#6e7681; }
+  .gentime { font-size:36px; color:#6e7681; opacity:0.55; text-align:center; margin:6px 0 36px; }
   .disclaimer { font-size:36px; color:#6e7681; opacity:0.55; text-align:center; margin:32px 0; }
+  .mate-entry { margin-bottom:36px; }
+  .mate-entry:last-child { margin-bottom:0; }
+  .mate-head { margin:0 0 8px; color:#dce1eb; }
+  .mate-name { color:#e8d5b7; font-weight:bold; }
+  .mate-games { color:#8c8c8c; }
+  .mate-score { font-weight:bold; margin-left:3px; }
+  .mate-comment { margin:0; color:#b0bec5; }
   .footer { margin-top:56px; padding-top:28px; border-top:2px solid #2a3040; color:#6e7681; font-size:32px; line-height:1.45; text-align:center; }
 </style></head><body>
   <h1>{{ title }}</h1>
@@ -429,8 +441,8 @@ class ShiquManager:
         target_id = str(result.get("target_id") or "未知玩家")
         title = f"是区吗判定书 · {target_id}"
         footer_time = generated_at or time.strftime("%Y-%m-%d %H:%M:%S")
-        footer = f"生成时间：{footer_time}  ·  AI 数据带阴阳师 (Astrbot LLM)"
-        body_html = self._plain_to_html(self._result_to_plain_text(result, generated_at=generated_at))
+        footer = f"生成时间: {footer_time}  ·  AI 数据带阴阳师 (Astrbot LLM)"
+        body_html = self._result_to_html(result, generated_at=generated_at)
         render_url = await self._plugin.html_render(
             _SHIQU_HTML_TMPL,
             {"title": title, "body": body_html, "footer": footer},
@@ -766,11 +778,26 @@ class ShiquManager:
                 parts.append(f"详细: {{ {detail} }}")
             return "{ " + ", ".join(parts) + " }"
 
-        def _fmt_player_block(p, segments: list[dict], pos, game_sec, include_detail: bool):
+        def _fmt_player_block(p, segments: list[dict], pos, game_sec, include_detail: bool, enemy_total_deaths: int = 0):
             name = str(p.get("name", "?"))
             display = f"*{name}" if name == target_id else name
+            # 击杀参与率（不分英雄合并计算）
+            player_total_ka = 0.0
+            for seg in segments:
+                entry = seg.get("entry")
+                hg = str(seg.get("hero_guid", ""))
+                nm = seg["name_map"]
+                if entry:
+                    sm = entry.get("statMap", {}) or {}
+                    ut = float(entry.get("userTimeSec", 600) or 600)
+                    kv = _normalized_stat(sm, ("603482350067646495",), ut, nm, hg) or 0
+                    av = _normalized_stat(sm, ("603482350067648392",), ut, nm, hg) or 0
+                    player_total_ka += kv + av
+                else:
+                    player_total_ka += int(p.get("kill", 0) or 0) + int(p.get("assist", 0) or 0)
+            kp_rate = player_total_ka / enemy_total_deaths if enemy_total_deaths > 0 else 0
             hero_text = ", ".join(_fmt_hero_segment(seg, include_detail) for seg in segments)
-            return f"{{ 位置: {pos}, 玩家: {display}, 英雄片段: [ {hero_text} ] }}"
+            return f"{{ 位置: {pos}, 玩家: {display}, 击杀参与率: {kp_rate:.3f}, 英雄片段: [ {hero_text} ] }}"
 
         def _player_ref_text(seg, player_name: str) -> str:
             if not db_path:
@@ -796,22 +823,22 @@ class ShiquManager:
 
             tm = detail_data.get("teammateList", [])
             en = detail_data.get("enemyList", [])
+            enemy_total_deaths = sum(int((p if isinstance(p, dict) else {}).get("death", 0) or 0) for p in en)
             def _append_players(label, players, *, include_detail: bool, include_reference: bool):
                 lines.append(f"  [{label}]")
                 lines.append("  [")
                 for p, segments, pos in _sort_and_label_players(players):
                     player_name = str(p.get("name", "?"))
-                    lines.append(f"    {_fmt_player_block(p, segments, pos, game_sec, include_detail)},")
+                    lines.append(f"    {_fmt_player_block(p, segments, pos, game_sec, include_detail, enemy_total_deaths)},")
                     if include_reference:
                         for seg in segments:
                             ref = _player_ref_text(seg, player_name)
                             if ref:
-                                lines.append(f"    # 分段参考: {ref}")
+                                lines.append(f"    # 数据参考: {ref}")
                 lines.append("  ],")
 
             if tm:
                 _append_players("队友", tm, include_detail=True, include_reference=True)
-            # ponytail: 对手数据已删除
             lines.append("}")
             lines.append("")
 
@@ -840,7 +867,7 @@ class ShiquManager:
         return f"""你是守望先锋串子型数据分析师，圈内人称"数据带阴阳师"。
 
 【角色定义】
-1. 深耕守望先锋全英雄机制、版本环境、职业赛事与国服天梯生态，所有点评 100% 以游戏数据为唯一依据，拒绝空口黑屁、主观臆断。熟稔全社区梗文化，对国服鱼塘到高分段的众生相了如指掌，鉴区准确率堪比官方外挂检测。
+1. 深耕守望先锋全英雄机制、版本环境、职业赛事与国服天梯生态，所有点评以游戏数据为唯一依据，拒绝空口黑屁、主观臆断。熟稔全社区梗文化，对国服鱼塘到高分段的众生相了如指掌，鉴区准确率堪比官方外挂检测。
 2. 人设底色：表面永远保持「我只是个念数据的中立人」的客观嘴脸，语气平淡像读财报，实则字字藏刀、句句带刺，精准戳中玩家最痛的操作痛点；
 3. 核心立场: 是纯纯乐子人，看数据如同看乐子，毒舌但不恶毒，嘲讽只锁死游戏表现，绝不越界人身攻击。
 4. 说话习惯：擅长用反问、反讽、明褒暗贬、假装惋惜的语气输出暴击；
@@ -848,21 +875,24 @@ class ShiquManager:
 【硬性约束】
 - 仅针对游戏内数据、赛场表现、英雄数据点评，绝不涉及外貌、私生活、人品等人身攻击；不输出任何歧视、引战、恶意辱骂内容。
 - 所有解读严格基于提供的原始数据，禁止编造数据、篡改数据含义、夸大数据结论；
-- 严禁跨职责直接比较伤害/治疗等核心指标，每一句阴阳调侃必须对应明确的数据论据。
+- 严禁跨职责直接比较伤害/治疗等核心指标，阴阳调侃必须对应明确的数据论据。
 - 不讨论外挂、代练等违规行为。
 - 禁止进行反事实推演或假设性陈述（如"你本可以多拿3个击杀"），仅限描述已发生事件。
 - 守望先锋段位名称：青铜/白银/黄金/白金/钻石/大师/宗师/英杰
+- 输出评价符合人设和说话习惯，整体为串子风格阴阳，对好的部分赞赏，差的部分指出，可少量使用 emoji。
 
 【评判规则】
-1. 不同职责的核心指标优先级（比赛数据中的数值均与分段参考数据口径一致）：
-   坦克位：(伤害-受疗) > 阵亡数 > 击杀参与率 > 助攻数 > 其他数据
-   输出位：单独消灭 > 最后一击 > 伤害 > 阵亡数 > 击杀参与率 > 助攻数 > 其他数据
-   辅助位：伤害量 ≈> 阵亡数 > 治疗量 > 击杀数 > 击杀参与率 > 助攻数 > 其他数据
+1. 不同职责的核心指标优先级（比赛数据中的数值均与数据参考口径一致）：
+   坦克位：单独消灭 > 最后一击 > (伤害-受疗) > 阵亡数 > 击杀参与率 >> 其他数据
+   输出位：单独消灭 > 最后一击 > 伤害 > 阵亡数 > 击杀参与率 >> 其他数据
+   辅助位：单独消灭 > 最后一击 >  阵亡数 > 伤害 > 治疗量 > 击杀数 > 击杀参与率 >> 其他数据
 
 2. 数据对比与评分：
-   - 将焦点玩家数据与同英雄"# 分段参考行"对比，低于参考值应扣分。
-   - 同一玩家同一局可能在"英雄片段"内出现多个英雄。
-   - 最后一击和单独消灭应额外加分，频繁阵亡且贡献低 → 加重扣分。
+   - 将焦点玩家数据与同英雄"# 数据参考行"对比，低于参考值应扣分。
+   - 同一玩家同一局可能在"英雄片段"内出现多个英雄，时长<3分钟的片段为低权重。
+   - 最后一击和单独消灭应额外加分，频繁阵亡且贡献低应加重扣分。
+   - 击杀，助攻，阵亡是参考值正负230%，不具有参考价值，不参与评分。
+   - 不要把“助攻低”或“没有助攻”机械地当成负面结论。对于坦克位和输出位，助攻不是通用核心指标。很多英雄的技能机制、收割定位、爆发击杀方式或单点作战方式，本来就不容易稳定获得助攻。除非该英雄本身明显依赖团队增益、控制、挂状态或持续参与混战，且同场其他数据也能证明其协同性偏低，否则禁止写出无意义的“零助攻/助攻少所以表现差”评价
    - 比赛胜负不影响评分，只论数据。
    - 若某局数据异常（如焦点玩家和队友，英雄全部为空，全部字段为空），该局不参与评分，comment 写"数据缺失，无法评价"。
    - 百分制评分标准：
@@ -879,7 +909,8 @@ class ShiquManager:
    - 好友点评只能基于他们的【比赛数据】，比赛胜负不影响评价，可以对焦点玩家表现上下文进行轻量评价。
    - 评分标准同焦点玩家（≥50夸/赞赏，<50串），但没有数据时语气要保守。
 
-【阴阳话术库（示例）】
+
+【阴阳话术库（示例，用作参考，不要完全照搬）】
 你的走位很有想象力，可惜伤害结算在了空气上。
 恭喜啊，用实力证明了「辅助」和「被辅助」的区别。
 这波操作，完美诠释了什么叫「无效阵亡」。
@@ -891,9 +922,10 @@ class ShiquManager:
 字段规范（schema 未表达的部分）：
 - 所有字符串使用中文，内容简练。字符串内禁止英文双引号，引用请用「」或『』，emoji 可正常使用。
 - result 仅可取值：胜 / 负 / 平 / 未知。
-- match_comments 必须覆盖【比赛数据】全部 {n} 局，index 从 1 递增到 {n}，禁止跳号或重复。
+- summary 是纯客观数据概览点评（约 100 字）
+- match_comments 必须覆盖【比赛数据】全部 {n} 局，index 从 1 递增到 {n}，禁止跳号或重复（约50字），写出最突出/劣势的个人表现、关键数据差距。
 - teammate_comments 必须为【焦点玩家的好友 ID】中的每一位好友都生成一条点评，缺一不可，禁止输出列表外的玩家。
-- overall_comment 约 300 字，串子风格阴阳总结，需有数据支撑，可少量使用 emoji。
+- overall_comment 约 350 字，串子风格阴阳总结，可少量使用emoji。
 
 JSON Schema：
 {json.dumps(_SHIQU_JSON_SCHEMA, ensure_ascii=False, indent=2)}
@@ -1333,6 +1365,133 @@ JSON Schema：
         body = "\n".join(buf)
 
         return body
+
+    # ── 新渲染辅助 ──
+
+    _SCORE_COLORS = {
+        "god": "#e67e22", "boom": "#ff6b6b", "butterfly": "#a78bfa",
+        "ok": "#4ecdc4", "mid": "#f9ca24", "bad": "#e17055", "terrible": "#d63031",
+    }
+
+    # 队友评分数字专用色板, 与评价文字(#b0bec5 冷灰)拉开色差
+    _MATE_SCORE_COLORS = {
+        "god": "#f6a863", "boom": "#f58989", "butterfly": "#bfacfa",
+        "ok": "#7eddd6", "mid": "#f5d35a", "bad": "#f09c88", "terrible": "#ee6566",
+    }
+
+    @staticmethod
+    def _escape_html(text: str) -> str:
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    @staticmethod
+    def _to_half_width_punct(text: str) -> str:
+        """全角标点转半角:  ：→:  ，→,  （→(  ）→)  ；→;
+        ！? 保留全角, 更符合中文阅读习惯。"""
+        text = text.replace("：", ": ")
+        text = text.replace("，", ", ")
+        text = text.replace("（", "(").replace("）", ")")
+        text = text.replace("；", ";")
+        return text
+
+    @staticmethod
+    def _add_num_spacing(text: str) -> str:
+        """中文字符与数字之间插入窄空格 (U+2009), 提升可读性。"""
+        _THIN = "\u2009"
+        text = re.sub(r"([\u4e00-\u9fff])(\d)", lambda m: m.group(1) + _THIN + m.group(2), text)
+        text = re.sub(r"(\d)([\u4e00-\u9fff])", lambda m: m.group(1) + _THIN + m.group(2), text)
+        return text
+
+    @classmethod
+    def _format_text(cls, text: str) -> str:
+        """转义 HTML → 标注判定标签 → 半角标点 → 数字间隔。"""
+        text = cls._escape_html(text)
+        text = cls._decorate_inline_verdicts(text)
+        text = cls._to_half_width_punct(text)
+        text = cls._add_num_spacing(text)
+        return text
+
+    @classmethod
+    def _result_to_html(cls, result: dict, generated_at: str = "") -> str:
+        """直接从结构化结果生成 HTML 正文, 带颜色标注、半角标点、数字间隔。"""
+        score = cls._clamp_score(result.get("score", 0), 0)
+        verdict = str(result.get("verdict") or "")
+        summary = str(result.get("summary") or "")
+        overall = str(result.get("overall_comment") or "")
+        gen_time = generated_at or time.strftime("%Y-%m-%d %H:%M:%S")
+        disclaimer = "* 功能仅限娱乐, 切勿因为ai瞎编影响心情"
+
+        rule = cls._score_rule(score)
+        score_color = cls._SCORE_COLORS.get(str(rule["class"]), "#ffd700")
+
+        parts: list[str] = []
+
+        # 评分 + 判定
+        parts.append(f'<div class="score" style="color:{score_color}">{score}/100</div>')
+        verdict_block = cls._decorate_verdict(verdict, block=True)
+        if verdict_block:
+            parts.append(cls._to_half_width_punct(verdict_block))
+
+        # 免责声明 + 生成时间 (间距缩小)
+        parts.append(f'<p class="disclaimer" style="margin-bottom:4px">{cls._escape_html(disclaimer)}</p>')
+        parts.append(f'<p class="gentime">生成时间: {cls._escape_html(gen_time)}</p>')
+
+        # 数据概况
+        parts.append("<h3>数据概况</h3>")
+        parts.append(f"<p>{cls._format_text(summary)}</p>")
+
+        # 逐局点评
+        parts.append("<h2>逐局点评</h2>")
+        result_classes = {"胜": "result-win", "负": "result-loss", "平": "result-draw"}
+        for item in result.get("match_comments") or []:
+            idx = cls._escape_html(str(item.get("index", "?")))
+            res = str(item.get("result", "未知"))
+            hero = cls._to_half_width_punct(cls._escape_html(str(item.get("hero", "未知英雄"))))
+            comment = cls._format_text(str(item.get("comment", "")))
+            res_cls = result_classes.get(res, "result-unknown")
+            parts.append(
+                f'<p class="gamen"><b>第{idx}局: </b>'
+                f'<span class="{res_cls}">{cls._escape_html(res)}</span>'
+                f'<span class="sep"> </span>'
+                f'<span class="hero-name">{hero}</span>'
+                f'<span class="sep">: </span>'
+                f"<span>{comment}</span></p>"
+            )
+
+        # 综合评价
+        parts.append("<h2>综合评价</h2>")
+        parts.append(f"<p>{cls._format_text(overall)}</p>")
+        parts.append(f'<p class="disclaimer">{cls._escape_html(disclaimer)}</p>')
+
+        # 队友点评
+        parts.append("<h2>队友点评</h2>")
+        teammates = result.get("teammate_comments") or []
+        if teammates:
+            for item in teammates:
+                name = cls._escape_html(str(item.get("name", "未知队友")))
+                tm_score = cls._clamp_score(item.get("score", 0), 0)
+                games = item.get("games")
+                games_text = f"（共同{games}局）" if games is not None else ""
+                games_text = cls._to_half_width_punct(games_text)
+                tm_comment = cls._format_text(
+                    str(item.get("verdict") or "") + str(item.get("comment") or "")
+                )
+                tm_rule = cls._score_rule(tm_score)
+                tm_mate_color = cls._MATE_SCORE_COLORS.get(str(tm_rule["class"]), "#b0a080")
+                parts.append(
+                    f'<div class="mate-entry">'
+                    f'<p class="mate-head">'
+                    f'<span class="mate-name">{name}</span>'
+                    f'<span class="mate-games">{cls._escape_html(games_text)}</span>'
+                    f'<span class="sep">: </span>'
+                    f'评分 <span class="mate-score" style="color:{tm_mate_color}">{tm_score}/100</span>'
+                    f"</p>"
+                    f'<p class="mate-comment">{tm_comment}</p>'
+                    f"</div>"
+                )
+        else:
+            parts.append('<p class="mate-comment">- 暂无共同游戏≥2局的队友.</p>')
+
+        return "\n".join(parts)
 
     # ── 主流程 ──
 
