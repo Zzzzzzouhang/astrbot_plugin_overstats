@@ -882,16 +882,17 @@ class ShiquManager:
 - 输出评价符合人设和说话习惯，整体为串子风格阴阳，对好的部分赞赏，差的部分指出，可少量使用 emoji。
 
 【评判规则】
-1. 不同职责的核心指标优先级（比赛数据中的数值均与数据参考口径一致）：
+1. 不同职责的核心指标优先级参考，需要综合看（比赛数据中的数值均与数据参考口径一致）：
    坦克位：单独消灭 > 最后一击 > (伤害-受疗) > 阵亡数 > 击杀参与率 >> 其他数据
    输出位：单独消灭 > 最后一击 > 伤害 > 阵亡数 > 击杀参与率 >> 其他数据
-   辅助位：单独消灭 > 最后一击 >  阵亡数 > 伤害 > 治疗量 > 击杀数 > 击杀参与率 >> 其他数据
+   辅助位：最后一击 >  阵亡数 > 单独消灭 > 伤害 > 治疗量 > 击杀数 > 击杀参与率 >> 其他数据
 
 2. 数据对比与评分：
    - 将焦点玩家数据与同英雄"# 数据参考行"对比，低于参考值应扣分。
    - 同一玩家同一局可能在"英雄片段"内出现多个英雄，时长<3分钟的片段为低权重。
    - 最后一击和单独消灭应额外加分，频繁阵亡且贡献低应加重扣分。
    - 击杀，助攻，阵亡是参考值正负230%，不具有参考价值，不参与评分。
+   - 需要综合看英雄数据，比如有的输出英雄伤害低但是最后一击高，有的辅助英雄输出高但治疗会少一些，需要综合参考值考虑，不要跨英雄对比。
    - 不要把“助攻低”或“没有助攻”机械地当成负面结论。对于坦克位和输出位，助攻不是通用核心指标。很多英雄的技能机制、收割定位、爆发击杀方式或单点作战方式，本来就不容易稳定获得助攻。除非该英雄本身明显依赖团队增益、控制、挂状态或持续参与混战，且同场其他数据也能证明其协同性偏低，否则禁止写出无意义的“零助攻/助攻少所以表现差”评价
    - 比赛胜负不影响评分，只论数据。
    - 若某局数据异常（如焦点玩家和队友，英雄全部为空，全部字段为空），该局不参与评分，comment 写"数据缺失，无法评价"。
@@ -1495,7 +1496,7 @@ JSON Schema：
 
     # ── 主流程 ──
 
-    async def run(self, event, bnet_id_input: str = ""):
+    async def run(self, event, bnet_id_input: str = "", match_count: int = 0):
         uid = self._user_key(event)
 
         # ── 违规封禁检查 ──
@@ -1533,7 +1534,7 @@ JSON Schema：
         # 获取 bnet_id
         target_id = await self._plugin._get_bnet_id(event, bnet_id_input)
         if not target_id:
-            yield event.plain_result(f"❌ 请提供 BattleTag，或先使用 /绑定 绑定。\n用法：{_SHIQU_BTN} &lt;battle_tag&gt;")
+            yield event.plain_result(f"❌ 请提供 战网id，或先使用 /绑定 绑定。\n用法：{_SHIQU_BTN} &lt;battle_tag&gt;")
             return
 
         # ── 每日首次使用（凌晨4点重置）→ 直接开启查询，跳过确认 ──
@@ -1541,7 +1542,7 @@ JSON Schema：
         is_first_today = self._is_first_today(uid)
 
         if is_first_today and cd_ok:
-            async for r in self._do_query(event, uid, target_id):
+            async for r in self._do_query(event, uid, target_id, match_count=match_count):
                 yield r
             return
 
@@ -1556,7 +1557,7 @@ JSON Schema：
         # pending 有效且无 CD → 清除 pending，执行查询
         if is_pending and cd_ok:
             await self._plugin.put_kv_data(pending_key, 0)
-            async for r in self._do_query(event, uid, target_id):
+            async for r in self._do_query(event, uid, target_id, match_count=match_count):
                 yield r
             return
 
@@ -1578,7 +1579,14 @@ JSON Schema：
             except Exception:
                 cd_raw = -1
             if cd_raw == 0:
-                async for r in self._do_query(event, uid, target_id):
+                async for r in self._do_query(event, uid, target_id, match_count=match_count):
+                    yield r
+                return
+
+            # 白名单用户/群：仅当上次图片成功发送时跳过二次确认，否则走确认流程让用户先看到缓存图
+            last_image_sent_ok = record.get("image_sent", False) if record else False
+            if self._plugin._is_whitelisted(event) and last_image_sent_ok:
+                async for r in self._do_query(event, uid, target_id, match_count=match_count):
                     yield r
                 return
 
@@ -1609,6 +1617,10 @@ JSON Schema：
                 _LAST_IMAGE[uid] = cached_image
                 try:
                     yield event.chain_result([Image.fromFileSystem(cached_image)])
+                    # 缓存图发送成功 → 标记 image_sent，后续白名单可跳过二次确认
+                    if record:
+                        record["image_sent"] = True
+                        self._save_user_record(uid, record)
                 except Exception as exc:
                     err_msg = str(exc)
                     logger.error(f"[是区吗][uid={uid}] 发送缓存图片失败: {err_msg}")
@@ -1618,8 +1630,8 @@ JSON Schema：
                             "⛔ 查询返回的图片内容包含违规信息，该指令已被禁用12小时，请勿再次尝试。"
                         )
 
-    async def _do_query(self, event, uid: str, target_id: str):
-        """执行实际的是区吗查询流程。"""
+    async def _do_query(self, event, uid: str, target_id: str, match_count: int = 0):
+        """执行实际的是区吗查询流程。match_count>0 时覆盖配置的抓取场数。"""
         # ── 重复触发检查 ──
         async with _QUEUE_LOCK:
             if uid in _ACTIVE_META:
@@ -1646,7 +1658,7 @@ JSON Schema：
             # 仅一条进度消息
             yield event.plain_result(f'🔍 正在生成 {target_id} 是区吗判定书，未自动返回请使用<qqbot-cmd-input text="ow是区吗结果" show="ow是区吗结果" reference="false" />查询')
             _ACTIVE_META[uid] = "拉取对局数据"
-            target_count = int(self._get_config_map().get("match_count", 12) or 12)
+            target_count = match_count if 0 < match_count <= 25 else int(self._get_config_map().get("match_count", 12) or 12)
             matches = await self._fetch_matches(target_id, target=target_count)
             t1 = time.time()
             logger.info(f"[是区吗][uid={uid}] 📊 已获取 {len(matches)} 场 ({(t1 - t0):.1f}s)")
@@ -1722,6 +1734,11 @@ JSON Schema：
             if image_path:
                 try:
                     yield event.chain_result([Image.fromFileSystem(image_path)])
+                    # 图片发送成功 → 标记，供白名单二次确认判断用
+                    record = self._load_user_record(uid)
+                    if record:
+                        record["image_sent"] = True
+                        self._save_user_record(uid, record)
                 except Exception as exc:
                     err_msg = str(exc)
                     logger.error(f"[是区吗][uid={uid}] 发送判定书图片失败: {err_msg}")

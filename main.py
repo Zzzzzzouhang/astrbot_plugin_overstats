@@ -33,7 +33,7 @@ except ImportError:
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.6.2")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.6.5")
 class OverstatsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -1725,9 +1725,32 @@ class OverstatsPlugin(Star):
 
     # ── OW 是区吗 ────────────────────────────────────
     @filter.command("ow是区吗", alias={'是区吗'})
-    async def ow_shiqu(self, event: AstrMessageEvent, arg1: str = ""):
-        """OW 是区吗：展示上次判定结果。5 分钟内再次发送确认后开启新查询（分级 CD）。"""
-        async for r in self.shiqu_manager.run(event, arg1):
+    async def ow_shiqu(self, event: AstrMessageEvent, arg1: str = "", arg2: str = "", arg3: str = ""):
+        """OW 是区吗：展示上次判定结果。5 分钟内再次发送确认后开启新查询（分级 CD）。可加局数 1~25。"""
+        # 智能拆分：数字→局数，非数字→战网ID（参数可无序）
+        positional, kw = self._extract_keywords([arg1, arg2, arg3])
+        bnet_id = ""
+        match_count = 0
+        is_privileged = self._is_whitelisted(event) or self._is_astrbot_admin(event)
+
+        for arg in positional:
+            if arg.isdigit():
+                digit = int(arg)
+                if not is_privileged:
+                    yield event.plain_result("💡 自定义局数仅限白名单/管理员使用，已使用默认局数。")
+                    continue
+                if digit <= 0:
+                    yield self._plain_error_result(event, "❌ 错误：是区吗的局数必须大于 0！")
+                    return
+                if digit > 25:
+                    yield event.plain_result("💡 局数最大为 25，已自动调整为 25。")
+                    match_count = 25
+                else:
+                    match_count = digit
+            else:
+                bnet_id = arg
+
+        async for r in self.shiqu_manager.run(event, bnet_id, match_count=match_count):
             yield r
 
     @filter.command("ow是区吗结果", alias={'是区吗结果'})
