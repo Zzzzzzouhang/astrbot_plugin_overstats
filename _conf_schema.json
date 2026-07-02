@@ -313,5 +313,12 @@
     "type": "text",
     "hint": "每分钟 LLM 调用上限（无论成功失败均计数）。JSON 格式：{\"enabled\":开true关false,\"per_minute\":每分钟上限}。默认 {\"enabled\":false,\"per_minute\":10}。",
     "default": "{\"enabled\":false,\"per_minute\":10}"
+  },
+  "unmatched_cmd_guide_enabled": {
+    "description": "未匹配指令返回快速指南",
+    "type": "bool",
+    "hint": "开启后，当用户发送了本插件无法识别的指令时，自动返回快速指南并在第一行提示「X 暂时未匹配到指令」。仅用户查询指令生效，管理/部署类指令不触发。默认关闭。",
+    "obvious_hint": true,
+    "default": false
   }
 }

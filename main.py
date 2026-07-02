@@ -110,6 +110,20 @@ class OverstatsPlugin(Star):
         # 全量适配指令分发表：指令名/别名 -> 方法引用（懒构建，避免 __init__ 时方法未绑定）
         self._full_adapt_map: dict | None = None
 
+        # 管理/部署类指令集合（用于未匹配指令兜底时排除，避免管理指令误触发快速指南）
+        self._admin_cmd_set: set[str] = {
+            "多图测试", "单图测试",
+            "ow开庭", "开庭", "ow是区吗", "是区吗",
+            "ow是区吗结果", "是区吗结果", "owAI检测", "AI检测",
+            "维护", "ow违禁封禁", "ow违禁解封",
+            "ow连接测试",
+            "ow部署", "ow部署状态", "ow更新后端", "ow停止后端",
+            "ow重启后端", "ow部署日志", "ow后端日志",
+            "ow卸载后端", "ow卸载后端执行确认", "ow卸载后端执行仅代码",
+            "ow卸载后端执行仅venv", "ow卸载后端执行强制",
+            "群设置", "全量适配开", "全量适配关", "管理",
+        }
+
         # OW 开庭功能模块（测试阶段，独立封装）
         self.court_manager = CourtManager(self)
         self.shiqu_manager = ShiquManager(self)
@@ -1199,6 +1213,52 @@ class OverstatsPlugin(Star):
             event.stop_event()
             return
 
+        # 未匹配到任何已知指令/模式时，根据配置返回快速指南（仅用户指令，管理指令不触发）
+        # 群聊中非真实@bot 的消息（含纯文本 @昵称）交由 full_adaptation_interceptor 处理，此处不拦截
+        if (
+            hasattr(event, "is_at_or_wake_command") and event.is_at_or_wake_command
+            and self.config.get("unmatched_cmd_guide_enabled", False)
+        ):
+            if not is_group or self._is_real_at_bot(event):
+                cmd_first_token = msg.split()[0].lstrip("/")
+                if cmd_first_token not in self._admin_cmd_set and cmd_first_token not in self._ensure_full_adapt_map():
+                    yield event.plain_result(self._get_quick_guide(event, unmatched_cmd=msg))
+                    event.stop_event()
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def unmatched_command_guide(self, event: AstrMessageEvent):
+        """未匹配指令兜底：非 QQ 平台群聊中 @机器人 发送了未识别的用户指令时，返回快速指南。
+
+        QQ 平台已由 handle_direct_text_events / full_adaptation_interceptor 专门处理，
+        此处仅覆盖其他平台（如 Telegram、Discord 等）的 @唤醒未匹配场景。
+        """
+        if not self.config.get("unmatched_cmd_guide_enabled", False):
+            return
+        if not hasattr(event, "is_at_or_wake_command") or not event.is_at_or_wake_command:
+            return
+
+        # QQ 平台由专属处理器负责，避免重复响应
+        platform_name = ""
+        try:
+            platform_name = event.get_platform_name() or ""
+        except Exception:
+            pass
+        if platform_name in ("qq_official", "qq_official_webhook", "aiocqhttp"):
+            return
+
+        msg = event.message_str.strip() if event.message_str else ""
+        if not msg:
+            return
+
+        cmd_first_token = msg.split()[0].lstrip("/")
+        if cmd_first_token in self._admin_cmd_set or cmd_first_token in self._ensure_full_adapt_map():
+            return
+        if cmd_first_token.isdigit() and 0 < int(cmd_first_token) <= 20:
+            return  # 数字快捷指令场景，可能是未被框架识别的对局查询
+
+        yield event.plain_result(self._get_quick_guide(event, unmatched_cmd=msg))
+        event.stop_event()
+
     @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK | filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
     async def full_adaptation_interceptor(self, event: AstrMessageEvent):
@@ -1296,7 +1356,11 @@ class OverstatsPlugin(Star):
         rest = tokens[1:]
         method = self._ensure_full_adapt_map().get(cmd)
         if not method:
-            return  # 未命中本插件指令，交回后续流程
+            # 未命中本插件全量适配指令，根据配置返回快速指南
+            if self.config.get("unmatched_cmd_guide_enabled", False):
+                yield event.plain_result(self._get_quick_guide(event, unmatched_cmd=cmd_text))
+                event.stop_event()
+            return
 
         # 按方法签名（除 self/event）截取参数，不足补空串（交由方法内部校验给出友好提示）
         try:
@@ -1369,9 +1433,13 @@ class OverstatsPlugin(Star):
         self._full_adapt_map = m
         return m
 
-    def _get_quick_guide(self, event: AstrMessageEvent) -> str:
-        """根据平台返回快速指南"""
-        text = """📌 Overstats 快速指南
+    def _get_quick_guide(self, event: AstrMessageEvent, unmatched_cmd: str | None = None) -> str:
+        """根据平台返回快速指南，可附带未匹配指令提示"""
+        header = ""
+        if unmatched_cmd:
+            cmd_display = unmatched_cmd[:50] + ("..." if len(unmatched_cmd) > 50 else "")
+            header = f"❌ `{cmd_display}` 暂时未匹配到指令\n\n"
+        text = header + """📌 Overstats 快速指南
 
 🔗 ➤ <qqbot-cmd-input text="/绑定 " show="绑定" reference="false" />示例：/绑定 Player#12345
 📊 ➤ <qqbot-cmd-input text="/今日总结 " show="今日总结" reference="false" /> ➤ <qqbot-cmd-input text="/本周总结 " show="本周总结" reference="false" />
@@ -1928,8 +1996,41 @@ class OverstatsPlugin(Star):
             await self._finalize_business_status_prompt(prompt_token, success)
 
     @filter.command("同玩查询", alias={'开黑胜率'})
-    async def dashen_sameplay(self, event: AstrMessageEvent, p1: str, p2: str):
-        """深度分析两位玩家一同游玩开黑时的战绩与胜率。"""
+    async def dashen_sameplay(self, event: AstrMessageEvent, p1: str = "", p2: str = ""):
+        """深度分析两位玩家一同游玩开黑时的战绩与胜率。
+
+        用法：/同玩查询 [p1战网id] [p2战网id]
+        - 两个都填 → 查询指定两位玩家的同玩数据
+        - 只填一个 → 以你绑定的战网ID为 p1，输入的为 p2
+        - 都不填   → 以你绑定的战网ID为 p1，需额外输入 p2
+        """
+        p1 = (p1 or "").strip()
+        p2 = (p2 or "").strip()
+
+        # 获取绑定的战网ID（兜底用）
+        bound_id = await self._get_bnet_id(event) or ""
+
+        # 解析逻辑：两个都填就原样用；只填一个时绑定ID作 p1
+        if p1 and p2:
+            pass  # 两个都填，原样使用
+        elif p1 and not p2:
+            # 只填了一个 → 作为 p2，绑定ID 作为 p1
+            p2 = p1
+            p1 = bound_id
+        elif not p1 and p2:
+            # 只填了 p2 → 绑定ID 作为 p1
+            p1 = bound_id
+        else:
+            # 都没填 → 绑定ID 作为 p1
+            p1 = bound_id
+
+        if not p1:
+            yield self._plain_error_result(event, "❌ 请先绑定战网ID（/绑定 Player#12345）或输入对战网ID\n用法：/同玩查询 [p1战网id] [p2战网id]")
+            return
+        if not p2:
+            yield self._plain_error_result(event, "❌ 缺少第二个战网ID\n用法：/同玩查询 [p1战网id] [p2战网id]\n示例：/同玩查询 Player#12345 OtherPlayer#67890")
+            return
+
         status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"👥 正在分析 {p1} 与 {p2} 的同玩胜率...")
         if status_text:
             yield event.plain_result(status_text)

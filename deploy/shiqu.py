@@ -1661,7 +1661,7 @@ JSON Schema：
         t0 = time.time()
         try:
             # 仅一条进度消息
-            yield event.plain_result(f'🔍 正在生成 {target_id} 是区吗判定书，未自动返回请使用<qqbot-cmd-input text="ow是区吗结果" show="ow是区吗结果" reference="false" />查询')
+            yield event.plain_result(f'🔍 正在生成 {target_id} 是区吗判定书，5分钟未自动返回请使用<qqbot-cmd-input text="ow是区吗结果" show="ow是区吗结果" reference="false" />查询')
             _ACTIVE_META[uid] = "拉取对局数据"
             target_count = match_count if 0 < match_count <= 25 else int(self._get_config_map().get("match_count", 12) or 12)
             matches = await self._fetch_matches(target_id, target=target_count)
