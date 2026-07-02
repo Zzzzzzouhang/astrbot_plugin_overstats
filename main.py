@@ -1379,8 +1379,8 @@ class OverstatsPlugin(Star):
 💪 ➤ <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" /> ➤ <qqbot-cmd-input text="/竞技强度 " show="竞技强度" reference="false" />
 ☁️ ➤ <qqbot-cmd-input text="/快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="/竞技英雄云图 " show="竞技云图" reference="false" />
 📋 全部功能 <qqbot-cmd-input text="/owhelp " show="owhelp" reference="false" />
-
-💡 必须<qqbot-cmd-input text=" " show="@机器人" reference="false"/>，不能复制纯文本识别不到"""
+💡 必须<qqbot-cmd-input text=" " show="@机器人" reference="false"/>，不能复制纯文本识别不到
+💡 大部分指令都可以带[战网id]参数，查询对应的数据，无需重新绑定"""
         return self._format_markdown_by_platform(event, text)
 
     @filter.command("快速指南", alias={'快捷指令'})
@@ -1481,6 +1481,7 @@ class OverstatsPlugin(Star):
 📰 ➤ <qqbot-cmd-input text="/ow更新 " show="ow更新" reference="false" />「latest/small/big」
 🧪 ➤ <qqbot-cmd-input text="/ow是区吗 " show="ow是区吗" reference="false" />「战网ID」 ➤ <qqbot-cmd-input text="/ow是区吗结果 " show="ow是区吗结果" reference="false" />
 🎁 ➤ 段位关键词：青铜/白银/黄金/白金/钻石/大师/宗师/英杰
+💡 大部分指令都可以带[战网id]参数，查询对应的数据，无需重新绑定
 💡 发送 <qqbot-cmd-input text="/别称 " show="别称" reference="false" /> 可查看所有指令对应别称列表。"""
         
         yield event.plain_result(self._format_markdown_by_platform(event, help_text))
