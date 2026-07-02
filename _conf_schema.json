@@ -301,5 +301,17 @@
     "type": "text",
     "hint": "JSON 格式：{\"normal\":普通CD秒,\"whitelist\":白名单CD秒,\"admin\":管理员CD秒,\"match_count\":抓取场数,\"normal_enabled\":普通用户开关true 开启 / false 关闭。12场输入token大概1.9w，30场输入token大概3.3w}。默认 {\"normal\":14400,\"whitelist\":1800,\"admin\":0,\"match_count\":12,\"normal_enabled\":false}。",
     "default": "{\"normal\":14400,\"whitelist\":1800,\"admin\":0,\"match_count\":12,\"normal_enabled\":false}"
+  },
+  "cmd_rate_limit": {
+    "description": "指令并发限流",
+    "type": "text",
+    "hint": "非白名单/管理员的用户同时执行的指令上限。JSON 格式：{\"enabled\":开true关false,\"max_concurrent\":上限数}。默认 {\"enabled\":false,\"max_concurrent\":3}。",
+    "default": "{\"enabled\":false,\"max_concurrent\":3}"
+  },
+  "llm_rate_limit": {
+    "description": "LLM 调用频率限制",
+    "type": "text",
+    "hint": "每分钟 LLM 调用上限（无论成功失败均计数）。JSON 格式：{\"enabled\":开true关false,\"per_minute\":每分钟上限}。默认 {\"enabled\":false,\"per_minute\":10}。",
+    "default": "{\"enabled\":false,\"per_minute\":10}"
   }
 }

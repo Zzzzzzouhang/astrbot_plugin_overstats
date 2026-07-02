@@ -581,6 +581,10 @@ class CourtManager:
 
     async def _call_astrbot_llm(self, event, prompt: str) -> Optional[str]:
         """通过 AstrBot 内置 LLM 生成开庭判决。"""
+        # LLM 频率限制检查（无论成功失败均计数）
+        if not self._plugin._try_llm_rate_limit():
+            logger.warning("[开庭] LLM 调用频率超限，拒绝本次请求")
+            return None
         try:
             umo = event.unified_msg_origin
             provider_id = None

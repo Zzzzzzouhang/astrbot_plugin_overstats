@@ -945,6 +945,11 @@ JSON Schema：
 
         配置项：shiqu_llm_api_base / shiqu_llm_api_key / shiqu_llm_model / shiqu_llm_stream
         """
+        # LLM 频率限制检查
+        if not self._plugin._try_llm_rate_limit():
+            logger.warning("[是区吗] LLM 调用频率超限，拒绝本次请求")
+            return None
+
         api_base = str(self._plugin.config.get("shiqu_llm_api_base", "") or "").strip().rstrip("/")
         api_key = str(self._plugin.config.get("shiqu_llm_api_key", "") or "").strip()
         model = str(self._plugin.config.get("shiqu_llm_model", "") or "").strip()
