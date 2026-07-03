@@ -14,233 +14,19 @@
     "obvious_hint": true,
     "default": "http://127.0.0.1:18080/api/v2"
   },
-  "backend_repo_url": {
-    "description": "后端仓库地址",
-    "type": "string",
-    "hint": "auto 模式下用于 git clone/pull 的 Overstats 仓库地址，一般无需修改。",
-    "default": "https://github.com/Zzzzzzouhang/Overstats.git"
-  },
-  "backend_host": {
-    "description": "后端监听地址",
-    "type": "string",
-    "hint": "auto 模式下后端服务监听的地址。默认 127.0.0.1（仅本地访问）。如需外网访问可改为 0.0.0.0，并确保服务器防火墙开放对应端口。",
-    "default": "127.0.0.1"
-  },
-  "backend_port": {
-    "description": "后端监听端口",
-    "type": "int",
-    "hint": "auto 模式下后端服务监听端口，默认 18081。如端口被占用可修改。",
-    "default": 18081
-  },
-  "auto_start_on_boot": {
-    "description": "插件加载时自动启动后端",
-    "type": "bool",
-    "hint": "auto 模式下生效。开启后插件加载时若后端代码与虚拟环境已就绪，将自动启动后端进程。首次部署仍需手动执行 /ow部署。",
-    "default": false
-  },
-  "dashen_accounts": {
-    "description": "大神账号配置",
-    "type": "template_list",
-    "hint": "auto 模式必填。配置至少一个网易大神账号的 role_id 和 token（获取方式见原项目 Faststart.md）。auto 模式下部署前必须填写，否则部署会失败。如需批量配置大量账号，请使用下方「大神账号文件路径」配置项。",
-    "obvious_hint": true,
-    "templates": {
-      "account": {
-        "name": "大神账号",
-        "hint": "每个账号需要填写 role_id（数字）和 token（字符串）",
-        "display_item": "name",
-        "items": {
-          "name": {
-            "description": "账号名称（仅用于标识）",
-            "type": "string",
-            "default": "primary"
-          },
-          "role_id": {
-            "description": "大神 role_id",
-            "type": "int",
-            "hint": "网易大神侧账号标识，数字格式。获取方式见原项目 Faststart.md。",
-            "default": 0
-          },
-          "token": {
-            "description": "大神 token",
-            "type": "string",
-            "hint": "大神业务令牌，同时作为业务请求 token 和 GL-Bigdata-Auth-Token 请求头。获取方式见原项目 Faststart.md。",
-            "default": ""
-          }
-        }
-      }
-    }
-  },
-  "dashen_accounts_bulk": {
-    "description": "批量账号配置（文本）",
-    "type": "text",
-    "hint": "可选。支持直接粘贴 JSON 数组（推荐，可直接粘贴 Overstats 原版 DASHEN_ACCOUNTS 内容）。适合需要配置大量账号的场景，与上方 WebUI 账号合并去重，批量优先。\n\nJSON 格式示例（可直接粘贴数组片段，无需手动补全括号）：\n[\n    {\"name\": \"account-1\", \"role_id\": 123456789, \"token\": \"xxx\"},\n    {\"name\": \"account-2\", \"role_id\": 987654321, \"token\": \"yyy\"}\n]\n\n留空则仅使用上方 WebUI 账号。",
-    "obvious_hint": true,
-    "default": ""
-  },
-  "dashen_dts": {
-    "description": "大神 DTS 年份",
-    "type": "int",
-    "hint": "auto 模式下生成配置使用，默认 2026。",
-    "default": 2026
-  },
-  "dashen_server": {
-    "description": "大神 server",
-    "type": "int",
-    "hint": "auto 模式下生成配置使用，默认 1。",
-    "default": 1
-  },
-  "dashen_international_proxy": {
-    "description": "网易大神国际代理",
-    "type": "string",
-    "hint": "auto 模式下可选。访问网易大神上游接口的国际代理地址，如 http://127.0.0.1:7890。无需代理则留空。",
-    "default": ""
-  },
-  "ow_esports_api_key": {
-    "description": "OW 赛事 API Key",
-    "type": "string",
-    "hint": "auto 模式下可选。PandaScore 赛事接口的 API Key，获取地址: https://app.pandascore.co/dashboard/main。无需赛事功能则留空。",
-    "default": ""
-  },
-  "analysis_base_url": {
-    "description": "AI 分析 Base URL",
-    "type": "string",
-    "hint": "auto 模式下可选。OpenAI 兼容接口的 Base URL，用于单局详细 AI 锐评功能。例如: https://api.deepseek.com/v1。无需 AI 锐评则留空。",
-    "default": ""
-  },
-  "analysis_api_key": {
-    "description": "AI 分析 API Key",
-    "type": "string",
-    "hint": "auto 模式下可选。AI 分析接口的 API Key。",
-    "default": ""
-  },
-  "analysis_model": {
-    "description": "AI 分析模型名",
-    "type": "string",
-    "hint": "auto 模式下可选。除谷歌和 deepseek 以外的模型填写，如 gpt-4o-mini。",
-    "default": ""
-  },
-  "analysis_persona_prompt": {
-    "description": "AI 锐评人设提示词",
-    "type": "text",
-    "hint": "auto 模式下可选。AI 锐评的人格设定与语气。仅放 AI 人设/语气，任务指令由后端服务维护。",
-    "default": "【核心原则】\n请保持绝对客观中立，拒绝阿谀奉承！不要因为查询指令的是焦点玩家就一味夸奖，如果焦点玩家表现平庸或拉垮请直接批评。\n\n【人格设定】\n你的说话人设是科比·布莱恩特，风格包含 [man! what can i say，mamba out] 等 meme。"
-  },
-  "use_stream_response": {
-    "description": "流式响应",
-    "type": "bool",
-    "hint": "auto 模式下生效。开启后 API 响应使用流式传输（SSE），可提升大响应的体验。默认开启。",
-    "default": true
-  },
-  "enable_database_write": {
-    "description": "数据库写入",
-    "type": "bool",
-    "hint": "auto 模式下生效。开启后后端会将比赛记录、请求指标等写入 SQLite 数据库，用于历史查询和性能统计。默认开启。",
-    "default": true
-  },
-  "dashen_account_max_requests_per_second": {
-    "description": "单账号每秒最大请求数",
-    "type": "int",
-    "hint": "auto 模式下生效。单个大神账号每秒最大请求频率限制，默认 5。",
-    "default": 5
-  },
-  "dashen_account_rate_limit_window_seconds": {
-    "description": "限流窗口（秒）",
-    "type": "float",
-    "hint": "auto 模式下生效。账号限流的时间窗口，默认 1.0 秒。",
-    "default": 1.0
-  },
-  "dashen_account_failure_cooldown_seconds": {
-    "description": "账号失败冷却（秒）",
-    "type": "int",
-    "hint": "auto 模式下生效。账号请求失败后的冷却时间，冷却期间不分配请求，默认 60 秒。",
-    "default": 60
-  },
-  "dashen_max_concurrent_requests": {
-    "description": "最大并发请求数",
-    "type": "int",
-    "hint": "auto 模式下生效。后端同时向上游发起的最大并发请求数，默认 2。",
-    "default": 2
-  },
-  "ow_guess_asset_root": {
-    "description": "OW 猜测资源目录",
-    "type": "string",
-    "hint": "auto 模式下可选。本地 OW 猜测资源包（图片/音频）的根目录路径，默认 ow_guess_assets。无需此功能则保持默认。",
-    "default": "ow_guess_assets"
-  },
-  "dashen_current_season": {
-    "description": "当前赛季",
-    "type": "int",
-    "hint": "auto 模式下生效。大神当前赛季编号，默认 23。新赛季更新时需修改。",
-    "default": 23
-  },
-  "dashen_history_start_season": {
-    "description": "历史起始赛季",
-    "type": "int",
-    "hint": "auto 模式下生效。历史数据查询的起始赛季编号，默认 15。",
-    "default": 15
-  },
-  "ow_hero_leaderboard_cn_season": {
-    "description": "国服英雄榜单赛季",
-    "type": "int",
-    "hint": "auto 模式下生效。国服英雄排行榜的赛季编号，默认 3。",
-    "default": 3
-  },
-  "analysis_proxy": {
-    "description": "AI 分析代理",
-    "type": "string",
-    "hint": "auto 模式下可选。AI 分析接口的代理地址（用于 OpenAI 官方和 Google OpenAI 兼容端点）。无需代理则留空。",
-    "default": ""
-  },
-  "patch_notes_use_international_proxy": {
-    "description": "补丁说明使用国际代理",
-    "type": "bool",
-    "hint": "auto 模式下生效。开启后获取补丁说明时使用国际代理。默认关闭。",
-    "default": false
-  },
-  "patch_notes_international_proxy": {
-    "description": "补丁说明国际代理地址",
-    "type": "string",
-    "hint": "auto 模式下可选。获取补丁说明使用的国际代理地址，如 http://127.0.0.1:7890。无需代理则留空。",
-    "default": ""
-  },
-  "github_proxy_enabled": {
-    "description": "是否启用 GitHub 加速",
-    "type": "bool",
-    "hint": "默认关闭。当 Git 克隆出现 RPC 失败、HTTP/2 流错误或 early EOF 等网络报错时，会自动启用加速代理重试（无论此开关是否开启）。开启后首次克隆即使用代理。一般无需手动开启，除非你的网络环境无法直连 GitHub。",
-    "obvious_hint": true,
-    "default": false
-  },
-  "github_proxy_primary": {
-    "description": "GitHub 主加速地址",
-    "type": "string",
-    "hint": "GitHub 加速代理的主地址，默认 https://gh.llkk.cc/ 。当网络错误自动重试时优先使用此地址。",
-    "default": "https://gh.llkk.cc/"
-  },
-  "github_proxy_fallback": {
-    "description": "GitHub 备加速地址",
-    "type": "string",
-    "hint": "GitHub 加速代理的备用地址，默认 https://gh-proxy.com/ 。当主加速地址失败时自动切换至此地址。",
-    "default": "https://gh-proxy.com/"
-  },
-  "github_proxy_custom": {
-    "description": "自定义 GitHub 加速地址",
-    "type": "string",
-    "hint": "可选。填写后加速重试时优先使用此地址（优先级高于主/备地址）。留空则使用主/备地址。例如：https://mirror.ghproxy.com/ 。",
-    "default": ""
-  },
-  "save_image_locally": {
-    "description": "图片是否保存本地后再发送",
-    "type": "bool",
-    "hint": "默认开启。开启后将图片数据先保存到本地临时文件再发送；关闭后跳过本地落盘步骤，直接将图片 bytes 转为 base64 发送，减少磁盘 I/O。注意：关闭后可能略微增加内存占用。",
-    "obvious_hint": true,
-    "default": true
-  },
   "direct_message_handling_enabled": {
-    "description": "是否开启直接消息处理",
+    "description": "直接消息处理",
     "type": "bool",
     "hint": "开启后可识别直接发送的战网ID、单局数字，以及纯@时返回快速指南。兼容 QQ 官方机器人与普通机器人；群聊中必须真实@机器人才会响应，防止误触发。",
     "obvious_hint": true,
     "default": true
+  },
+  "unmatched_cmd_guide_enabled": {
+    "description": "未匹配指令返回快速指南",
+    "type": "bool",
+    "hint": "开启后，当用户发送了本插件无法识别的指令时，自动返回快速指南并在第一行提示「X 暂时未匹配到指令」。仅用户查询指令生效，管理/部署类指令不触发。默认关闭。",
+    "obvious_hint": true,
+    "default": false
   },
   "full_adaptation_nickname": {
     "description": "全量适配昵称兜底",
@@ -249,28 +35,12 @@
     "obvious_hint": true,
     "default": ""
   },
-  "group_whitelist": {
-    "description": "群白名单",
-    "type": "list",
-    "items": {"type": "string"},
-    "hint": "维护模式下白名单内的群可正常使用所有功能，跳过权限拦截。注意：QQ官方机器人需填写群openid（而非群号），其他平台填对应群ID。",
+  "save_image_locally": {
+    "description": "图片是否保存本地后再发送",
+    "type": "bool",
+    "hint": "默认开启。开启后将图片数据先保存到本地临时文件再发送；关闭后跳过本地落盘步骤，直接将图片 bytes 转为 base64 发送，减少磁盘 I/O。注意：关闭后可能略微增加内存占用。",
     "obvious_hint": true,
-    "default": []
-  },
-  "user_whitelist": {
-    "description": "个人白名单",
-    "type": "list",
-    "items": {"type": "string"},
-    "hint": "维护模式下白名单内的个人可正常使用所有功能，跳过权限拦截。注意：QQ官方机器人需填写个人openid（而非QQ号），其他平台填用户ID。",
-    "obvious_hint": true,
-    "default": []
-  },
-  "sqlite_db_path": {
-    "description": "SQLite 数据库路径（开庭分段参考用）",
-    "type": "string",
-    "hint": "留空则不启用。填写 Overstats 后端 match_stats.sqlite3 的完整路径（通常为 Overstats/src/db/match_stats.sqlite3），开庭时将读取本地数据库中的分段英雄统计数据，作为对局分析的参考依据。",
-    "obvious_hint": true,
-    "default": ""
+    "default": true
   },
   "shiqu_llm_api_base": {
     "description": "是区吗 LLM API Base URL",
@@ -302,6 +72,22 @@
     "hint": "JSON 格式：{\"normal\":普通CD秒,\"whitelist\":白名单CD秒,\"admin\":管理员CD秒,\"match_count\":抓取场数,\"normal_enabled\":普通用户开关true 开启 / false 关闭。12场输入token大概1.9w，30场输入token大概3.3w}。默认 {\"normal\":14400,\"whitelist\":1800,\"admin\":0,\"match_count\":12,\"normal_enabled\":false}。",
     "default": "{\"normal\":14400,\"whitelist\":1800,\"admin\":0,\"match_count\":12,\"normal_enabled\":false}"
   },
+  "group_whitelist": {
+    "description": "群白名单",
+    "type": "list",
+    "items": {"type": "string"},
+    "hint": "维护模式下白名单内的群可正常使用所有功能，跳过权限拦截。注意：QQ官方机器人需填写群openid（而非群号），其他平台填对应群ID。",
+    "obvious_hint": true,
+    "default": []
+  },
+  "user_whitelist": {
+    "description": "个人白名单",
+    "type": "list",
+    "items": {"type": "string"},
+    "hint": "维护模式下白名单内的个人可正常使用所有功能，跳过权限拦截。注意：QQ官方机器人需填写个人openid（而非QQ号），其他平台填用户ID。",
+    "obvious_hint": true,
+    "default": []
+  },
   "cmd_rate_limit": {
     "description": "指令并发限流",
     "type": "text",
@@ -314,11 +100,225 @@
     "hint": "每分钟 LLM 调用上限（无论成功失败均计数）。JSON 格式：{\"enabled\":开true关false,\"per_minute\":每分钟上限}。默认 {\"enabled\":false,\"per_minute\":10}。",
     "default": "{\"enabled\":false,\"per_minute\":10}"
   },
-  "unmatched_cmd_guide_enabled": {
-    "description": "未匹配指令返回快速指南",
+  "github_proxy_enabled": {
+    "description": "是否启用 GitHub 加速",
     "type": "bool",
-    "hint": "开启后，当用户发送了本插件无法识别的指令时，自动返回快速指南并在第一行提示「X 暂时未匹配到指令」。仅用户查询指令生效，管理/部署类指令不触发。默认关闭。",
+    "hint": "默认关闭。当 Git 克隆出现 RPC 失败、HTTP/2 流错误或 early EOF 等网络报错时，会自动启用加速代理重试（无论此开关是否开启）。开启后首次克隆即使用代理。一般无需手动开启，除非你的网络环境无法直连 GitHub。",
     "obvious_hint": true,
     "default": false
+  },
+  "github_proxy_custom": {
+    "description": "自定义 GitHub 加速地址",
+    "type": "string",
+    "hint": "可选。填写后加速重试时优先使用此地址（优先级高于主/备地址）。留空则使用主/备地址。例如：https://mirror.ghproxy.com/ 。",
+    "default": ""
+  },
+  "github_proxy_primary": {
+    "description": "GitHub 主加速地址",
+    "type": "string",
+    "hint": "GitHub 加速代理的主地址，默认 https://gh.llkk.cc/ 。当网络错误自动重试时优先使用此地址。",
+    "default": "https://gh.llkk.cc/"
+  },
+  "github_proxy_fallback": {
+    "description": "GitHub 备加速地址",
+    "type": "string",
+    "hint": "GitHub 加速代理的备用地址，默认 https://gh-proxy.com/ 。当主加速地址失败时自动切换至此地址。",
+    "default": "https://gh-proxy.com/"
+  },
+  "sqlite_db_path": {
+    "description": "SQLite 数据库路径（开庭分段参考用）",
+    "type": "string",
+    "hint": "留空则不启用。填写 Overstats 后端 match_stats.sqlite3 的完整路径（通常为 Overstats/src/db/match_stats.sqlite3），开庭时将读取本地数据库中的分段英雄统计数据，作为对局分析的参考依据。",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "backend_repo_url": {
+    "description": "【AUTO】后端仓库地址",
+    "type": "string",
+    "hint": "auto 模式下用于 git clone/pull 的 Overstats 仓库地址，一般无需修改。",
+    "default": "https://github.com/Zzzzzzouhang/Overstats.git"
+  },
+  "backend_host": {
+    "description": "【AUTO】后端监听地址",
+    "type": "string",
+    "hint": "auto 模式下后端服务监听的地址。默认 127.0.0.1（仅本地访问）。如需外网访问可改为 0.0.0.0，并确保服务器防火墙开放对应端口。",
+    "default": "127.0.0.1"
+  },
+  "backend_port": {
+    "description": "【AUTO】后端监听端口",
+    "type": "int",
+    "hint": "auto 模式下后端服务监听端口，默认 18081。如端口被占用可修改。",
+    "default": 18081
+  },
+  "auto_start_on_boot": {
+    "description": "【AUTO】插件加载时自动启动后端",
+    "type": "bool",
+    "hint": "auto 模式下生效。开启后插件加载时若后端代码与虚拟环境已就绪，将自动启动后端进程。首次部署仍需手动执行 /ow部署。",
+    "default": false
+  },
+  "dashen_accounts": {
+    "description": "【AUTO】大神账号配置",
+    "type": "template_list",
+    "hint": "auto 模式必填。配置至少一个网易大神账号的 role_id 和 token（获取方式见原项目 Faststart.md）。auto 模式下部署前必须填写，否则部署会失败。如需批量配置大量账号，请使用下方「大神账号文件路径」配置项。",
+    "obvious_hint": true,
+    "templates": {
+      "account": {
+        "name": "大神账号",
+        "hint": "每个账号需要填写 role_id（数字）和 token（字符串）",
+        "display_item": "name",
+        "items": {
+          "name": {
+            "description": "账号名称（仅用于标识）",
+            "type": "string",
+            "default": "primary"
+          },
+          "role_id": {
+            "description": "大神 role_id",
+            "type": "int",
+            "hint": "网易大神侧账号标识，数字格式。获取方式见原项目 Faststart.md。",
+            "default": 0
+          },
+          "token": {
+            "description": "大神 token",
+            "type": "string",
+            "hint": "大神业务令牌，同时作为业务请求 token 和 GL-Bigdata-Auth-Token 请求头。获取方式见原项目 Faststart.md。",
+            "default": ""
+          }
+        }
+      }
+    }
+  },
+  "dashen_accounts_bulk": {
+    "description": "【AUTO】批量账号配置（文本）",
+    "type": "text",
+    "hint": "可选。支持直接粘贴 JSON 数组（推荐，可直接粘贴 Overstats 原版 DASHEN_ACCOUNTS 内容）。适合需要配置大量账号的场景，与上方 WebUI 账号合并去重，批量优先。\n\nJSON 格式示例（可直接粘贴数组片段，无需手动补全括号）：\n[\n    {\"name\": \"account-1\", \"role_id\": 123456789, \"token\": \"xxx\"},\n    {\"name\": \"account-2\", \"role_id\": 987654321, \"token\": \"yyy\"}\n]\n\n留空则仅使用上方 WebUI 账号。",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "dashen_dts": {
+    "description": "【AUTO】大神 DTS 年份",
+    "type": "int",
+    "hint": "auto 模式下生成配置使用，默认 2026。",
+    "default": 2026
+  },
+  "dashen_server": {
+    "description": "【AUTO】大神 server",
+    "type": "int",
+    "hint": "auto 模式下生成配置使用，默认 1。",
+    "default": 1
+  },
+  "dashen_current_season": {
+    "description": "【AUTO】当前赛季",
+    "type": "int",
+    "hint": "auto 模式下生效。大神当前赛季编号，默认 23。新赛季更新时需修改。",
+    "default": 23
+  },
+  "dashen_history_start_season": {
+    "description": "【AUTO】历史起始赛季",
+    "type": "int",
+    "hint": "auto 模式下生效。历史数据查询的起始赛季编号，默认 15。",
+    "default": 15
+  },
+  "ow_hero_leaderboard_cn_season": {
+    "description": "【AUTO】国服英雄榜单赛季",
+    "type": "int",
+    "hint": "auto 模式下生效。国服英雄排行榜的赛季编号，默认 3。",
+    "default": 3
+  },
+  "dashen_account_max_requests_per_second": {
+    "description": "【AUTO】单账号每秒最大请求数",
+    "type": "int",
+    "hint": "auto 模式下生效。单个大神账号每秒最大请求频率限制，默认 5。",
+    "default": 5
+  },
+  "dashen_account_rate_limit_window_seconds": {
+    "description": "【AUTO】限流窗口（秒）",
+    "type": "float",
+    "hint": "auto 模式下生效。账号限流的时间窗口，默认 1.0 秒。",
+    "default": 1.0
+  },
+  "dashen_account_failure_cooldown_seconds": {
+    "description": "【AUTO】账号失败冷却（秒）",
+    "type": "int",
+    "hint": "auto 模式下生效。账号请求失败后的冷却时间，冷却期间不分配请求，默认 60 秒。",
+    "default": 60
+  },
+  "dashen_max_concurrent_requests": {
+    "description": "【AUTO】最大并发请求数",
+    "type": "int",
+    "hint": "auto 模式下生效。后端同时向上游发起的最大并发请求数，默认 2。",
+    "default": 2
+  },
+  "dashen_international_proxy": {
+    "description": "【AUTO】网易大神国际代理",
+    "type": "string",
+    "hint": "auto 模式下可选。访问网易大神上游接口的国际代理地址，如 http://127.0.0.1:7890。无需代理则留空。",
+    "default": ""
+  },
+  "patch_notes_use_international_proxy": {
+    "description": "【AUTO】补丁说明使用国际代理",
+    "type": "bool",
+    "hint": "auto 模式下生效。开启后获取补丁说明时使用国际代理。默认关闭。",
+    "default": false
+  },
+  "patch_notes_international_proxy": {
+    "description": "【AUTO】补丁说明国际代理地址",
+    "type": "string",
+    "hint": "auto 模式下可选。获取补丁说明使用的国际代理地址，如 http://127.0.0.1:7890。无需代理则留空。",
+    "default": ""
+  },
+  "ow_esports_api_key": {
+    "description": "【AUTO】OW 赛事 API Key",
+    "type": "string",
+    "hint": "auto 模式下可选。PandaScore 赛事接口的 API Key，获取地址: https://app.pandascore.co/dashboard/main。无需赛事功能则留空。",
+    "default": ""
+  },
+  "ow_guess_asset_root": {
+    "description": "【AUTO】OW 猜测资源目录",
+    "type": "string",
+    "hint": "auto 模式下可选。本地 OW 猜测资源包（图片/音频）的根目录路径，默认 ow_guess_assets。无需此功能则保持默认。",
+    "default": "ow_guess_assets"
+  },
+  "analysis_base_url": {
+    "description": "【AUTO】AI 分析 Base URL",
+    "type": "string",
+    "hint": "auto 模式下可选。OpenAI 兼容接口的 Base URL，用于单局详细 AI 锐评功能。例如: https://api.deepseek.com/v1。无需 AI 锐评则留空。",
+    "default": ""
+  },
+  "analysis_api_key": {
+    "description": "【AUTO】AI 分析 API Key",
+    "type": "string",
+    "hint": "auto 模式下可选。AI 分析接口的 API Key。",
+    "default": ""
+  },
+  "analysis_model": {
+    "description": "【AUTO】AI 分析模型名",
+    "type": "string",
+    "hint": "auto 模式下可选。除谷歌和 deepseek 以外的模型填写，如 gpt-4o-mini。",
+    "default": ""
+  },
+  "analysis_persona_prompt": {
+    "description": "【AUTO】AI 锐评人设提示词",
+    "type": "text",
+    "hint": "auto 模式下可选。AI 锐评的人格设定与语气。仅放 AI 人设/语气，任务指令由后端服务维护。",
+    "default": "【核心原则】\n请保持绝对客观中立，拒绝阿谀奉承！不要因为查询指令的是焦点玩家就一味夸奖，如果焦点玩家表现平庸或拉垮请直接批评。\n\n【人格设定】\n你的说话人设是科比·布莱恩特，风格包含 [man! what can i say，mamba out] 等 meme。"
+  },
+  "analysis_proxy": {
+    "description": "【AUTO】AI 分析代理",
+    "type": "string",
+    "hint": "auto 模式下可选。AI 分析接口的代理地址（用于 OpenAI 官方和 Google OpenAI 兼容端点）。无需代理则留空。",
+    "default": ""
+  },
+  "use_stream_response": {
+    "description": "【AUTO】流式响应",
+    "type": "bool",
+    "hint": "auto 模式下生效。开启后 API 响应使用流式传输（SSE），可提升大响应的体验。默认开启。",
+    "default": true
+  },
+  "enable_database_write": {
+    "description": "【AUTO】数据库写入",
+    "type": "bool",
+    "hint": "auto 模式下生效。开启后后端会将比赛记录、请求指标等写入 SQLite 数据库，用于历史查询和性能统计。默认开启。",
+    "default": true
   }
 }
