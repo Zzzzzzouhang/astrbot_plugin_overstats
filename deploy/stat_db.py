@@ -1,7 +1,12 @@
 """Overstats SQLite 统计数据库读取模块。
 
 读取本地 match_stats.sqlite3 中的分段英雄统计数据（comp_data_summary 表），
-为开庭功能提供分段参考均值。
+为是区吗功能提供分段参考均值。
+
+数据来源：
+- 竞技数据：rank_bucket_key IN (0,4,5,6,7,25..44) → 50% 权重
+- 快速/非排位数据：rank_bucket_key=-1 → 50% 权重
+- 聚合方式：各数据源内取中位数（非加权平均），源间 50/50 合并
 
 数据库路径通过插件配置项 sqlite_db_path 指定，留空则不启用。
 """
@@ -166,12 +171,61 @@ def query_hero_stat_averages(
         return {}
 
 
+def _aggregate_stat_medians(rows) -> dict[str, dict[str, Any]]:
+    """从多个 bucket 的 rows 中，对每个 stat 取中位数（不按 sample_count 加权）。
+
+    用于 query_hero_stat_averages_for_buckets 的竞技/快速数据内部分组聚合。
+    """
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        guid = row["statmap_name"]
+        if should_skip_prompt_stat(value_guid=guid):
+            continue
+        grouped.setdefault(guid, []).append({
+            "median_value": row["median_value"],
+            "avg_value": row["avg_value"],
+            "sample_count": row["sample_count"],
+        })
+
+    result: dict[str, dict[str, Any]] = {}
+    for guid, stat_entries in grouped.items():
+        medians = []
+        avgs = []
+        total_samples = 0
+        for entry in stat_entries:
+            samples = int(entry["sample_count"] or 0)
+            median = entry["median_value"]
+            avg = entry["avg_value"]
+            if median is not None:
+                medians.append(float(median))
+                if samples > 0:
+                    total_samples += samples
+            if avg is not None:
+                avgs.append(float(avg))
+        if not medians:
+            continue
+        medians.sort()
+        n = len(medians)
+        if n % 2 == 1:
+            median_value = medians[n // 2]
+        else:
+            median_value = (medians[n // 2 - 1] + medians[n // 2]) / 2.0
+        avg_value = sum(avgs) / len(avgs) if avgs else None
+        result[guid] = {"median": median_value, "avg": avg_value, "samples": total_samples}
+    return result
+
+
 def query_hero_stat_averages_for_buckets(
     db_path: str,
     hero_guid: str,
     rank_buckets: tuple[int, ...] = _BROAD_REFERENCE_BUCKETS,
 ) -> dict[str, dict[str, Any]]:
-    """查询指定英雄在多个段位 bucket 的聚合参考数据。"""
+    """查询指定英雄在多个段位 bucket 的聚合参考数据。
+
+    同时查询竞技数据 (comp_data_summary rank_bucket_key IN rank_buckets)
+    和快速/非排位数据 (comp_data_summary rank_bucket_key=-1)，
+    各占 50% 权重，取中位数（非加权平均）进行聚合。
+    """
     path = Path(db_path)
     if not path.is_file():
         logger.warning(f"[stat_db] 数据库文件不存在: {db_path}")
@@ -182,54 +236,52 @@ def query_hero_stat_averages_for_buckets(
     try:
         conn = sqlite3.connect(str(path))
         conn.row_factory = sqlite3.Row
-        placeholders = ",".join("?" for _ in rank_buckets)
-        rows = conn.execute(
+
+        # ── 竞技数据：按段位 bucket 查询 ──
+        comp_placeholders = ",".join("?" for _ in rank_buckets)
+        comp_rows = conn.execute(
             f"""SELECT statmap_name, median_value, avg_value, sample_count
                 FROM comp_data_summary
-                WHERE hero_guid = ? AND rank_bucket_key IN ({placeholders})
+                WHERE hero_guid = ? AND rank_bucket_key IN ({comp_placeholders})
                 ORDER BY statmap_name""",
             (hero_guid, *rank_buckets),
         ).fetchall()
+
+        # ── 快速/非排位数据：rank_bucket_key=-1 代表无段位（快速/定级）──
+        qpt_rows = conn.execute(
+            """SELECT statmap_name, median_value, avg_value, sample_count
+               FROM comp_data_summary
+               WHERE hero_guid = ? AND rank_bucket_key = -1
+               ORDER BY statmap_name""",
+            (hero_guid,),
+        ).fetchall()
+
         conn.close()
 
-        grouped: dict[str, list[sqlite3.Row]] = {}
-        for row in rows:
-            guid = row["statmap_name"]
-            if should_skip_prompt_stat(value_guid=guid):
-                continue
-            grouped.setdefault(guid, []).append(row)
+        # ── 分别取中位数聚合 ──
+        comp_aggr = _aggregate_stat_medians(comp_rows)
+        qpt_aggr = _aggregate_stat_medians(qpt_rows)
 
+        # ── 合并：各占 50% 权重 ──
+        all_guids = set(comp_aggr.keys()) | set(qpt_aggr.keys())
         result: dict[str, dict[str, Any]] = {}
-        for guid, stat_rows in grouped.items():
-            weighted_median = 0.0
-            weighted_avg = 0.0
-            weight_sum = 0
-            fallback_medians = []
-            fallback_avgs = []
-            for row in stat_rows:
-                samples = int(row["sample_count"] or 0)
-                median = row["median_value"]
-                avg = row["avg_value"]
-                if median is not None:
-                    fallback_medians.append(float(median))
-                    if samples > 0:
-                        weighted_median += float(median) * samples
-                if avg is not None:
-                    fallback_avgs.append(float(avg))
-                    if samples > 0:
-                        weighted_avg += float(avg) * samples
-                if samples > 0:
-                    weight_sum += samples
-
-            if weight_sum > 0:
-                median_value = weighted_median / weight_sum if fallback_medians else None
-                avg_value = weighted_avg / weight_sum if fallback_avgs else None
+        for guid in all_guids:
+            comp = comp_aggr.get(guid)
+            qpt = qpt_aggr.get(guid)
+            if comp and qpt:
+                median_value = 0.5 * comp["median"] + 0.5 * qpt["median"]
+                avg_value = 0.5 * (comp["avg"] or 0) + 0.5 * (qpt["avg"] or 0)
+                samples = comp["samples"] + qpt["samples"]
+            elif comp:
+                median_value = comp["median"]
+                avg_value = comp["avg"]
+                samples = comp["samples"]
             else:
-                median_value = sum(fallback_medians) / len(fallback_medians) if fallback_medians else None
-                avg_value = sum(fallback_avgs) / len(fallback_avgs) if fallback_avgs else None
-            if median_value is None:
-                continue
-            result[guid] = {"median": median_value, "avg": avg_value, "samples": weight_sum}
+                median_value = qpt["median"]
+                avg_value = qpt["avg"]
+                samples = qpt["samples"]
+            result[guid] = {"median": median_value, "avg": avg_value, "samples": samples}
+
         return result
     except Exception as e:
         logger.warning(f"[stat_db] 聚合查询失败 (hero={hero_guid}): {e}")

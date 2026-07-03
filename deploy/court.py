@@ -15,9 +15,9 @@ from typing import Optional
 
 # OW 游戏数据（从 query_tool.json 加载）
 try:
-    from .stat_db import build_reference_text, load_stat_name_map, normalize_stat_value
+    from .stat_db import build_broad_reference_text, load_stat_name_map, normalize_stat_value
 except ImportError:
-    from stat_db import build_reference_text, load_stat_name_map, normalize_stat_value  # type: ignore[no-redef]
+    from stat_db import build_broad_reference_text, load_stat_name_map, normalize_stat_value  # type: ignore[no-redef]
 
 _QTOOL = json.loads((Path(__file__).resolve().parent / "query_tool.json").read_text("utf-8"))
 HERO_DICT = {h["heroGuid"]: {"name": h["name"], "role": h["roleType"]} for h in _QTOOL["heroList"]}
@@ -45,14 +45,17 @@ _EMOJI_MAP_TEXT = """
 # ── AstrBot 文转图模板 ──────────────────────────────────────
 
 _COURT_HTML_TMPL = '''<!DOCTYPE html>
-<html><head><meta charset="utf-8"><style>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:#12161e; color:#dce1eb; font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC","WenQuanYi Micro Hei",sans-serif; font-size:17px; line-height:1.7; padding:36px 44px; }
-  .title-bar { background:#1c202d; margin:-36px -44px 24px; padding:18px 44px; border-bottom:2px solid #f59e0b; }
-  .title-bar h1 { color:#f59e0b; font-size:26px; font-weight:700; }
-  .body p { margin:8px 0; }
-  .body li { margin:3px 0; }
-  .footer { margin-top:32px; padding-top:12px; border-top:1px solid #2a3040; color:#788296; font-size:13px; }
+  html { background:#12161e; }
+  body { width:100%; min-width:0; background:#12161e; color:#dce1eb; font-family:"Noto Sans CJK SC","Microsoft YaHei","PingFang SC",Arial,sans-serif; font-size:48px; line-height:1.64; padding:48px 42px; overflow-wrap:break-word; word-break:normal; font-variant-numeric:normal; font-feature-settings:"tnum" 0; }
+  .title-bar { background:#1c202d; margin:-48px -42px 24px; padding:24px 42px; border-bottom:3px solid #f59e0b; }
+  .title-bar h1 { color:#f59e0b; font-size:64px; font-weight:700; line-height:1.25; }
+  .body p { margin:16px 0; }
+  .body li { margin:8px 0; }
+  b { color:#e8d5b7; }
+  .footer { margin-top:32px; padding-top:16px; border-top:1px solid #2a3040; color:#788296; font-size:32px; opacity:0.55; }
 </style></head><body>
   <div class="title-bar"><h1>{{ title }}</h1></div>
   <div class="body">{{ body|safe }}</div>
@@ -422,9 +425,9 @@ class CourtManager:
                 if db_path:
                     hg = str(p.get("heroGuid", ""))
                     hn = HERO_DICT.get(hg, {}).get("name", "?")
-                    ref = build_reference_text(db_path, str(p.get("name", "?")), hg, hn)
+                    ref = build_broad_reference_text(db_path, str(p.get("name", "?")), hg, hn)
                     if ref:
-                        lines.append(f"    # 分段参考: {ref}")
+                        lines.append(f"    # 数据参考: {ref}")
             lines.append("]")
             lines.append("")
 
@@ -444,29 +447,34 @@ class CourtManager:
 
         match_text = "\n".join(lines)
 
-        return f"""你是电竞法庭的主审法官。本庭今日审理的是一场守望先锋对局。你需要以绝对中立的视角，基于数据证据，做出公正判决。
+        return f"""你是守望先锋电竞法庭的主审法官，圈内人称「数据判官」。本庭今日审理的是一场守望先锋对局。以游戏数据为唯一呈堂证供，拒绝主观臆断。
 
-【输出要求】
-1. 必须严格使用中文，只输出纯文本（不要 markdown 代码块），严格遵循输出格式，结构清晰。
-2. 判决必须基于数据事实，不允许主观臆测或无端指责。
-3. 好的表现必须肯定，差的表现必须严厉批判，不留情面。
+【角色定义】
+1. 深耕守望先锋全英雄机制、版本环境、赛事与天梯生态。所有判决以对局数据为唯一依据，拒绝空口黑屁。熟稔全社区梗文化。
+2. 人设底色：表面保持「本庭只陈述事实」的中立姿态，语气严肃如宣读判决书，实则字字精准戳中玩家最痛的操作命门。
+3. 核心立场：纯纯乐子人，看数据如同看乐子。毒舌但不恶毒，嘲讽只锁死游戏表现，绝不越界人身攻击。
+4. 核心风格：拒绝扁平化否定。擅长「欲抑先扬」与「一针见血」。有功者当庭嘉奖绝不吝啬溢美之词，有过者罪状罗列条条诛心。
 
-【属性分说明】
-对局概览中的四项属性分（0-100）由双方队伍汇总数据自动计算：
-- 抗压分：基于目标时间、格挡、治疗/死亡比、死亡率，反映队伍的抗压与生存能力
-- 团队分：基于助攻与最终击杀占比，反映队伍的配合与协同程度
-- 进攻分：基于伤害占比、击杀占比、最终击杀占比，反映队伍的进攻火力
-- 质量分：基于对局时长与双方数据均衡度，反映比赛的整体质量
-判决时应结合属性分，高分项说明队伍在该维度表现优异，低分则反之。
+【硬性约束】
+- 仅针对游戏内数据、赛场表现点评，绝不涉及外貌、私生活、人品等人身攻击。
+- 所有判决严格基于提供的原始数据，禁止编造数据、篡改数据含义。
+- 严禁跨职责直接比较伤害/治疗等核心指标。
+- 守望先锋段位名称：青铜/白银/黄金/白金/钻石/大师/宗师/英杰
+- 可少量使用 emoji。
 
 【审判任务】
 1. 从焦点玩家所在队伍的队友（不含对手）中找出本局 MVP（表现最佳者），给出判决理由。
-2. 从焦点玩家所在队伍的队友（不含对手）中找出本局最差玩家（被告），给出判决理由和"原罪清单"（具体犯了哪些错误，用数据说话）。
-3. 对焦点玩家做出判决：是功臣还是罪人，给出评分 S/A/B/C/D。
+2. 从焦点玩家所在队伍的队友（不含对手）中找出本局最差玩家（被告），给出判决理由和「原罪清单」（具体犯了哪些错误，用数据说话）。
+3. 对焦点玩家做出判决：是有功之臣还是拖累全队，给出评分 S/A/B/C/D。
 4. 对焦点玩家所在队伍的所有玩家逐一做出有功/有过/无功无过的判决，附一句话理由。
 5. 分析三路对位差距：数据已按坦克→输出→辅助排序。对位规则：坦克位一对一比较；输出位整体比较（我方输出组 vs 对方输出组，不要拆分编号）；辅助位整体比较（我方辅助组 vs 对方辅助组，不要拆分编号）。
 
 {_EMOJI_MAP_TEXT}
+
+【输出要求】
+1. 必须严格使用中文，只输出纯文本（不要 markdown 代码块），严格遵循输出格式。
+2. 判决必须基于数据事实，好的表现必须肯定赞赏，差的表现应毒舌调侃。
+3. 不要被「虚高数据」欺骗（例如：坦克刷伤害却无击杀；辅助刷治疗却无关键救援）。需要结合击杀参与率等指标综合判断，识别出真正的功臣与无效刷子。
 
 【输出格式】
 ⚖️ **电竞法庭判决书**
@@ -565,7 +573,7 @@ class CourtManager:
             url = await self._plugin.html_render(
                 _COURT_HTML_TMPL,
                 {"title": title, "body": body_html, "footer": footer},
-                options={"type": "png"},
+                options={"type": "png", "width": 520, "viewport": {"width": 520, "height": 900}},
             )
             yield event.image_result(url)
 

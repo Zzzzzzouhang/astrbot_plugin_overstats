@@ -1131,7 +1131,6 @@ class OverstatsPlugin(Star):
 
         兼容 QQ 官方机器人（qq_official / qq_official_webhook）与普通 QQ 机器人（aiocqhttp）。
         群聊中必须真实@机器人才会响应（排除 QQ 官方占位@[At:qq_official]，防止误触发），私聊放行。
-        全量适配直接匹配模式下纯数字消息无需@bot即可触发单局详细。
         需在配置面板开启「是否开启直接消息处理」开关后生效。
         """
         # 配置开关：未开启直接消息处理时跳过
@@ -1153,13 +1152,9 @@ class OverstatsPlugin(Star):
         # 群聊必须真实@机器人（排除 QQ 官方占位@），私聊放行，防止误触发
         # 兜底：_is_real_at_bot 可能因 self_id 与 At.qq 格式不匹配返回 False，
         # 但框架已在 WakingCheckStage 阶段判定 is_at_or_wake_command=True，此时直接放行
-        # 全量适配直接匹配模式：该群开启了直接匹配时，纯数字快捷无需 @bot 前缀即可触发
         if is_group and not self._is_real_at_bot(event):
             if not (hasattr(event, "is_at_or_wake_command") and event.is_at_or_wake_command):
-                group_id = self._get_group_id(event)
-                adapt_cfg = self._get_full_adapt(group_id) if group_id else {}
-                if not (adapt_cfg.get("enabled") and adapt_cfg.get("mode") == "direct" and msg.isdigit() and 0 < int(msg) <= 20):
-                    return
+                return
 
         # 群消息时提前加载群组配置到内存缓存
         if is_group:
@@ -1301,7 +1296,8 @@ class OverstatsPlugin(Star):
 
         if direct_mode:
             # 直接匹配模式：消息即为指令文本，直接派发
-            if not msg:
+            # 纯数字不触发（避免群内数字消息误触发数字快捷）
+            if not msg or msg.isdigit():
                 return
             cmd_text = msg
         else:
@@ -1419,7 +1415,7 @@ class OverstatsPlugin(Star):
             (["快速指南", "快捷指令"], self.quick_guide_command),
             (["大神绑定", "绑定"], self.dashen_bind),
             (["今日总结", "今日", "今日数据"], self.dashen_today),
-            (["昨日总结", "昨日", "昨日数据", "昨天数据", "昨天"], self.dashen_yesterday),
+            (["昨日总结", "昨日", "昨日数据", "昨天数据"], self.dashen_yesterday),
             (["周度总结", "本周总结", "本周数据", "本周"], self.dashen_week),
             (["大神数据", "详情卡片", "战绩查询", "数据"], self.dashen_profile),
             (["大神对局", "最近对局", "战绩", "对局"], self.dashen_match),
@@ -1492,7 +1488,7 @@ class OverstatsPlugin(Star):
 
 🔹 **总结类：**
 • <qqbot-cmd-input text="/今日总结 " show="今日总结" reference="false" /> (别称：<qqbot-cmd-input text="/今日 " show="今日" reference="false" />, <qqbot-cmd-input text="/今日数据 " show="今日数据" reference="false" />)
-• <qqbot-cmd-input text="/昨日总结 " show="昨日总结" reference="false" /> (别称：<qqbot-cmd-input text="/昨日 " show="昨日" reference="false" />, <qqbot-cmd-input text="/昨日数据 " show="昨日数据" reference="false" />, <qqbot-cmd-input text="/昨天数据 " show="昨天数据" reference="false" />, <qqbot-cmd-input text="/昨天 " show="昨天" reference="false" />)
+• <qqbot-cmd-input text="/昨日总结 " show="昨日总结" reference="false" /> (别称：<qqbot-cmd-input text="/昨日 " show="昨日" reference="false" />, <qqbot-cmd-input text="/昨日数据 " show="昨日数据" reference="false" />, <qqbot-cmd-input text="/昨天数据 " show="昨天数据" reference="false" />)
 • <qqbot-cmd-input text="/周度总结 " show="周度总结" reference="false" /> (别称：<qqbot-cmd-input text="/本周总结 " show="本周总结" reference="false" />, <qqbot-cmd-input text="/本周数据 " show="本周数据" reference="false" />, <qqbot-cmd-input text="/本周 " show="本周" reference="false" />)
 
 🔹 **图表与排行类：**
@@ -1643,7 +1639,7 @@ class OverstatsPlugin(Star):
         finally:
             await self._finalize_business_status_prompt(prompt_token, success)
 
-    @filter.command("昨日总结", alias={'昨日', '昨日数据', '昨天数据', '昨天'})
+    @filter.command("昨日总结", alias={'昨日', '昨日数据', '昨天数据'})
     async def dashen_yesterday(self, event: AstrMessageEvent, bnet_id: str = "", _skip_status_prompt: bool = False):
         """统计并生成昨日战绩数据卡片。"""
         target_id = await self._get_bnet_id(event, bnet_id)
