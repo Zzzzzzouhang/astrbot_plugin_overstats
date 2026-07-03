@@ -2,6 +2,6 @@ name: astrbot_plugin_overstats
 display_name: overstats 
 desc: overstats守望先锋战绩查询工具
 short_desc: 守望先锋国服数据查询AstrBot插件，提供一键部署功能，查询数据渲染成图片。
-version: v2.6.6 
+version: v2.6.7 
 author: Zzzzzzouhang
 repo: https://github.com/Zzzzzzouhang/astrbot_plugin_overstats 

@@ -121,7 +121,7 @@ class OverstatsPlugin(Star):
             "ow重启后端", "ow部署日志", "ow后端日志",
             "ow卸载后端", "ow卸载后端执行确认", "ow卸载后端执行仅代码",
             "ow卸载后端执行仅venv", "ow卸载后端执行强制",
-            "群设置", "全量适配开", "全量适配关", "管理",
+            "群设置", "全量适配开", "全量适配开完全匹配", "全量适配关", "管理",
         }
 
         # OW 开庭功能模块（测试阶段，独立封装）
@@ -363,19 +363,24 @@ class OverstatsPlugin(Star):
 
     def _get_full_adapt(self, group_id: str) -> dict:
         """获取指定群的全量适配配置"""
-        return self._load_full_adapt_config().get(
-            str(group_id), {"enabled": False, "nickname": ""}
+        cfg = self._load_full_adapt_config().get(
+            str(group_id), {"enabled": False, "nickname": "", "mode": "nickname"}
         )
+        cfg.setdefault("mode", "nickname")
+        return cfg
 
-    def _set_full_adapt(self, group_id: str, enabled: bool, nickname: str | None = None):
-        """设置指定群的全量适配开关（可选更新昵称）并持久化到 JSON"""
+    def _set_full_adapt(self, group_id: str, enabled: bool, nickname: str | None = None, mode: str | None = None):
+        """设置指定群的全量适配开关（可选更新昵称/模式）并持久化到 JSON"""
         cfg = self._load_full_adapt_config()
         gid = str(group_id)
-        cur = cfg.get(gid, {"enabled": False, "nickname": ""})
+        cur = cfg.get(gid, {"enabled": False, "nickname": "", "mode": "nickname"})
+        cur.setdefault("mode", "nickname")
         cur["enabled"] = enabled
         if nickname is not None and nickname.strip():
             cur["nickname"] = nickname.strip()
         cur.setdefault("nickname", "")
+        if mode is not None:
+            cur["mode"] = mode
         cfg[gid] = cur
         self._save_full_adapt_config()
 
@@ -1126,6 +1131,7 @@ class OverstatsPlugin(Star):
 
         兼容 QQ 官方机器人（qq_official / qq_official_webhook）与普通 QQ 机器人（aiocqhttp）。
         群聊中必须真实@机器人才会响应（排除 QQ 官方占位@[At:qq_official]，防止误触发），私聊放行。
+        全量适配直接匹配模式下纯数字消息无需@bot即可触发单局详细。
         需在配置面板开启「是否开启直接消息处理」开关后生效。
         """
         # 配置开关：未开启直接消息处理时跳过
@@ -1141,16 +1147,19 @@ class OverstatsPlugin(Star):
         if platform_name not in ("qq_official", "qq_official_webhook", "aiocqhttp"):
             return
 
+        msg = event.message_str.strip() if event.message_str else ""
         is_group = self._is_group_message(event)
 
         # 群聊必须真实@机器人（排除 QQ 官方占位@），私聊放行，防止误触发
         # 兜底：_is_real_at_bot 可能因 self_id 与 At.qq 格式不匹配返回 False，
         # 但框架已在 WakingCheckStage 阶段判定 is_at_or_wake_command=True，此时直接放行
+        # 全量适配直接匹配模式：该群开启了直接匹配时，纯数字快捷无需 @bot 前缀即可触发
         if is_group and not self._is_real_at_bot(event):
             if not (hasattr(event, "is_at_or_wake_command") and event.is_at_or_wake_command):
-                return
-
-        msg = event.message_str.strip() if event.message_str else ""
+                group_id = self._get_group_id(event)
+                adapt_cfg = self._get_full_adapt(group_id) if group_id else {}
+                if not (adapt_cfg.get("enabled") and adapt_cfg.get("mode") == "direct" and msg.isdigit() and 0 < int(msg) <= 20):
+                    return
 
         # 群消息时提前加载群组配置到内存缓存
         if is_group:
@@ -1262,15 +1271,16 @@ class OverstatsPlugin(Star):
     @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK | filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
     async def full_adaptation_interceptor(self, event: AstrMessageEvent):
-        """全量消息适配拦截器：群聊中以"@机器人昵称 指令"格式的纯文本消息也能触发对应指令。
+        """全量消息适配拦截器：群聊中直接发送 table 指令或"@机器人昵称 指令"格式触发对应命令。
 
-        默认关闭，需群管理员通过 /全量适配开 开启（按群独立，持久化到 JSON）。
-        仅处理纯文本@昵称（非真实@提及）；真实@仍走框架原生指令派发，避免重复响应。
+        默认关闭，需群管理员通过 /全量适配开（@昵称模式）或 /全量适配开完全匹配（直接匹配模式）开启。
+        按群独立配置，持久化到 JSON。
+        支持两种模式：
+        - 直接匹配模式：消息与 table 中收录的指令名完全匹配即触发，无需 @机器人昵称
+        - @昵称模式：需以 "@机器人昵称 指令" 格式发送纯文本消息
+
+        仅处理纯文本（非真实@提及）；真实@仍走框架原生指令派发，避免重复响应。
         兼容 QQ 官方（含 [At:qq_official] 占位与 [At:<openid>] 真实@两种格式）与普通机器人。
-
-        实现说明：AstrBot 的指令派发在 WakingCheckStage 阶段即依据 is_at_or_wake_command
-        与 message_str 完成匹配，早于任何插件处理器执行；纯文本"@昵称 指令"无法被框架识别为
-        唤醒，故此处维护插件自身的指令分发表（不依赖框架内部 API），手动解析并调用对应方法。
         """
         if not self._is_group_message(event):
             return
@@ -1286,23 +1296,29 @@ class OverstatsPlugin(Star):
         if self._is_real_at_bot(event):
             return
 
-        nickname = self._get_bot_nickname(event, adapt_cfg)
-        if not nickname:
-            return
-
         msg = (event.message_str or "").strip()
-        prefix = f"@{nickname}"
-        # 匹配纯文本 "@昵称" 前缀（后接空格/全角空格，或即为昵称本身）
-        if not (msg == prefix or msg.startswith(prefix + " ") or msg.startswith(prefix + "\u3000")):
-            return
+        direct_mode = adapt_cfg.get("mode", "nickname") == "direct"
 
-        cmd_text = msg[len(prefix):].strip()
+        if direct_mode:
+            # 直接匹配模式：消息即为指令文本，直接派发
+            if not msg:
+                return
+            cmd_text = msg
+        else:
+            # @昵称模式：需要匹配 "@机器人昵称" 前缀
+            nickname = self._get_bot_nickname(event, adapt_cfg)
+            if not nickname:
+                return
+            prefix = f"@{nickname}"
+            if not (msg == prefix or msg.startswith(prefix + " ") or msg.startswith(prefix + "\u3000")):
+                return
+            cmd_text = msg[len(prefix):].strip()
 
-        # 纯@昵称（无指令）→ 快速指南
-        if not cmd_text:
-            yield event.plain_result(self._get_quick_guide(event))
-            event.stop_event()
-            return
+            # 纯@昵称（无指令）→ 快速指南
+            if not cmd_text:
+                yield event.plain_result(self._get_quick_guide(event))
+                event.stop_event()
+                return
 
         # 数字快捷：@昵称 5 → 第 5 局单局详细
         if cmd_text.isdigit() and 0 < int(cmd_text) <= 20:
@@ -1406,7 +1422,7 @@ class OverstatsPlugin(Star):
             (["周度总结", "本周总结", "本周数据", "本周"], self.dashen_week),
             (["大神数据", "详情卡片", "战绩查询", "数据"], self.dashen_profile),
             (["大神对局", "最近对局", "战绩", "对局"], self.dashen_match),
-            (["单局详细", "单局"], self.dashen_match_detail),
+            (["单局详细", "单局详情", "单局"], self.dashen_match_detail),
             (["历史段位", "历届段位"], self.dashen_rank_history),
             (["同玩查询", "开黑胜率"], self.dashen_sameplay),
             (["快速强度", "快速强度指数"], self.quick_strength),
@@ -1470,7 +1486,7 @@ class OverstatsPlugin(Star):
 🔹 **数据查询类：**
 • <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> (别称：<qqbot-cmd-input text="/详情卡片 " show="详情卡片" reference="false" />, <qqbot-cmd-input text="/战绩查询 " show="战绩查询" reference="false" />, <qqbot-cmd-input text="/数据 " show="数据" reference="false" />)
 • <qqbot-cmd-input text="/大神对局 " show="大神对局" reference="false" /> (别称：<qqbot-cmd-input text="/最近对局 " show="最近对局" reference="false" />, <qqbot-cmd-input text="/战绩 " show="战绩" reference="false" />, <qqbot-cmd-input text="/对局 " show="对局" reference="false" />)
-• <qqbot-cmd-input text="/单局详细 " show="单局详细" reference="false" /> (别称：<qqbot-cmd-input text="/单局 " show="单局" reference="false" />)
+• <qqbot-cmd-input text="/单局详细 " show="单局详细" reference="false" /> (别称：<qqbot-cmd-input text="/单局详情 " show="单局详情" reference="false" />, <qqbot-cmd-input text="/单局 " show="单局" reference="false" />)
 • <qqbot-cmd-input text="/同玩查询 " show="同玩查询" reference="false" /> (别称：<qqbot-cmd-input text="/开黑胜率 " show="开黑胜率" reference="false" />)
 
 🔹 **总结类：**
@@ -1753,7 +1769,7 @@ class OverstatsPlugin(Star):
         finally:
             await self._finalize_business_status_prompt(prompt_token, success)
 
-    @filter.command("单局详细", alias={'单局'})
+    @filter.command("单局详细", alias={'单局', '单局详情'})
     async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = "", arg2: str = "", arg3: str = ""):
         """查看指定序号的单局多图详细战绩（可加 锐评关/全员关 控制开关）。"""
         CMD = "单局详细"
@@ -2918,11 +2934,12 @@ class OverstatsPlugin(Star):
 
     @filter.command("全量适配开")
     async def full_adapt_enable(self, event: AstrMessageEvent, nickname: str = ""):
-        """开启本群的全量消息适配（群管理员专属）。
+        """开启本群的全量消息适配 — @昵称模式（群管理员专属）。
 
         用法：/全量适配开 [机器人昵称]
         昵称可选，用于匹配"@昵称 指令"格式的纯文本消息。
         不填则优先自动探测（真实@机器人时获取），其次使用配置面板的「全量适配昵称兜底」。
+        如需直接匹配模式（无需 @前缀），请使用 /全量适配开完全匹配。
         """
         if not self._is_group_message(event):
             yield event.plain_result("⚠️ 此命令仅支持在群聊中使用")
@@ -2932,13 +2949,34 @@ class OverstatsPlugin(Star):
             return
         group_id = self._get_group_id(event)
         nickname = (nickname or "").strip()
-        self._set_full_adapt(group_id, True, nickname if nickname else None)
+        self._set_full_adapt(group_id, True, nickname if nickname else None, mode="nickname")
         eff_nick = nickname or self._get_bot_nickname(event, self._get_full_adapt(group_id)) or "（未设置，将自动探测或使用全局兜底）"
         yield event.plain_result(
-            f"✅ 本群（{group_id}）已开启全量消息适配。\n"
+            f"✅ 本群（{group_id}）已开启全量消息适配（@昵称模式）。\n"
             f"📝 触发格式：@机器人昵称 指令（纯文本即可，无需真实@）。\n"
             f"🤖 当前机器人昵称：{eff_nick}\n"
-            f"💡 可用 /全量适配开 昵称 重新指定昵称；/全量适配关 关闭。"
+            f"💡 可用 <qqbot-cmd-input text=\"/全量适配开 \" show=\"/全量适配开\" reference=\"false\" /> 重新指定昵称；<qqbot-cmd-input text=\"/全量适配开完全匹配\" show=\"/全量适配开完全匹配\" reference=\"false\" /> 切换为直接匹配；<qqbot-cmd-input text=\"/全量适配关 \" show=\"/全量适配关\" reference=\"false\" /> 关闭。"
+        )
+
+    @filter.command("全量适配开完全匹配")
+    async def full_adapt_enable_direct(self, event: AstrMessageEvent):
+        """开启本群的全量消息适配 — 直接匹配模式（群管理员专属）。
+
+        用法：/全量适配开完全匹配
+        开启后群聊中直接发送 table 收录的指令即可触发（如直接发「今日总结」），无需 @机器人昵称。
+        """
+        if not self._is_group_message(event):
+            yield event.plain_result("⚠️ 此命令仅支持在群聊中使用")
+            return
+        if not self._is_group_admin(event):
+            yield event.plain_result("⚠️ 仅群管理员或群主可操作全量适配开关")
+            return
+        group_id = self._get_group_id(event)
+        self._set_full_adapt(group_id, True, mode="direct")
+        yield event.plain_result(
+            f"✅ 本群（{group_id}）已开启全量消息适配（直接匹配模式）。\n"
+            f"📝 触发格式：直接发送指令即可（如「今日总结」「对局」等），无需 @机器人昵称。\n"
+            f"💡 可用 <qqbot-cmd-input text=\"/全量适配开 \" show=\"/全量适配开\" reference=\"false\" /> 切换为@昵称模式；<qqbot-cmd-input text=\"/全量适配关 \" show=\"/全量适配关\" reference=\"false\" /> 关闭。"
         )
 
     @filter.command("全量适配关")
@@ -2975,7 +3013,7 @@ class OverstatsPlugin(Star):
 • <qqbot-cmd-input text="/群设置 " show="/群设置" reference="false" /> 查看当前群组功能配置
 • <qqbot-cmd-input text="/群设置 提示 开 " show="/群设置 提示 开" reference="false" /> / <qqbot-cmd-input text="/群设置 提示 关 " show="/群设置 提示 关" reference="false" /> 切换首次提示后不再提示
 • <qqbot-cmd-input text="/群设置 追加提示 开 " show="/群设置 追加提示 开" reference="false" /> / <qqbot-cmd-input text="/群设置 追加提示 关 " show="/群设置 追加提示 关" reference="false" /> 切换追加交互提示
-• <qqbot-cmd-input text="/全量适配开 " show="/全量适配开" reference="false" /> [昵称] / <qqbot-cmd-input text="/全量适配关 " show="/全量适配关" reference="false" /> 开关「@昵称 指令」纯文本触发（按群独立）
+• <qqbot-cmd-input text="/全量适配开 " show="/全量适配开" reference="false" /> [昵称] / <qqbot-cmd-input text="/全量适配开完全匹配 " show="/全量适配开完全匹配" reference="false" /> / <qqbot-cmd-input text="/全量适配关 " show="/全量适配关" reference="false" /> 全量适配（@昵称/直接匹配/关闭，按群独立）
 
 🔌 **系统诊断（所有模式通用）：**
 • <qqbot-cmd-input text="/ow连接测试 " show="/ow连接测试" reference="false" /> 测试 Overstats 后端连接状态
