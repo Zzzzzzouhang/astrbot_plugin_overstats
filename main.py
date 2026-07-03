@@ -1372,8 +1372,9 @@ class OverstatsPlugin(Star):
         rest = tokens[1:]
         method = self._ensure_full_adapt_map().get(cmd)
         if not method:
-            # 未命中本插件全量适配指令，根据配置返回快速指南
-            if self.config.get("unmatched_cmd_guide_enabled", False):
+            # 未命中本插件全量适配指令，仅@昵称模式下根据配置返回快速指南
+            # 直接匹配模式下不回复，避免群内任何消息都触发快捷指南
+            if not direct_mode and self.config.get("unmatched_cmd_guide_enabled", False):
                 yield event.plain_result(self._get_quick_guide(event, unmatched_cmd=cmd_text))
                 event.stop_event()
             return
@@ -2953,6 +2954,7 @@ class OverstatsPlugin(Star):
         eff_nick = nickname or self._get_bot_nickname(event, self._get_full_adapt(group_id)) or "（未设置，将自动探测或使用全局兜底）"
         yield event.plain_result(
             f"✅ 本群（{group_id}）已开启全量消息适配（@昵称模式）。\n"
+            f"⚠️ 需群主在「机器人设置 → 机器人可获取消息范围」中开启「获取群内全部消息」，全量适配才实际生效。\n"
             f"📝 触发格式：@机器人昵称 指令（纯文本即可，无需真实@）。\n"
             f"🤖 当前机器人昵称：{eff_nick}\n"
             f"💡 可用 <qqbot-cmd-input text=\"/全量适配开 \" show=\"/全量适配开\" reference=\"false\" /> 重新指定昵称；<qqbot-cmd-input text=\"/全量适配开完全匹配\" show=\"/全量适配开完全匹配\" reference=\"false\" /> 切换为直接匹配；<qqbot-cmd-input text=\"/全量适配关 \" show=\"/全量适配关\" reference=\"false\" /> 关闭。"
@@ -2975,6 +2977,7 @@ class OverstatsPlugin(Star):
         self._set_full_adapt(group_id, True, mode="direct")
         yield event.plain_result(
             f"✅ 本群（{group_id}）已开启全量消息适配（直接匹配模式）。\n"
+            f"⚠️ 需群主在「机器人设置 → 机器人可获取消息范围」中开启「获取群内全部消息」，全量适配才实际生效。\n"
             f"📝 触发格式：直接发送指令即可（如「今日总结」「对局」等），无需 @机器人昵称。\n"
             f"💡 可用 <qqbot-cmd-input text=\"/全量适配开 \" show=\"/全量适配开\" reference=\"false\" /> 切换为@昵称模式；<qqbot-cmd-input text=\"/全量适配关 \" show=\"/全量适配关\" reference=\"false\" /> 关闭。"
         )
