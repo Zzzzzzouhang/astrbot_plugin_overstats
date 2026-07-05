@@ -256,7 +256,7 @@ async function fetchUpstream() {
   try {
     const resp = await bridge.apiGet("monitor/backend/upstream", { limit: 15 });
     console.log("[Monitor] upstream resp:", JSON.stringify(resp).slice(0, 300));
-    upstreamData = resp.data || [];
+    upstreamData = resp.items || [];
     upstreamMeta = resp;
     renderUpstream();
   } catch (e) { console.error("upstream:", e.message); }

@@ -159,7 +159,7 @@ class BackendMetricsReader:
         logger.info(f"[backend_metrics] get_upstream_stats path={path}")
         if not path.is_file():
             logger.warning(f"[backend_metrics] request_url_stats: 文件不存在 {path}")
-            return {"data": [], "table_exists": False}
+            return {"items": [], "table_exists": False}
 
         try:
             conn = sqlite3.connect(str(path))
@@ -170,7 +170,7 @@ class BackendMetricsReader:
             if not tbl:
                 logger.warning(f"[backend_metrics] request_url_stats: 表不存在于 {path}")
                 conn.close()
-                return {"data": [], "table_exists": False}
+                return {"items": [], "table_exists": False}
             rows = conn.execute(
                 """SELECT url, source_type,
                           total_requests, successful_requests, failed_requests,
@@ -183,10 +183,10 @@ class BackendMetricsReader:
             ).fetchall()
             conn.close()
             logger.info(f"[backend_metrics] request_url_stats: {len(rows)} 行")
-            return {"data": [dict(r) for r in rows], "table_exists": True}
+            return {"items": [dict(r) for r in rows], "table_exists": True}
         except Exception as e:
             logger.warning(f"[backend_metrics] 查询 request_url_stats 失败: {e}")
-            return {"data": [], "table_exists": False}
+            return {"items": [], "table_exists": False}
 
     @staticmethod
     def get_db_info(db_path: str) -> dict | None:
