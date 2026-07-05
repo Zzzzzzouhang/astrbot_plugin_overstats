@@ -304,12 +304,24 @@ function renderAll() {
 
 function renderOverview() {
   if (!overviewData) return;
+  // 防御：API 返回错误信息
+  if (overviewData.error) {
+    setEl("m-uptime", "--");
+    setEl("m-total-cmds", "--");
+    setEl("m-success-rate", "--");
+    setEl("m-api-total", "--");
+    setEl("nav-uptime", "X");
+    document.getElementById("status-dot").className = "status-dot warn";
+    const st = document.getElementById("init-status");
+    if (st) { st.textContent = `监控未就绪: ${overviewData.error}`; st.style.color = "var(--c-warning)"; }
+    return;
+  }
   const fmt = (v) => typeof v === "number" ? v.toLocaleString() : v;
-  const uptimeH = (overviewData.uptime_seconds / 3600).toFixed(1);
+  const uptimeH = ((overviewData.uptime_seconds || 0) / 3600).toFixed(1);
   setEl("m-uptime", `${uptimeH}h`);
-  setEl("m-total-cmds", fmt(overviewData.cmd_total));
+  setEl("m-total-cmds", fmt(overviewData.cmd_total || 0));
   setEl("m-success-rate", `${((overviewData.cmd_success_rate || 0) * 100).toFixed(1)}%`);
-  setEl("m-api-total", fmt(overviewData.api_total));
+  setEl("m-api-total", fmt(overviewData.api_total || 0));
   setEl("nav-uptime", `运行: ${uptimeH}h`);
 
   const dot = document.getElementById("status-dot");

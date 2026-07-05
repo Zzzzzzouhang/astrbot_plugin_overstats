@@ -138,31 +138,44 @@ class OverstatsPlugin(Star):
         self.shiqu_manager = ShiquManager(self)
 
         # ── 监控采集器（SQLite 持久化，trace 置为 False）──
+        # 先注册 API 端点（即使采集器初始化失败也要注册，返回空数据而非 404）
+        self._register_monitor_apis()
+
         try:
             _monitor_db = self.plugin_data_dir / "monitor_stats.sqlite3"
             self.monitor = MonitorCollector(_monitor_db)
-            self.monitor_sse = MonitorSSEQueue(maxsize=50)
-            # 挂载 MonitorLogHandler 到 astrbot logger，自动捕获 ERROR 日志
-            _log_handler = MonitorLogHandler(self.monitor, self.monitor_sse)
-            _log_handler.setLevel(logging.ERROR)
-            logging.getLogger("astrbot").addHandler(_log_handler)
-            self._monitor_log_handler = _log_handler
+        except Exception as e:
+            logger.warning(f"[Overstats] MonitorCollector 初始化失败: {e}")
+            self.monitor = None
 
-            # 后端性能指标读取器（路径自动探测）
+        try:
+            self.monitor_sse = MonitorSSEQueue(maxsize=50)
+            if self.monitor:
+                _log_handler = MonitorLogHandler(self.monitor, self.monitor_sse)
+                _log_handler.setLevel(logging.ERROR)
+                logging.getLogger("astrbot").addHandler(_log_handler)
+                self._monitor_log_handler = _log_handler
+            else:
+                self._monitor_log_handler = None
+        except Exception as e:
+            logger.warning(f"[Overstats] MonitorLogHandler 初始化失败: {e}")
+            self._monitor_log_handler = None
+
+        try:
             _sqlite_cfg = str(self.config.get("sqlite_db_path", "") or "")
             self._backend_metrics_reader = BackendMetricsReader()
             self._req_metrics_db_path = BackendMetricsReader.resolve_db_path(
                 self.plugin_data_dir, self.deploy_manager.mode, _sqlite_cfg,
             )
-            # 注册监控 Web API 端点
-            self._register_monitor_apis()
         except Exception as e:
-            logger.warning(f"[Overstats] 监控模块初始化失败（不影响核心功能）: {e}")
-            self.monitor = None
-            self.monitor_sse = None
-            self._monitor_log_handler = None
+            logger.warning(f"[Overstats] BackendMetricsReader 初始化失败: {e}")
             self._backend_metrics_reader = None
             self._req_metrics_db_path = None
+
+        if self.monitor:
+            logger.info(f"[Overstats] 监控模块初始化完成")
+        else:
+            logger.warning("[Overstats] 监控采集器未就绪，Web 面板将显示空数据")
 
         # auto 模式下按需自动启动后端（异步，不阻塞插件初始化）
         # 保存 task 引用，便于 terminate 时取消，避免遗留异步任务
