@@ -910,7 +910,7 @@ function renderErrors(rows) {
   const el = document.getElementById("error-log");
   if (!rows || !rows.length) { el.innerHTML = `<p class="code-line on-dark-soft">暂无错误记录。</p>`; return; }
   el.innerHTML = rows.map(r => {
-    const ts = r.recorded_at ? new Date(r.recorded_at).toLocaleString() : "--";
+    const ts = r.recorded_at ? new Date(r.recorded_at + "Z").toLocaleString() : "--";
     const lvl = (r.level || "").toUpperCase();
     const lvlCls = lvl === "ERROR" ? "lvl-error" : "lvl-warning";
     const cmd = r.command ? `<span class="cmd-tag">[${esc(r.command)}]</span>` : "";
@@ -921,7 +921,7 @@ function renderErrors(rows) {
 
 function prependError(event) {
   const el = document.getElementById("error-log");
-  const ts = event.recorded_at ? new Date(event.recorded_at).toLocaleString() : "--";
+  const ts = event.recorded_at ? new Date(event.recorded_at + "Z").toLocaleString() : "--";
   const lvl = (event.level || "").toUpperCase();
   const lvlCls = lvl === "ERROR" ? "lvl-error" : "lvl-warning";
   const cmd = event.command ? `<span class="cmd-tag">[${esc(event.command)}]</span>` : "";
