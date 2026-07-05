@@ -3268,7 +3268,10 @@ class OverstatsPlugin(Star):
     async def _api_monitor_backend_perf(self):
         db_path = getattr(self, "_req_metrics_db_path", None)
         if not db_path or not str(db_path):
-            return json_response({"available": False, "data": []})
+            # 返回预期路径帮助排查
+            hint = "未配置 sqlite_db_path" if self.deploy_manager.mode == "manual" else "auto 模式未找到 overstats_backend"
+            expected = str(self.plugin_data_dir / "overstats_backend" / "src" / "db" / "request_metrics.sqlite3")
+            return json_response({"available": False, "data": [], "hint": hint, "expected_path": expected})
         endpoint = request.query.get("endpoint", "", type=str)
         hours = request.query.get("hours", 24, type=int)
         reader = getattr(self, "_backend_metrics_reader", None) or BackendMetricsReader()

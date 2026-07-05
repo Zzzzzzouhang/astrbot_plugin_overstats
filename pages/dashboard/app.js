@@ -244,6 +244,8 @@ async function fetchBackendPerf() {
     const el = document.getElementById("perf-db-info");
     if (info && el) {
       el.textContent = ` (${info.total_rows?.toLocaleString() || 0} 条, ${info.time_range_start?.slice(0,10) || "?"} ~ ${info.time_range_end?.slice(0,10) || "?"})`;
+    } else if (resp.expected_path && el) {
+      el.textContent = ` (预期路径: ${resp.expected_path})`;
     }
     renderSlowEndpoints(slow);
     renderBackendPerfList();
@@ -506,7 +508,7 @@ function renderHourly() {
 function renderBackendPerfList() {
   const el = document.getElementById("backend-perf-list");
   if (!backendPerf.length) {
-    el.innerHTML = `<p class="on-dark-soft">后端性能数据库不可用或暂无数据</p><span id="perf-db-info" class="caption"></span>`;
+    el.innerHTML = `<p class="on-dark-soft">request_metrics.sqlite3 未找到 — 请确保 Overstats 后端已启动并处理过请求</p><span id="perf-db-info" class="caption"></span>`;
     return;
   }
   const maxAvg = Math.max(1, ...backendPerf.map(p => p.avg_ms || 0));
@@ -545,7 +547,7 @@ function renderSlowEndpoints(slow) {
 
 function renderUpstream() {
   const el = document.getElementById("upstream-list");
-  if (!upstreamData.length) { el.innerHTML = `<p class="muted">后端数据库不可用或暂无数据</p>`; return; }
+  if (!upstreamData.length) { el.innerHTML = `<p class="muted">需后端 request_metrics.sqlite3，启动 Overstats 后端后自动生成</p>`; return; }
   const maxTotal = Math.max(1, ...upstreamData.map(u => u.total_requests || 0));
   el.innerHTML = upstreamData.map(u => {
     const w = ((u.total_requests || 0) / maxTotal * 100).toFixed(0);
