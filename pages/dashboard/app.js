@@ -256,9 +256,12 @@ async function fetchUpstream() {
   try {
     const resp = await bridge.apiGet("monitor/backend/upstream", { limit: 15 });
     upstreamData = resp.data || [];
+    upstreamMeta = resp;
     renderUpstream();
   } catch (e) { console.error("upstream:", e.message); }
 }
+
+let upstreamMeta = {};
 
 async function fetchErrors() {
   try {
@@ -547,7 +550,13 @@ function renderSlowEndpoints(slow) {
 
 function renderUpstream() {
   const el = document.getElementById("upstream-list");
-  if (!upstreamData.length) { el.innerHTML = `<p class="muted">需后端 request_metrics.sqlite3，启动 Overstats 后端后自动生成</p>`; return; }
+  if (!upstreamData.length) {
+    const msg = upstreamMeta.table_exists === false
+      ? "request_url_stats 表不存在 — 请升级 Overstats 后端到最新版本"
+      : "request_url_stats 表为空 — 后端处理请求后自动填充";
+    el.innerHTML = `<p class="muted">${msg}</p>`;
+    return;
+  }
   const maxTotal = Math.max(1, ...upstreamData.map(u => u.total_requests || 0));
   el.innerHTML = upstreamData.map(u => {
     const w = ((u.total_requests || 0) / maxTotal * 100).toFixed(0);

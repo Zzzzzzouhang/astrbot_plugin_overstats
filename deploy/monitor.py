@@ -132,6 +132,11 @@ CREATE TABLE IF NOT EXISTS rate_limit_log (
 
 CREATE INDEX IF NOT EXISTS idx_rl_log_date ON rate_limit_log(recorded_at);
 CREATE INDEX IF NOT EXISTS idx_rl_log_type ON rate_limit_log(rl_type);
+
+CREATE TABLE IF NOT EXISTS monitor_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -141,15 +146,14 @@ class MonitorCollector:
     """插件级统计采集器（SQLite 持久化）。
 
     所有写入通过 asyncio.run_in_executor 包装，避免阻塞事件循环。
-    数据保留 30 天，可通过 cleanup_old_records 定期清理。
     """
 
     def __init__(self, db_path: str | Path):
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._started_at = time.time()
         self._init_db()
+        self._started_at = self._load_started_at()
 
     def _init_db(self) -> None:
         """同步建表 + 索引（__init__ 中直接调用，不走 executor）。"""
@@ -157,6 +161,24 @@ class MonitorCollector:
         conn.executescript(_SCHEMA)
         conn.commit()
         conn.close()
+
+    def _load_started_at(self) -> float:
+        """从 SQLite 读取持久化的启动时间，不存在则写入当前时间。"""
+        conn = sqlite3.connect(str(self._db_path))
+        row = conn.execute(
+            "SELECT value FROM monitor_meta WHERE key = 'started_at'"
+        ).fetchone()
+        if row:
+            conn.close()
+            return float(row[0])
+        now = time.time()
+        conn.execute(
+            "INSERT OR REPLACE INTO monitor_meta (key, value) VALUES ('started_at', ?)",
+            (str(now),),
+        )
+        conn.commit()
+        conn.close()
+        return now
 
     @property
     def uptime_seconds(self) -> float:
@@ -372,7 +394,7 @@ class MonitorCollector:
     # ── 维护 ──
 
     async def clear_all_stats(self) -> int:
-        """清空所有统计记录，返回删除行数。"""
+        """清空所有统计记录（保留启动时间），返回删除行数。"""
         def _q():
             conn = sqlite3.connect(str(self._db_path))
             deleted = 0

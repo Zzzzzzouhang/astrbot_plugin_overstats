@@ -154,23 +154,26 @@ class BackendMetricsReader:
             return []
 
     @staticmethod
-    def get_upstream_stats(db_path: str, limit: int = 30) -> list[dict]:
+    def get_upstream_stats(db_path: str, limit: int = 30) -> dict:
         """获取上游 API 调用聚合统计。
 
-        Args:
-            db_path: request_metrics.sqlite3 路径
-            limit: 返回条数上限
-
         Returns:
-            [{url, total, success, fail, success_rate}, ...]
+            {"data": [...], "table_exists": bool}
         """
         path = Path(db_path)
         if not path.is_file():
-            return []
+            return {"data": [], "table_exists": False}
 
         try:
             conn = sqlite3.connect(str(path))
             conn.row_factory = sqlite3.Row
+            # 检查表是否存在
+            tbl = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='request_url_stats'"
+            ).fetchone()
+            if not tbl:
+                conn.close()
+                return {"data": [], "table_exists": False}
             rows = conn.execute(
                 """SELECT url, source_type,
                           total_requests, successful_requests, failed_requests,
@@ -182,10 +185,10 @@ class BackendMetricsReader:
                 (limit,),
             ).fetchall()
             conn.close()
-            return [dict(r) for r in rows]
+            return {"data": [dict(r) for r in rows], "table_exists": True}
         except Exception as e:
             logger.warning(f"[backend_metrics] 查询 request_url_stats 失败: {e}")
-            return []
+            return {"data": [], "table_exists": False}
 
     @staticmethod
     def get_db_info(db_path: str) -> dict | None:

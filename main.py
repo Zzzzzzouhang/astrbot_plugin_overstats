@@ -3283,11 +3283,11 @@ class OverstatsPlugin(Star):
     async def _api_monitor_backend_upstream(self):
         db_path = getattr(self, "_req_metrics_db_path", None)
         if not db_path or not str(db_path):
-            return json_response({"available": False, "data": []})
+            return json_response({"available": False, "data": [], "table_exists": False})
         limit = request.query.get("limit", 30, type=int)
         reader = getattr(self, "_backend_metrics_reader", None) or BackendMetricsReader()
-        data = reader.get_upstream_stats(str(db_path), limit=limit)
-        return json_response({"available": True, "data": data})
+        result = reader.get_upstream_stats(str(db_path), limit=limit)
+        return json_response({"available": True, **result})
 
     async def _api_monitor_rate_limit(self):
         if not self.monitor:
