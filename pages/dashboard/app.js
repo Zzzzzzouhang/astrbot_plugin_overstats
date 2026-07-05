@@ -255,6 +255,7 @@ async function fetchBackendPerf() {
 async function fetchUpstream() {
   try {
     const resp = await bridge.apiGet("monitor/backend/upstream", { limit: 15 });
+    console.log("[Monitor] upstream resp:", JSON.stringify(resp).slice(0, 300));
     upstreamData = resp.data || [];
     upstreamMeta = resp;
     renderUpstream();
@@ -550,11 +551,12 @@ function renderSlowEndpoints(slow) {
 
 function renderUpstream() {
   const el = document.getElementById("upstream-list");
+  console.log("[Monitor] renderUpstream: dataLen=" + upstreamData.length + ", hasTable=" + upstreamMeta.table_exists + ", available=" + upstreamMeta.available);
   if (!upstreamData.length) {
     const msg = upstreamMeta.table_exists === false
       ? "request_url_stats 表不存在 — 请升级 Overstats 后端到最新版本"
       : "request_url_stats 表为空 — 后端处理请求后自动填充";
-    el.innerHTML = `<p class="muted">${msg}</p>`;
+    el.innerHTML = `<p class="muted">${msg} (dataLen=${upstreamData.length}, table=${upstreamMeta.table_exists})</p>`;
     return;
   }
   const maxTotal = Math.max(1, ...upstreamData.map(u => u.total_requests || 0));

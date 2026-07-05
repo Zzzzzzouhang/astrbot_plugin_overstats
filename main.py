@@ -2657,6 +2657,7 @@ class OverstatsPlugin(Star):
     @filter.command("ow连接测试")
     async def connection_test_cmd(self, event: AstrMessageEvent):
         """测试 Overstats 后端连接（仅 AstrBot 管理员可用）"""
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow连接测试", True))
         # 从 base_url 构建健康检查地址：去掉 /api/v2 尾部，加上 /healthz
         health_url = self.base_url.rstrip("/")
         for suffix in ("/api/v2", "/api/v1", "/api"):
@@ -2710,6 +2711,7 @@ class OverstatsPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ow部署状态")
     async def ow_deploy_status_cmd(self, event: AstrMessageEvent):
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow部署状态", True))
         """查看后端部署状态（仅 AstrBot 管理员可用）"""
         status = await self.deploy_manager.get_status()
 
@@ -2748,6 +2750,7 @@ class OverstatsPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ow更新后端")
     async def ow_update_backend_cmd(self, event: AstrMessageEvent):
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow更新后端", True))
         """更新后端代码并重启（仅 AstrBot 管理员可用，auto 模式生效）"""
         if not self.deploy_manager.is_auto_mode:
             yield event.plain_result("⚠️ 当前为独立链接模式，后端由您自行部署管理，无法通过插件更新。")
@@ -2769,6 +2772,7 @@ class OverstatsPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ow停止后端")
     async def ow_stop_backend_cmd(self, event: AstrMessageEvent):
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow停止后端", True))
         """停止后端进程（仅 AstrBot 管理员可用，auto 模式生效）"""
         if not self.deploy_manager.is_auto_mode:
             yield event.plain_result("⚠️ 当前为独立链接模式，后端由您自行部署管理。")
@@ -2781,6 +2785,7 @@ class OverstatsPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ow重启后端")
     async def ow_restart_backend_cmd(self, event: AstrMessageEvent):
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow重启后端", True))
         """重启后端进程（仅 AstrBot 管理员可用，auto 模式生效）"""
         if not self.deploy_manager.is_auto_mode:
             yield event.plain_result("⚠️ 当前为独立链接模式，后端由您自行部署管理。")
@@ -2801,6 +2806,7 @@ class OverstatsPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ow部署日志")
     async def ow_deploy_logs_cmd(self, event: AstrMessageEvent):
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow部署日志", True))
         """查看后端运行日志（仅 AstrBot 管理员可用，auto 模式生效）"""
         if not self.deploy_manager.is_auto_mode:
             yield event.plain_result("⚠️ 当前为独立链接模式，后端日志请到您部署后端的服务器查看。")
@@ -2818,6 +2824,7 @@ class OverstatsPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ow后端日志")
     async def ow_backend_logs_cmd(self, event: AstrMessageEvent):
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow后端日志", True))
         """查看 Overstats 后端持久化日志文件（仅 AstrBot 管理员可用，auto 模式生效）。
 
         从专用日志文件中提取最新的 30 条记录。与 /ow部署日志 不同，
@@ -2847,6 +2854,7 @@ class OverstatsPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ow卸载后端")
     async def ow_uninstall_backend_cmd(self, event: AstrMessageEvent):
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow卸载后端", True))
         """卸载 Overstats 后端（仅 AstrBot 管理员可用，auto 模式生效）。
 
         独立于插件卸载，安全隔离后端资源删除：
@@ -2914,6 +2922,7 @@ class OverstatsPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ow卸载后端执行确认")
     async def ow_uninstall_backend_confirm(self, event: AstrMessageEvent):
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow卸载后端执行确认", True))
         """删除全部后端资源（代码+venv+数据库）。"""
         async for msg in self._uninstall_exec(event, delete_code=True, delete_venv=True, force=False):
             yield msg
@@ -2921,6 +2930,7 @@ class OverstatsPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ow卸载后端执行仅代码")
     async def ow_uninstall_backend_code_only(self, event: AstrMessageEvent):
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow卸载后端执行仅代码", True))
         """仅删除后端代码目录（含数据库），保留虚拟环境。"""
         async for msg in self._uninstall_exec(event, delete_code=True, delete_venv=False, force=False):
             yield msg
@@ -2928,6 +2938,7 @@ class OverstatsPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ow卸载后端执行仅venv")
     async def ow_uninstall_backend_venv_only(self, event: AstrMessageEvent):
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow卸载后端执行仅venv", True))
         """仅删除虚拟环境，保留后端代码。"""
         async for msg in self._uninstall_exec(event, delete_code=False, delete_venv=True, force=False):
             yield msg
@@ -2935,12 +2946,14 @@ class OverstatsPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ow卸载后端执行强制")
     async def ow_uninstall_backend_force(self, event: AstrMessageEvent):
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow卸载后端执行强制", True))
         """强制删除全部后端资源（进程无法正常停止时使用）。"""
         async for msg in self._uninstall_exec(event, delete_code=True, delete_venv=True, force=True):
             yield msg
 
     @filter.command("群设置")
     async def group_config_cmd(self, event: AstrMessageEvent, action: str = "", value: str = ""):
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("群设置", True))
         """查看/切换群组功能配置: /群设置 或 /群设置 提示 开|关 或 /群设置 追加提示 开|关"""
         if not self._is_group_message(event):
             yield event.plain_result("⚠️ 此命令仅支持在群聊中使用")
