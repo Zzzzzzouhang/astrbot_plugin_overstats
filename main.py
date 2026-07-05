@@ -1095,11 +1095,14 @@ class OverstatsPlugin(Star):
                                     asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
                                 return await resp.read(), None
                             else:
-                                if self.monitor:
-                                    elapsed = int((time.time() - start_ts) * 1000)
-                                    asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
                                 try:
                                     error_data = await resp.json()
+                                    # bnet_not_found / summary_empty 是正常业务结果，不算 API 失败
+                                    _soft_errors = {"bnet_not_found", "summary_empty"}
+                                    _is_soft = isinstance(error_data, dict) and error_data.get("error") in _soft_errors
+                                    if self.monitor:
+                                        elapsed = int((time.time() - start_ts) * 1000)
+                                        asyncio.ensure_future(self.monitor.record_api(endpoint, _is_soft, elapsed))
                                     # 后端 ConnectTimeout → 自动重试 1 次
                                     if (resp.status == 500
                                             and isinstance(error_data, dict)
@@ -1122,6 +1125,9 @@ class OverstatsPlugin(Star):
                                             error_data["message"] = f"{orig_msg}。使用人数过多，请稍后再试或尝试自部署Overstats或astrbot_plugin_overstats"
                                     return None, error_data
                                 except:
+                                    if self.monitor:
+                                        elapsed = int((time.time() - start_ts) * 1000)
+                                        asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
                                     logger.error(f"Overstats API 返回了非 JSON 错误: {resp.status}")
                                     return None, {"error": "non_json_error", "message": "API返回非JSON格式错误"}
                     except Exception as e:
