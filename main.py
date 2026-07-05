@@ -1681,21 +1681,35 @@ class OverstatsPlugin(Star):
     @filter.command("大神绑定", alias={'绑定'})
     async def dashen_bind(self, event: AstrMessageEvent, bnet_id: str):
         """绑定战网账号，格式：/绑定 Player#12345。"""
+        CMD = "绑定"
         user_id = event.get_sender_id()
         
         new_bind_id = bnet_id.strip()
         
         if not new_bind_id or ("#" not in new_bind_id and "＃" not in new_bind_id):
             yield self._plain_error_result(event, "❌ 绑定失败！请输入规范战网 ID，严格区分大小写\n格式：/绑定 战网ID，示例：/绑定 Player#12345")
+            if self.monitor:
+                asyncio.ensure_future(self.monitor.record_command(CMD, False))
             return
         
-        old_bind_id = await self._get_user_bind_id(user_id)
-        await self._set_user_bind_id(user_id, new_bind_id)
+        status_text, prompt_token, _maintenance_stop = await self._prepare_business_status_prompt(event, f"⏳ 正在为你绑定战网账号...")
+        if status_text:
+            yield event.plain_result(status_text)
+        if _maintenance_stop:
+            return
         
-        if not old_bind_id:
-            yield event.plain_result(f"✅ 绑定成功！关联战网账号【{new_bind_id}】")
-        else:
-            yield event.plain_result(f"✅ 更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
+        success = False
+        try:
+            old_bind_id = await self._get_user_bind_id(user_id)
+            await self._set_user_bind_id(user_id, new_bind_id)
+            success = True
+            
+            if not old_bind_id:
+                yield event.plain_result(f"✅ 绑定成功！关联战网账号【{new_bind_id}】")
+            else:
+                yield event.plain_result(f"✅ 更新绑定成功！已将您的战网账号从【{old_bind_id}】更新为【{new_bind_id}】")
+        finally:
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name=CMD)
 
     @filter.command("今日总结", alias={'今日', '今日数据'})
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = ""):
