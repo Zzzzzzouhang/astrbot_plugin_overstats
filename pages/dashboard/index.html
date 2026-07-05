@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;600&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./style.css?v=5" />
+  <link rel="stylesheet" href="./style.css?v=7" />
 </head>
 <body>
   <!-- 顶部导航 -->
@@ -17,6 +17,10 @@
       <span class="nav-title">Overstats 监控</span>
       <span class="status-dot" id="status-dot" title="运行状态"></span>
     </div>
+    <div class="nav-center">
+      <button class="nav-tab active" data-page="dashboard">总览</button>
+      <button class="nav-tab" data-page="shiqu">是区吗调用日志</button>
+    </div>
     <div class="nav-right">
       <span class="nav-uptime" id="nav-uptime">--</span>
       <button class="btn btn-secondary" id="btn-refresh">刷新</button>
@@ -24,6 +28,9 @@
   </nav>
 
   <main class="dashboard">
+    <!-- ═══════════ 页面一：总览 ═══════════ -->
+    <div class="page active" id="page-dashboard">
+
     <!-- 第一栏：运行总览（4 张指标卡） -->
     <section class="section" id="section-overview">
       <h2 class="section-title">运行总览 <span class="section-overline">概览</span> <span id="init-status" style="font-size:13px;color:var(--c-error);margin-left:8px">(初始化中...)</span></h2>
@@ -47,11 +54,9 @@
       </div>
     </section>
 
-    <!-- 第二栏：指令分析（紧凑布局：分类筛选 + 折叠指令列表 + 折线图 + 时段分布） -->
+    <!-- 第二栏：指令分析 -->
     <section class="section" id="section-commands">
       <h2 class="section-title">指令分析 <span class="section-overline">统计</span></h2>
-
-      <!-- 分类筛选 + 搜索 -->
       <div class="cmd-controls">
         <div class="category-tabs" id="category-tabs"></div>
         <div class="cmd-controls-right">
@@ -59,23 +64,17 @@
           <button class="btn btn-compact" id="btn-expand-cmds">展开全部</button>
         </div>
       </div>
-
-      <!-- 指令列表（可折叠，默认显示前 5） -->
       <div class="cmd-list-compact" id="cmd-list"></div>
-
-      <!-- 时间范围选择 -->
       <div class="time-range-bar">
         <span class="time-label">时间范围</span>
         <div class="time-tabs" id="time-tabs">
-          <button class="timetab active" data-range="24h">24 小时</button>
+          <button class="timetab" data-range="24h">24 小时</button>
           <button class="timetab" data-range="3d">三天</button>
-          <button class="timetab" data-range="week">本周</button>
+          <button class="timetab active" data-range="week">本周</button>
           <button class="timetab" data-range="month">本月</button>
           <button class="timetab" data-range="all">全部</button>
         </div>
       </div>
-
-      <!-- 图表区：折线图 + 时段柱状图 -->
       <div class="charts-grid">
         <div class="chart-panel">
           <h3 class="subsection-title">调用趋势</h3>
@@ -140,9 +139,71 @@
         <p class="code-line on-dark-soft">暂无错误记录。</p>
       </div>
     </section>
+
+    </div><!-- /#page-dashboard -->
+
+    <!-- ═══════════ 页面二：是区吗调用日志 ═══════════ -->
+    <div class="page" id="page-shiqu">
+
+    <section class="section">
+      <h2 class="section-title">是区吗调用日志 <span class="section-overline">LLM分析</span></h2>
+
+      <!-- 汇总卡片 -->
+      <div class="metrics-grid" id="shiqu-summary-grid"></div>
+
+      <!-- 筛选栏 + 分页 -->
+      <div class="cmd-controls" style="margin-top:var(--s-md)">
+        <div style="display:flex;align-items:center;gap:var(--s-sm);flex-wrap:wrap">
+          <input type="text" class="text-input" id="shiqu-search" placeholder="搜索玩家/判定..." style="width:180px" />
+          <select class="text-input" id="shiqu-success-filter" style="width:120px">
+            <option value="">全部状态</option>
+            <option value="true">成功</option>
+            <option value="false">失败</option>
+          </select>
+          <button class="btn btn-compact" id="btn-shiqu-search">搜索</button>
+          <button class="btn btn-compact" id="btn-shiqu-reset">重置</button>
+        </div>
+        <div class="shiqu-pagination" id="shiqu-pagination"></div>
+      </div>
+
+      <!-- 表格 + 详情面板 布局 -->
+      <div class="shiqu-layout" id="shiqu-layout">
+        <div class="shiqu-table-wrap" id="shiqu-table-wrap">
+          <table class="shiqu-table" id="shiqu-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>目标玩家</th>
+                <th>耗时</th>
+                <th>状态</th>
+                <th>响应</th>
+              </tr>
+            </thead>
+            <tbody id="shiqu-tbody">
+              <tr><td colspan="5" class="shiqu-loading">加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 右侧详情面板 -->
+        <aside class="shiqu-side-panel" id="shiqu-side-panel">
+          <div class="shiqu-side-header">
+            <span class="shiqu-side-title">LLM 分析详情</span>
+            <button class="shiqu-side-close" id="shiqu-side-close" title="关闭">&times;</button>
+          </div>
+          <div class="shiqu-side-body" id="shiqu-side-body">
+            <p class="shiqu-side-placeholder">← 点击左侧表格中的「详情」查看 LLM 完整分析</p>
+          </div>
+        </aside>
+      </div>
+
+    </section>
+
+    </div><!-- /#page-shiqu -->
+
   </main>
 
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./app.js?v=7"></script>
+  <script src="./app.js?v=11"></script>
 </body>
 </html>

@@ -72,11 +72,15 @@ let hourlyData = [];
 let backendPerf = [];
 let upstreamData = [];
 let selectedCategory = "";
-let selectedTimeRange = "24h";
+let selectedTimeRange = "week";
 let selectedErrorLevel = "";
-let selectedTrendDate = "";      // 折线图点击选中的日期
+let selectedTrendDate = new Date().toISOString().slice(0, 10); // 默认最新24小时
 let cmdListExpanded = false;
 let sseSubId = null;
+
+// 是区吗调用日志状态
+let shiquData = { records: [], summary: {}, total: 0, offset: 0, limit: 30 };
+let shiquSelectedIdx = -1; // 当前选中行（侧边栏显示详情）
 
 // ── Category list ──
 const CATEGORIES = ["基础绑定", "数据查询", "总结", "图表排行", "游戏资讯", "AI开庭", "管理部署"];
@@ -105,7 +109,11 @@ async function init() {
   safeBind("btn-refresh", "click", refreshAll);
   safeBind("btn-clear-errors", "click", clearErrors);
   safeBind("btn-clear-stats", "click", clearAllStats);
+  safeBind("btn-shiqu-search", "click", shiquSearch);
+  safeBind("btn-shiqu-reset", "click", shiquReset);
+  safeBind("shiqu-side-close", "click", closeShiquDetail);
   safeBind("cmd-search", "input", onSearchInput);
+  bindNavTabs();
   bindTimeTabs();
   bindErrorTabs();
   buildCategoryTabs();
@@ -191,10 +199,11 @@ async function refreshAll() {
     fetchOverview(),
     fetchCommands(),
     fetchTrend(),
-    fetchHourly(),
+    fetchHourly(selectedTrendDate),
     fetchBackendPerf(),
     fetchUpstream(),
     fetchErrors(),
+    fetchShiqu(),
   ]);
   renderAll();
 }
@@ -271,6 +280,284 @@ async function fetchErrors() {
   } catch (e) { console.error("errors:", e.message); }
 }
 
+// ══════════ 是区吗调用日志 ══════════
+
+let shiquCurrentPage = 0;        // 当前页码 (0-based)
+const SHIQU_PAGE_SIZE = 20;
+
+async function fetchShiqu(page) {
+  if (page === undefined) page = shiquCurrentPage;
+  try {
+    const params = { limit: SHIQU_PAGE_SIZE, offset: page * SHIQU_PAGE_SIZE };
+    const search = document.getElementById("shiqu-search")?.value?.trim();
+    const success = document.getElementById("shiqu-success-filter")?.value;
+    if (search) params.search = search;
+    if (success !== "") params.success = success;
+    console.log("[Monitor] fetchShiqu:", params);
+    shiquData = await bridge.apiGet("monitor/shiqu/calls", params);
+    shiquCurrentPage = page;
+    console.log("[Monitor] shiquData:", shiquData?.summary, "records:", shiquData?.records?.length);
+  } catch (e) { console.error("shiqu/calls:", e.message); }
+}
+
+function shiquSearch() {
+  fetchShiqu(0).then(renderShiqu);
+}
+
+function shiquReset() {
+  const el1 = document.getElementById("shiqu-search");
+  const el2 = document.getElementById("shiqu-success-filter");
+  if (el1) el1.value = "";
+  if (el2) el2.value = "";
+  fetchShiqu(0).then(renderShiqu);
+}
+
+function renderShiqu() {
+  // 汇总卡片
+  const grid = document.getElementById("shiqu-summary-grid");
+  const s = shiquData.summary || {};
+  const avail = shiquData.available !== false;
+  if (!avail) {
+    grid.innerHTML = `<div class="feature-card metric-card" style="grid-column:1/-1"><span class="metric-label">日志不可用</span><span class="metric-value" style="font-size:16px">shiqu_calls.log 未找到</span></div>`;
+  } else {
+    const total = s.total ?? 0;
+    const rate = ((s.success_rate || 0) * 100).toFixed(1);
+    const avgMs = s.avg_duration_ms ? (s.avg_duration_ms / 1000).toFixed(1) + "s" : "--";
+    const avgScore = s.avg_score ? s.avg_score.toFixed(0) : "--";
+    grid.innerHTML = `
+      <div class="feature-card metric-card">
+        <span class="metric-label">总调用次数</span>
+        <span class="metric-value">${total.toLocaleString()}</span>
+      </div>
+      <div class="feature-card metric-card">
+        <span class="metric-label">成功率</span>
+        <span class="metric-value" style="color:${rate > 90 ? 'var(--c-success)' : 'var(--c-warning)'}">${rate}%</span>
+      </div>
+      <div class="feature-card metric-card">
+        <span class="metric-label">平均耗时</span>
+        <span class="metric-value">${avgMs}</span>
+      </div>
+      <div class="feature-card metric-card">
+        <span class="metric-label">平均评分</span>
+        <span class="metric-value">${avgScore}</span>
+      </div>`;
+  }
+
+  // 表格
+  const tbody = document.getElementById("shiqu-tbody");
+  const records = shiquData.records || [];
+  if (!records.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="shiqu-loading">暂无调用记录</td></tr>`;
+    closeShiquDetail();
+  } else {
+    tbody.innerHTML = records.map((r, i) => {
+      const ts = r.ts ? new Date(r.ts).toLocaleString() : "--";
+      const dur = r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "--";
+      const durCls = r.duration_ms > 120000 ? "shiqu-slow" : "";
+      const okBadge = r.success
+        ? `<span class="badge badge-success">成功</span>`
+        : `<span class="badge badge-error">失败</span>`;
+      const attemptBadge = r.attempt > 1 ? `<span style="font-size:10px;color:var(--c-warning);margin-left:4px">×${r.attempt}</span>` : "";
+      const globalIdx = shiquCurrentPage * SHIQU_PAGE_SIZE + i;
+      const selected = shiquSelectedIdx === globalIdx ? " selected" : "";
+
+      return `<tr class="shiqu-row${selected}" data-index="${globalIdx}">
+        <td class="shiqu-ts">${ts}</td>
+        <td class="shiqu-target" title="${esc(r.target_id||'')}">${esc((r.target_id||'--').length > 16 ? r.target_id.slice(0,16)+'…' : (r.target_id||'--'))}</td>
+        <td class="shiqu-dur ${durCls}">${dur}${attemptBadge}</td>
+        <td style="white-space:nowrap">${okBadge}</td>
+        <td><button class="btn btn-compact btn-shiqu-detail" data-idx="${globalIdx}">详情</button></td>
+      </tr>`;
+    }).join("");
+  }
+
+  // 绑定行点击 + 详情按钮
+  document.querySelectorAll(".shiqu-row").forEach(row => {
+    row.addEventListener("click", function (e) {
+      if (e.target.tagName === "BUTTON") return; // 按钮有自己的事件
+      const idx = parseInt(this.dataset.index);
+      openShiquDetail(idx);
+    });
+  });
+  document.querySelectorAll(".btn-shiqu-detail").forEach(btn => {
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      openShiquDetail(parseInt(this.dataset.idx));
+    });
+  });
+
+  // 分页
+  renderShiquPagination();
+
+  // 分页后重新恢复选中行的高亮
+  if (shiquSelectedIdx >= 0) {
+    const row = document.querySelector(`.shiqu-row[data-index="${shiquSelectedIdx}"]`);
+    if (row) row.classList.add("selected");
+  }
+}
+
+function openShiquDetail(idx) {
+  shiquSelectedIdx = idx;
+  // 高亮行
+  document.querySelectorAll(".shiqu-row").forEach(r => r.classList.remove("selected"));
+  const row = document.querySelector(`.shiqu-row[data-index="${idx}"]`);
+  if (row) row.classList.add("selected");
+
+  // 查找记录
+  const localIdx = idx - shiquCurrentPage * SHIQU_PAGE_SIZE;
+  const record = (shiquData.records || [])[localIdx];
+  if (!record) { closeShiquDetail(); return; }
+
+  const body = document.getElementById("shiqu-side-body");
+  if (!body) return;
+
+  const dur = record.duration_ms ? (record.duration_ms / 1000).toFixed(1) + "s" : "--";
+  body.innerHTML = `
+    <div class="sr-gentime">${record.ts ? new Date(record.ts).toLocaleString() : "--"} · ${esc(record.target_id||"--")} · 耗时 ${dur} · 字符 ${(record.llm_chars||0).toLocaleString()}</div>
+    ${renderShiquHTML(record)}
+  `;
+}
+
+function closeShiquDetail() {
+  shiquSelectedIdx = -1;
+  document.querySelectorAll(".shiqu-row").forEach(r => r.classList.remove("selected"));
+  const body = document.getElementById("shiqu-side-body");
+  if (body) body.innerHTML = `<p class="shiqu-side-placeholder">← 点击左侧表格中的「详情」查看 LLM 完整分析</p>`;
+}
+
+function renderShiquPagination() {
+  const el = document.getElementById("shiqu-pagination");
+  const total = shiquData.total || 0;
+  const totalPages = Math.ceil(total / SHIQU_PAGE_SIZE);
+  if (totalPages <= 1) { el.innerHTML = ""; return; }
+
+  let html = `<span class="shiqu-page-info">共 ${total} 条，第 ${shiquCurrentPage + 1}/${totalPages} 页</span>`;
+  html += `<button class="btn btn-compact" id="btn-shiqu-prev" ${shiquCurrentPage <= 0 ? 'disabled' : ''}>上一页</button>`;
+  html += `<button class="btn btn-compact" id="btn-shiqu-next" ${shiquCurrentPage >= totalPages - 1 ? 'disabled' : ''}>下一页</button>`;
+  el.innerHTML = html;
+
+  const prevBtn = document.getElementById("btn-shiqu-prev");
+  const nextBtn = document.getElementById("btn-shiqu-next");
+  if (prevBtn) prevBtn.addEventListener("click", () => { if (shiquCurrentPage > 0) fetchShiqu(shiquCurrentPage - 1).then(renderShiqu); });
+  if (nextBtn) nextBtn.addEventListener("click", () => { if (shiquCurrentPage < totalPages - 1) fetchShiqu(shiquCurrentPage + 1).then(renderShiqu); });
+}
+
+// ══════════ 页面切换 ══════════
+
+function bindNavTabs() {
+  document.querySelectorAll(".nav-tab").forEach(tab => {
+    tab.addEventListener("click", () => switchPage(tab.dataset.page));
+  });
+}
+
+function switchPage(page) {
+  document.querySelectorAll(".nav-tab").forEach(t => t.classList.toggle("active", t.dataset.page === page));
+  document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.id === "page-" + page));
+}
+
+// ══════════ 是区吗 LLM 响应 → HTML 渲染 ══════════
+
+const _SHIQU_SCORE_RULES = [
+  { min: 83, cls: "god",     label: "你是职业吗？",       emoji: "😱" },
+  { min: 75, cls: "boom",    label: "来了，暴力炸！",     emoji: "🤤" },
+  { min: 68, cls: "butterfly", label: "化蛹成蝶（？）",   emoji: "🦋" },
+  { min: 60, cls: "ok",      label: "恭喜，你不是区！",   emoji: "😂" },
+  { min: 52, cls: "mid",     label: "不幸，你可能是区？", emoji: "🤔" },
+  { min: 43, cls: "bad",     label: "哦灭跌多，你就是区！", emoji: "🎉" },
+  { min: 0,  cls: "terrible", label: "你个大区！！！",     emoji: "😡" },
+];
+
+function _shiquScoreRule(score) {
+  for (const r of _SHIQU_SCORE_RULES) { if (score >= r.min) return r; }
+  return _SHIQU_SCORE_RULES[_SHIQU_SCORE_RULES.length - 1];
+}
+
+function _sqEsc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+const _SHIQU_RESULT_CLASSES = { "胜": "sr-result-win", "负": "sr-result-loss", "平": "sr-result-draw" };
+
+function renderShiquHTML(record) {
+  const resp = record.llm_response;
+  if (!resp) return `<div class="sr-empty">(无 LLM 响应内容)</div>`;
+  if (!record.success) {
+    return `<div class="sr-disclaimer">调用失败</div><pre class="sr-overall" style="white-space:pre-wrap">${_sqEsc(resp.slice(0, 2000))}</pre>`;
+  }
+
+  let data;
+  try { data = JSON.parse(resp); } catch (e) { return `<pre class="sr-overall" style="white-space:pre-wrap">${_sqEsc(resp)}</pre>`; }
+  if (!data || typeof data !== "object") return `<pre class="sr-overall" style="white-space:pre-wrap">${_sqEsc(resp)}</pre>`;
+
+  const score = (typeof data.score === "number") ? Math.round(data.score) : (record.score || 0);
+  const rule = _shiquScoreRule(score);
+  const scoreColor = { god: "#e67e22", boom: "#ff6b6b", butterfly: "#a78bfa", ok: "#4ecdc4", mid: "#f9ca24", bad: "#e17055", terrible: "#d63031" }[rule.cls] || "#ffd700";
+
+  const parts = [];
+
+  // 评分
+  parts.push(`<div class="sr-score" style="color:${scoreColor}">${score}/100</div>`);
+  parts.push(`<div class="sr-verdict ${rule.cls}">${rule.emoji} ${rule.label}</div>`);
+
+  // 数据概况
+  if (data.summary) {
+    parts.push(`<div class="sr-subsection">数据概况</div>`);
+    parts.push(`<p class="sr-summary">${_sqEsc(String(data.summary))}</p>`);
+  }
+
+  // 逐局点评
+  if (Array.isArray(data.match_comments) && data.match_comments.length) {
+    parts.push(`<div class="sr-section">逐局点评</div>`);
+    for (const m of data.match_comments) {
+      const idx = m.index || "?";
+      const result = String(m.result || "未知");
+      const hero = String(m.hero || "未知英雄");
+      const comment = String(m.comment || "");
+      const rCls = _SHIQU_RESULT_CLASSES[result] || "sr-result-unknown";
+      parts.push(
+        `<p class="sr-game"><b>第${idx}局: </b>` +
+        `<span class="${rCls}">${_sqEsc(result)}</span>` +
+        `<span class="sr-sep"> </span>` +
+        `<span class="sr-hero">${_sqEsc(hero)}</span>` +
+        `<span class="sr-sep">: </span>` +
+        `<span>${_sqEsc(comment)}</span></p>`
+      );
+    }
+  }
+
+  // 综合评价
+  if (data.overall_comment) {
+    parts.push(`<div class="sr-section">综合评价</div>`);
+    parts.push(`<p class="sr-overall">${_sqEsc(String(data.overall_comment))}</p>`);
+  }
+
+  // 队友点评
+  if (Array.isArray(data.teammate_comments) && data.teammate_comments.length) {
+    parts.push(`<div class="sr-section">队友点评</div>`);
+    for (const t of data.teammate_comments) {
+      const name = String(t.name || "未知队友");
+      const tScore = (typeof t.score === "number") ? Math.round(t.score) : 0;
+      const tRule = _shiquScoreRule(tScore);
+      const tMateColor = { god: "#f6a863", boom: "#f58989", butterfly: "#bfacfa", ok: "#7eddd6", mid: "#f5d35a", bad: "#f09c88", terrible: "#ee6566" }[tRule.cls] || "#b0a080";
+      const games = t.games ? `（共同${t.games}局）` : "";
+      const comment = String(t.comment || "");
+      parts.push(
+        `<div class="sr-mate-entry">` +
+        `<p class="sr-mate-head">` +
+        `<span class="sr-mate-name">${_sqEsc(name)}</span>` +
+        `<span class="sr-mate-games">${games}</span>` +
+        `<span class="sr-sep">: </span>评分 ` +
+        `<span class="sr-mate-score" style="color:${tMateColor}">${tScore}/100</span>` +
+        `</p>` +
+        `<p class="sr-mate-comment"><span class="sr-iv ${tRule.cls}">${tRule.emoji} ${tRule.label}</span> ${_sqEsc(comment)}</p>` +
+        `</div>`
+      );
+    }
+  }
+
+  return parts.join("\n");
+}
+
 // ══════════ SSE ══════════
 
 async function connectSSE() {
@@ -303,6 +590,7 @@ function renderAll() {
   renderHourly();
   renderBackendPerfList();
   renderUpstream();
+  renderShiqu();
   renderDeployAndRL();
 }
 
@@ -332,8 +620,9 @@ function renderOverview() {
 
   const dot = document.getElementById("status-dot");
   dot.className = "status-dot";
-  if (overviewData.deploy?.process_alive) dot.classList.add("ok");
-  else if (overviewData.deploy?.last_error) dot.classList.add("err");
+  // 绿色：插件运行正常（manual 模式不追踪进程）；红色：后端报错；黄色：未知
+  if (overviewData.deploy?.last_error) dot.classList.add("err");
+  else if (overviewData.deploy?.mode === "manual" || overviewData.deploy?.process_alive) dot.classList.add("ok");
   else dot.classList.add("warn");
 }
 
@@ -564,7 +853,8 @@ function renderUpstream() {
     const w = ((u.total_requests || 0) / maxTotal * 100).toFixed(0);
     const rate = u.success_rate != null ? (u.success_rate * 100).toFixed(1) : "?";
     const badgeCls = u.success_rate >= 0.99 ? "badge-success" : "badge-warning";
-    const urlShort = (u.url || "").split("/").pop().slice(0, 40);
+    const parts = (u.url || "").replace(/^https?:\/\/[^/]+/, "").split("/").filter(Boolean);
+    const urlShort = parts.length > 2 ? ".../" + parts.slice(-2).join("/") : parts.join("/");
     return `<div class="cmd-row">
       <div class="cmd-row-left"><div class="cmd-name" style="font-size:12px">${esc(urlShort)}</div></div>
       <div class="cmd-row-mid"><div class="cmd-bar-wrap"><div class="cmd-bar-fill" style="width:${w}%"></div></div></div>

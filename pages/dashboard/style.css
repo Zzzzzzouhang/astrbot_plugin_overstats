@@ -101,8 +101,21 @@ button { cursor: pointer; font-family: var(--ff-body); border: none; outline: no
 .status-dot.ok { background: var(--c-success); }
 .status-dot.err { background: var(--c-error); }
 .status-dot.warn { background: var(--c-warning); }
+.nav-center { display: flex; align-items: center; gap: 2px; }
+.nav-tab {
+  padding: 8px 18px; border-radius: var(--r-md);
+  font-family: var(--ff-body); font-size: 13px; font-weight: 500;
+  color: var(--c-muted); background: transparent;
+  transition: all 150ms ease; cursor: pointer; border: none;
+}
+.nav-tab:hover { color: var(--c-ink); background: var(--c-surface-soft); }
+.nav-tab.active { color: var(--c-primary); background: var(--c-primary-soft); font-weight: 600; }
 .nav-right { display: flex; align-items: center; gap: var(--s-md); }
 .nav-uptime { font-size: 13px; color: var(--c-muted); font-family: var(--ff-code); }
+
+/* ═══════════════ Page Switching ═══════════════ */
+.page { display: none; }
+.page.active { display: block; }
 
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
@@ -344,6 +357,191 @@ button { cursor: pointer; font-family: var(--ff-body); border: none; outline: no
 .code-line .cmd-tag { color: var(--c-accent-teal); white-space: nowrap; }
 
 @keyframes fadeIn { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: translateX(0); } }
+
+/* ═══════════════ Shiqu Call Log ═══════════════ */
+.shiqu-table-wrap {
+  border: 1px solid var(--c-hairline);
+  border-radius: var(--r-lg);
+}
+.shiqu-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.shiqu-table thead {
+  background: var(--c-surface-soft);
+}
+.shiqu-table th {
+  padding: 10px var(--s-sm);
+  text-align: left;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--c-muted);
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--c-hairline);
+}
+.shiqu-table th:last-child,
+.shiqu-table td:last-child { text-align: center; }
+.shiqu-table td {
+  padding: 8px var(--s-sm);
+  border-bottom: 1px solid var(--c-hairline-soft);
+  vertical-align: middle;
+}
+.shiqu-table tbody tr.shiqu-row:hover {
+  background: var(--c-surface-soft);
+}
+.shiqu-loading {
+  text-align: center;
+  color: var(--c-muted);
+  padding: var(--s-xl) !important;
+  font-size: 14px;
+}
+.shiqu-ts {
+  font-family: var(--ff-code);
+  font-size: 12px;
+  color: var(--c-muted);
+  white-space: nowrap;
+}
+.shiqu-target {
+  font-weight: 500;
+  color: var(--c-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+.shiqu-dur {
+  font-family: var(--ff-code);
+  font-size: 12px;
+  color: var(--c-body);
+  white-space: nowrap;
+}
+.shiqu-slow {
+  color: var(--c-warning);
+  font-weight: 600;
+}
+.btn-shiqu-detail {
+  font-size: 12px;
+  padding: 4px 10px;
+  height: 26px;
+}
+
+/* ═══════════════ Shiqu Layout (table + side panel) ═══════════════ */
+.shiqu-layout {
+  display: flex; gap: var(--s-md); margin-top: var(--s-md);
+  align-items: flex-start;
+}
+.shiqu-table-wrap { flex: 1; min-width: 0; }
+
+/* ═══════════════ Shiqu Side Panel ═══════════════ */
+.shiqu-side-panel {
+  width: 520px; flex-shrink: 0;
+  background: var(--c-surface-dark); border-radius: var(--r-lg);
+  border: 1px solid var(--c-surface-dark-elevated);
+  display: flex; flex-direction: column;
+  max-height: calc(100vh - 140px);
+  position: sticky; top: 80px;
+}
+.shiqu-side-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--s-sm) var(--s-md);
+  border-bottom: 1px solid var(--c-surface-dark-elevated);
+}
+.shiqu-side-title {
+  font-size: 13px; font-weight: 600; color: var(--c-on-dark);
+  font-family: var(--ff-body);
+}
+.shiqu-side-close {
+  background: none; border: none; color: var(--c-on-dark-soft);
+  font-size: 20px; line-height: 1; cursor: pointer; padding: 0 4px;
+}
+.shiqu-side-close:hover { color: var(--c-error); }
+.shiqu-side-body {
+  flex: 1; overflow-y: auto; padding: var(--s-md);
+  font-size: 13px; line-height: 1.55;
+}
+.shiqu-side-placeholder {
+  color: var(--c-on-dark-soft); text-align: center;
+  padding: var(--s-xxl) var(--s-md); font-size: 13px;
+}
+
+/* ═══════════════ Shiqu Render (ported from shiqu.py template) ═══════════════ */
+.sr-score {
+  font-family: var(--ff-display); font-size: 64px; line-height: 1.1;
+  text-align: center; font-weight: 600; margin: 8px 0 12px;
+  letter-spacing: 0;
+}
+.sr-verdict {
+  display: block; font-size: 22px; line-height: 1.3;
+  text-align: center; font-weight: 700; margin: 8px 0 24px;
+}
+.sr-verdict.god   { color: #e67e22; }
+.sr-verdict.boom  { color: #ff6b6b; }
+.sr-verdict.butterfly { color: #a78bfa; }
+.sr-verdict.ok    { color: #4ecdc4; }
+.sr-verdict.mid   { color: #f9ca24; }
+.sr-verdict.bad   { color: #e17055; }
+.sr-verdict.terrible { color: #d63031; }
+.sr-iv { font-weight: 700; }
+.sr-iv.god   { color: #e67e22; }
+.sr-iv.boom  { color: #ff6b6b; }
+.sr-iv.butterfly { color: #a78bfa; }
+.sr-iv.ok    { color: #4ecdc4; }
+.sr-iv.mid   { color: #f9ca24; }
+.sr-iv.bad   { color: #e17055; }
+.sr-iv.terrible { color: #d63031; }
+
+.sr-section {
+  color: #c9986a; font-size: 15px; font-weight: 600;
+  margin: 24px 0 10px; padding-bottom: 4px;
+  border-bottom: 1px solid #2a3040;
+}
+.sr-subsection {
+  color: #e0c090; font-size: 14px; font-weight: 600; margin: 18px 0 8px;
+}
+
+.sr-game {
+  margin: 14px 0; line-height: 1.6; color: #b0bec5;
+}
+.sr-game b { color: #e8d5b7; font-weight: 600; }
+.sr-result-win  { color: #5cef34; font-weight: 700; }
+.sr-result-loss { color: #ec6e72; font-weight: 700; }
+.sr-result-draw { color: #faad14; font-weight: 700; }
+.sr-result-unknown { color: #8c8c8c; font-weight: 700; }
+.sr-hero { color: #e8d5b7; font-weight: 600; }
+.sr-sep { color: #6e7681; }
+
+.sr-mate-entry { margin-bottom: 20px; }
+.sr-mate-entry:last-child { margin-bottom: 0; }
+.sr-mate-head { margin: 0 0 6px; color: #dce1eb; font-size: 13px; }
+.sr-mate-name { color: #e8d5b7; font-weight: 700; }
+.sr-mate-games { color: #8c8c8c; }
+.sr-mate-score { font-weight: 700; margin-left: 2px; }
+.sr-mate-comment { margin: 0; color: #b0bec5; font-size: 13px; line-height: 1.55; }
+.sr-mate-noscore { color: #b0bec5; }
+
+.sr-disclaimer { font-size: 11px; color: #6e7681; opacity: 0.65; text-align: center; margin: 6px 0; }
+.sr-gentime { font-size: 11px; color: #6e7681; opacity: 0.55; text-align: center; margin: 4px 0 18px; }
+.sr-overall { color: #b0bec5; line-height: 1.6; }
+.sr-summary { color: #b0bec5; line-height: 1.6; }
+.sr-error { color: var(--c-error); font-size: 13px; padding: var(--s-md); }
+.sr-empty { color: var(--c-on-dark-soft); font-size: 13px; padding: var(--s-md); }
+
+/* 分页（与筛选栏同行） */
+.shiqu-pagination {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.shiqu-page-info {
+  font-size: 12px;
+  color: var(--c-muted);
+}
+
+/* selected row highlight */
+.shiqu-row.selected { background: var(--c-primary-soft) !important; }
 
 /* ═══════════════ Responsive ═══════════════ */
 @media (max-width: 1024px) {

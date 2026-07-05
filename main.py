@@ -39,6 +39,12 @@ try:
 except ImportError:
     from deploy import MonitorCollector, MonitorLogHandler, MonitorSSEQueue, BackendMetricsReader  # type: ignore[no-redef]
 
+# 是区吗调用日志读取
+try:
+    from .deploy.shiqu_log import ShiquCallReader
+except ImportError:
+    from deploy.shiqu_log import ShiquCallReader  # type: ignore[no-redef]
+
 # Web API helpers
 from astrbot.api.web import request, json_response, error_response, stream_response
 
@@ -1908,8 +1914,10 @@ class OverstatsPlugin(Star):
                     try:
                         error_data = await resp.json()
                         err_msg = error_data.get("message", "未知后端 service 错误")
+                        logger.error(f"获取单局详细失败 HTTP {resp.status}: {err_msg} | bnet={target_id} index={index}")
                         yield self._plain_error_result(event, f"❌ 获取单局详细失败：{err_msg}")
                     except Exception:
+                        logger.error(f"获取单局详细失败 HTTP {resp.status}: 无法解析错误响应 | bnet={target_id} index={index}")
                         yield self._plain_error_result(event, f"❌ 后端接口响应异常，状态码: {resp.status}")
                     return
 
@@ -1917,6 +1925,7 @@ class OverstatsPlugin(Star):
                 raw_img_list = data.get("replies", [])
                 
                 if not raw_img_list:
+                    logger.error(f"获取单局详细: replies 为空 | bnet={target_id} index={index}")
                     yield self._plain_error_result(event, "❌ 未能生成该单局的详细图片链接")
                     return
 
@@ -1976,6 +1985,7 @@ class OverstatsPlugin(Star):
     @filter.command("ow开庭", alias={'开庭'})
     async def ow_court(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
         """OW 开庭：AI 对单局数据进行电竞法庭风格分析（测试阶段，仅白名单/管理员可用）。"""
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow开庭", True))
         CMD = "开庭"
         # ── 违规封禁检查 ──
         banned, ban_remain = await self._check_violation_ban(event, CMD)
@@ -1990,6 +2000,7 @@ class OverstatsPlugin(Star):
     @filter.command("ow是区吗", alias={'是区吗'})
     async def ow_shiqu(self, event: AstrMessageEvent, arg1: str = "", arg2: str = "", arg3: str = ""):
         """OW 是区吗：展示上次判定结果。5 分钟内再次发送确认后开启新查询（分级 CD）。可加局数 1~25。"""
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow是区吗", True))
         # 智能拆分：数字→局数，非数字→战网ID（参数可无序）
         positional, kw = self._extract_keywords([arg1, arg2, arg3])
         bnet_id = ""
@@ -2020,12 +2031,14 @@ class OverstatsPlugin(Star):
     @filter.command("ow是区吗结果", alias={'是区吗结果'})
     async def ow_shiqu_result(self, event: AstrMessageEvent):
         """OW 是区吗结果：返回上次生成的判定书图片。"""
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("ow是区吗结果", True))
         async for r in self.shiqu_manager.last_result(event):
             yield r
 
     @filter.command("owAI检测", alias={'AI检测'})
     async def ow_ai_test(self, event: AstrMessageEvent):
         """测试是区吗 LLM API 连通性。"""
+        if self.monitor: asyncio.ensure_future(self.monitor.record_command("owAI检测", True))
         ok, msg = await self.shiqu_manager.test_connectivity()
         yield event.plain_result(msg)
 
@@ -3177,6 +3190,7 @@ class OverstatsPlugin(Star):
         ctx.register_web_api(f"/{P}/monitor/errors/stream", self._api_monitor_errors_stream, ["GET"], "SSE 错误流")
         ctx.register_web_api(f"/{P}/monitor/backend/perf", self._api_monitor_backend_perf, ["GET"], "后端性能")
         ctx.register_web_api(f"/{P}/monitor/backend/upstream", self._api_monitor_backend_upstream, ["GET"], "上游统计")
+        ctx.register_web_api(f"/{P}/monitor/shiqu/calls", self._api_monitor_shiqu_calls, ["GET"], "是区吗调用日志")
         ctx.register_web_api(f"/{P}/monitor/rate_limit", self._api_monitor_rate_limit, ["GET"], "限流统计")
         ctx.register_web_api(f"/{P}/monitor/clear", self._api_monitor_clear, ["POST"], "清空统计")
 
@@ -3324,3 +3338,37 @@ class OverstatsPlugin(Star):
         if self.monitor_sse:
             pass  # 队列自动丢弃旧消息
         return json_response({"deleted": deleted, "message": f"已清空 {deleted} 条记录"})
+
+    async def _api_monitor_shiqu_calls(self):
+        """GET /monitor/shiqu/calls?limit=30&offset=0&openid=&target_id=&success=&verdict=&search="""
+        log_dir = self.plugin_data_dir / "shiqu"
+
+        limit = request.query.get("limit", 30, type=int)
+        offset = request.query.get("offset", 0, type=int)
+        openid = request.query.get("openid", "", type=str)
+        target_id = request.query.get("target_id", "", type=str)
+        success_str = request.query.get("success", "")
+        verdict = request.query.get("verdict", "", type=str)
+        search = request.query.get("search", "", type=str)
+
+        success = None  # type: bool | None
+        if success_str.lower() in ("true", "1", "yes"):
+            success = True
+        elif success_str.lower() in ("false", "0", "no"):
+            success = False
+
+        reader = ShiquCallReader()
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            reader.query,
+            log_dir,
+            limit,
+            offset,
+            openid,
+            target_id,
+            success,
+            verdict,
+            search,
+        )
+        return json_response(result)
