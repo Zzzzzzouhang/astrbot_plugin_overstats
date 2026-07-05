@@ -3153,7 +3153,7 @@ class OverstatsPlugin(Star):
 
     def _register_monitor_apis(self):
         """注册监控面板的 10 个 Web API 端点。"""
-        P = "overstats_full"
+        P = "astrbot_plugin_overstats"  # 必须与 metadata.yaml 的 name 一致
         ctx = self.context
         ctx.register_web_api(f"/{P}/monitor/overview", self._api_monitor_overview, ["GET"], "监控总览")
         ctx.register_web_api(f"/{P}/monitor/commands", self._api_monitor_commands, ["GET"], "指令统计")
