@@ -242,6 +242,24 @@
 
 ---
 
+---
+
+## 📊 Web 监控面板
+
+插件内置运行状态监控页面（基于 AstrBot Pages），可在 AstrBot WebUI 的插件详情页查看：
+
+- **运行总览**：运行时长、指令调用量、成功率、API 请求数
+- **指令分析**：按分类筛选指令使用频率与成功率，支持搜索和可折叠列表
+- **调用趋势**：SVG 折线图，24 小时/三天/本周/本月/全部时间范围，点击节点可按日期筛选时段分布
+- **后端性能**：端点延迟排行、慢端点检测（>10s 自动标记）、队列等待时间
+- **上游 API 统计**：上游接口调用量与成功率
+- **部署与限流**：部署状态详情、指令/LLM 限流触发统计
+- **错误日志**：ERROR/WARNING 分级筛选，SSE 实时推送
+
+> 部署模式下，`request_metrics.sqlite3` 路径自动探测：auto 模式从 `overstats_backend/src/db/` 读取，manual 模式从 `sqlite_db_path` 同级目录读取。
+
+---
+
 ## 🤝 鸣谢
 
 * 感谢 [AddOneSecondL/Overstats](https://github.com/AddOneSecondL/Overstats) 提供的优秀后端服务支持。

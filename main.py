@@ -33,6 +33,15 @@ except ImportError:
     from deploy.court import CourtManager  # type: ignore[no-redef]
     from deploy.shiqu import ShiquManager  # type: ignore[no-redef]
 
+# 监控模块
+try:
+    from .deploy import MonitorCollector, MonitorLogHandler, MonitorSSEQueue, BackendMetricsReader
+except ImportError:
+    from deploy import MonitorCollector, MonitorLogHandler, MonitorSSEQueue, BackendMetricsReader  # type: ignore[no-redef]
+
+# Web API helpers
+from astrbot.api.web import request, json_response, error_response, stream_response
+
 logger = logging.getLogger("astrbot")
 
 @register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.6.5")
@@ -127,6 +136,33 @@ class OverstatsPlugin(Star):
         # OW 开庭功能模块（测试阶段，独立封装）
         self.court_manager = CourtManager(self)
         self.shiqu_manager = ShiquManager(self)
+
+        # ── 监控采集器（SQLite 持久化，trace 置为 False）──
+        try:
+            _monitor_db = self.plugin_data_dir / "monitor_stats.sqlite3"
+            self.monitor = MonitorCollector(_monitor_db)
+            self.monitor_sse = MonitorSSEQueue(maxsize=50)
+            # 挂载 MonitorLogHandler 到 astrbot logger，自动捕获 ERROR 日志
+            _log_handler = MonitorLogHandler(self.monitor, self.monitor_sse)
+            _log_handler.setLevel(logging.ERROR)
+            logging.getLogger("astrbot").addHandler(_log_handler)
+            self._monitor_log_handler = _log_handler
+
+            # 后端性能指标读取器（路径自动探测）
+            _sqlite_cfg = str(self.config.get("sqlite_db_path", "") or "")
+            self._backend_metrics_reader = BackendMetricsReader()
+            self._req_metrics_db_path = BackendMetricsReader.resolve_db_path(
+                self.plugin_data_dir, self.deploy_manager.mode, _sqlite_cfg,
+            )
+            # 注册监控 Web API 端点
+            self._register_monitor_apis()
+        except Exception as e:
+            logger.warning(f"[Overstats] 监控模块初始化失败（不影响核心功能）: {e}")
+            self.monitor = None
+            self.monitor_sse = None
+            self._monitor_log_handler = None
+            self._backend_metrics_reader = None
+            self._req_metrics_db_path = None
 
         # auto 模式下按需自动启动后端（异步，不阻塞插件初始化）
         # 保存 task 引用，便于 terminate 时取消，避免遗留异步任务
@@ -519,6 +555,8 @@ class OverstatsPlugin(Star):
         while self._llm_rate_limit_timestamps and self._llm_rate_limit_timestamps[0] < cutoff:
             self._llm_rate_limit_timestamps.popleft()
         if len(self._llm_rate_limit_timestamps) >= self._llm_rate_limit_per_minute:
+            if self.monitor:
+                asyncio.ensure_future(self.monitor.record_rate_limit("llm"))
             return False
         self._llm_rate_limit_timestamps.append(now)
         return True
@@ -742,8 +780,12 @@ class OverstatsPlugin(Star):
         prompt_token = (user_id if (daily_prompt_enabled and user_id) else None, slot_sem)
         return prompt_text, prompt_token, False
 
-    async def _finalize_business_status_prompt(self, reservation_user_id, success: bool):
-        """释放每日提示预留和限流槽位。reservation_user_id 可以是 str|None 或 (str|None, Semaphore|None)。"""
+    async def _finalize_business_status_prompt(self, reservation_user_id, success: bool, cmd_name: str = ""):
+        """释放每日提示预留和限流槽位，并记录指令统计。
+
+        reservation_user_id 可以是 str|None 或 (str|None, Semaphore|None)。
+        cmd_name 可选，传入后将自动记录到监控采集器。
+        """
         daily_user_id: str | None = None
         slot_sem = None
         if isinstance(reservation_user_id, tuple):
@@ -754,6 +796,10 @@ class OverstatsPlugin(Star):
         # 释放限流槽位（用捕获时的 semaphore 引用，防止 4 点重置后释放到新对象）
         if slot_sem is not None:
             slot_sem.release()
+
+        # 记录指令统计
+        if cmd_name and self.monitor:
+            asyncio.ensure_future(self.monitor.record_command(cmd_name, success))
 
         if not daily_user_id:
             return
@@ -800,6 +846,13 @@ class OverstatsPlugin(Star):
                     await task
                 except asyncio.CancelledError:
                     pass
+        # 卸载监控日志处理器
+        _handler = getattr(self, "_monitor_log_handler", None)
+        if _handler:
+            try:
+                logging.getLogger("astrbot").removeHandler(_handler)
+            except Exception:
+                pass
         # 关闭 HTTP 会话
         if self._http_session and not self._http_session.closed:
             await self._http_session.close()
@@ -1003,14 +1056,21 @@ class OverstatsPlugin(Star):
     async def _fetch_image(self, endpoint: str, payload: dict = None, timeout: int = 600) -> tuple[bytes | None, dict | None]:
         url = f"{self.base_url}{endpoint}"
         payload = payload or {}
+        start_ts = time.time()
         try:
             session = await self._get_http_session()
             # 若请求超时与默认不同，使用单次覆盖
             req_timeout = aiohttp.ClientTimeout(total=timeout) if timeout != 600 else None
             async with session.post(url, json=payload, timeout=req_timeout) as resp:
                 if resp.status == 200:
+                    if self.monitor:
+                        elapsed = int((time.time() - start_ts) * 1000)
+                        asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
                     return await resp.read(), None
                 else:
+                    if self.monitor:
+                        elapsed = int((time.time() - start_ts) * 1000)
+                        asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
                     try:
                         error_data = await resp.json()
                         logger.error(f"Overstats API 错误: {resp.status} - {error_data}")
@@ -1028,6 +1088,9 @@ class OverstatsPlugin(Star):
                         logger.error(f"Overstats API 返回了非 JSON 错误: {resp.status}")
                         return None, {"error": "non_json_error", "message": "API返回非JSON格式错误"}
         except Exception as e:
+            if self.monitor:
+                elapsed = int((time.time() - start_ts) * 1000)
+                asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
             logger.error(f"网络请求异常: {e}")
             return None, {"error": "network_error", "message": str(e)}
 
@@ -1637,7 +1700,7 @@ class OverstatsPlugin(Star):
                 else:
                     yield self._plain_error_result(event, f"❌ 获取今日总结失败：{err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="今日总结")
 
     @filter.command("昨日总结", alias={'昨日', '昨日数据', '昨天数据'})
     async def dashen_yesterday(self, event: AstrMessageEvent, bnet_id: str = "", _skip_status_prompt: bool = False):
@@ -1673,7 +1736,7 @@ class OverstatsPlugin(Star):
                 else:
                     yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="昨日总结")
 
     @filter.command("周度总结", alias={'本周总结', '本周数据', '本周'})
     async def dashen_week(self, event: AstrMessageEvent, bnet_id: str = ""):
@@ -1704,7 +1767,7 @@ class OverstatsPlugin(Star):
                 else:
                     yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="周度总结")
 
     @filter.command("大神数据", alias={'详情卡片', '战绩查询', '数据'})
     async def dashen_profile(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
@@ -1734,7 +1797,7 @@ class OverstatsPlugin(Star):
                 else:
                     yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="大神数据")
 
     @filter.command("大神对局", alias={'最近对局', '战绩', '对局'})
     async def dashen_match(self, event: AstrMessageEvent, bnet_id: str = ""):
@@ -1764,7 +1827,7 @@ class OverstatsPlugin(Star):
                 else:
                     yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="大神对局")
 
     @filter.command("单局详细", alias={'单局', '单局详情'})
     async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = "", arg2: str = "", arg3: str = ""):
@@ -1894,7 +1957,7 @@ class OverstatsPlugin(Star):
             logger.error(f"处理单局详细图片异常：{e}")
             yield self._plain_error_result(event, "❌ 处理图片请求时发生 system 错误")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="单局详细")
 
     # ── OW 开庭（测试阶段）─────────────────────────────────────
     @filter.command("ow开庭", alias={'开庭'})
@@ -2006,7 +2069,7 @@ class OverstatsPlugin(Star):
                 else:
                     yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="历史段位")
 
     @filter.command("同玩查询", alias={'开黑胜率'})
     async def dashen_sameplay(self, event: AstrMessageEvent, p1: str = "", p2: str = ""):
@@ -2065,7 +2128,7 @@ class OverstatsPlugin(Star):
                 else:
                     yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="同玩查询")
 
     @filter.command("快速强度", alias={'快速强度指数'})
     async def quick_strength(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
@@ -2109,7 +2172,7 @@ class OverstatsPlugin(Star):
                 else:
                     yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="快速强度")
 
     @filter.command("竞技强度", alias={'竞技强度指数'})
     async def competitive_strength(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
@@ -2153,7 +2216,7 @@ class OverstatsPlugin(Star):
                 else:
                     yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="竞技强度")
 
     @filter.command("快速英雄云图", alias={'快速云图'})
     async def quick_hero_treemap(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
@@ -2187,7 +2250,7 @@ class OverstatsPlugin(Star):
                 else:
                     yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="快速英雄云图")
 
     @filter.command("竞技英雄云图", alias={'竞技云图'})
     async def competitive_hero_treemap(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
@@ -2221,7 +2284,7 @@ class OverstatsPlugin(Star):
                 else:
                     yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="竞技英雄云图")
 
     @filter.command("威能")
     async def ow_hero_perk(self, event: AstrMessageEvent, hero_name: str):
@@ -2246,7 +2309,7 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else f"未能找到英雄【{hero_name}】的威能图。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="威能")
 
     @filter.command("ow英雄")
     async def ow_hero_pick(self, event: AstrMessageEvent, arg1: str = "", arg2: str = "", arg3: str = ""):
@@ -2286,7 +2349,7 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else f"暂时无法获取英雄 {hero_name} 的数据走势。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="ow英雄")
 
     @filter.command("商店", alias={'ow商店'})
     async def ow_shop(self, event: AstrMessageEvent):
@@ -2308,7 +2371,7 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else "获取精选商店图片失败。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="商店")
 
     @filter.command("ow赛事", alias={'赛事'})
     async def ow_esports(self, event: AstrMessageEvent):
@@ -2330,7 +2393,7 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else "赛事信息获取失败。请检查后台是否正确配置了 `OW_ESPORTS_API_KEY`。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="ow赛事")
 
     @filter.command("获取段位分布")
     async def get_rank_distribution(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
@@ -2361,7 +2424,7 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else "无法获取全服天梯分布排行。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="获取段位分布")
 
     @filter.command("ow活动", alias={'活动'})
     async def ow_activities(self, event: AstrMessageEvent):
@@ -2385,7 +2448,7 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else "暂无正在进行的版本活动公告。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="ow活动")
 
     @filter.command("banpick", alias={'全英雄排行'})
     async def ban_pick_stats(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
@@ -2416,7 +2479,7 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else "无法获取全英雄排行。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="banpick")
 
     @filter.command("mappick")
     async def map_pick_stats(self, event: AstrMessageEvent):
@@ -2438,7 +2501,7 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else "无法拉取最新地图池分布。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="mappick")
 
     @filter.command("皮肤搜索")
     async def skin_search(self, event: AstrMessageEvent, keyword: str = ""):
@@ -2460,7 +2523,7 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else "无法获取精选皮肤卡片。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="皮肤搜索")
 
     @filter.command("ow更新", alias={'版本更新'})
     async def ow_patch_notes(self, event: AstrMessageEvent, kind: str = "latest"):
@@ -2487,7 +2550,7 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else "获取更新日志失败。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="ow更新")
 
     @filter.command("省榜", alias={'排行'})
     async def ow_rank_leaderboard(self, event: AstrMessageEvent, province: str, role: str):
@@ -2515,7 +2578,7 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else "获取天梯省榜失败。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="省榜")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("维护")
@@ -3071,4 +3134,164 @@ class OverstatsPlugin(Star):
                 err_msg = error_data.get("message") if error_data else "获取英雄绝活榜失败。"
                 yield self._plain_error_result(event, f"❌ {err_msg}")
         finally:
-            await self._finalize_business_status_prompt(prompt_token, success)
+            await self._finalize_business_status_prompt(prompt_token, success, cmd_name="绝活榜")
+
+    # ======================== 监控 Web API ========================
+
+    def _register_monitor_apis(self):
+        """注册监控面板的 10 个 Web API 端点。"""
+        P = "overstats_full"
+        ctx = self.context
+        ctx.register_web_api(f"/{P}/monitor/overview", self._api_monitor_overview, ["GET"], "监控总览")
+        ctx.register_web_api(f"/{P}/monitor/commands", self._api_monitor_commands, ["GET"], "指令统计")
+        ctx.register_web_api(f"/{P}/monitor/trend", self._api_monitor_trend, ["GET"], "日趋势")
+        ctx.register_web_api(f"/{P}/monitor/hourly", self._api_monitor_hourly, ["GET"], "时段分布")
+        ctx.register_web_api(f"/{P}/monitor/errors", self._api_monitor_errors, ["GET"], "错误日志")
+        ctx.register_web_api(f"/{P}/monitor/deploy", self._api_monitor_deploy, ["GET"], "部署状态")
+        ctx.register_web_api(f"/{P}/monitor/errors/stream", self._api_monitor_errors_stream, ["GET"], "SSE 错误流")
+        ctx.register_web_api(f"/{P}/monitor/backend/perf", self._api_monitor_backend_perf, ["GET"], "后端性能")
+        ctx.register_web_api(f"/{P}/monitor/backend/upstream", self._api_monitor_backend_upstream, ["GET"], "上游统计")
+        ctx.register_web_api(f"/{P}/monitor/rate_limit", self._api_monitor_rate_limit, ["GET"], "限流统计")
+        ctx.register_web_api(f"/{P}/monitor/clear", self._api_monitor_clear, ["POST"], "清空统计")
+
+    async def _api_monitor_overview(self):
+        if not self.monitor:
+            return json_response({"error": "监控未初始化"})
+        data = await self.monitor.get_overview()
+        dm = self.deploy_manager
+        try:
+            status = dm.status()
+        except Exception:
+            status = None
+        data["deploy"] = {
+            "mode": dm.mode,
+            "state": status.state if status else "unknown",
+            "process_alive": status.process_alive if status else False,
+            "backend_port": status.backend_port if status else 0,
+            "pid": status.process_pid if status else None,
+            "git_commit": status.git_commit if status else "unknown",
+            "last_deploy_time": status.last_deploy_time if status else 0,
+            "last_error": status.last_error if status else "",
+        } if status else {"mode": dm.mode, "state": "unknown"}
+        rl_stats = await self.monitor.get_rate_limit_stats()
+        data["rate_limit"] = rl_stats
+        data["rate_limit_config"] = {
+            "cmd_enabled": getattr(self, "_rate_limit_enabled", False),
+            "cmd_max": getattr(self, "_rate_limit_max", 3),
+            "llm_enabled": getattr(self, "_llm_rate_limit_enabled", False),
+            "llm_per_minute": getattr(self, "_llm_rate_limit_per_minute", 10),
+        }
+        return json_response(data)
+
+    async def _api_monitor_commands(self):
+        if not self.monitor:
+            return json_response({"error": "监控未初始化"})
+        category = request.query.get("category", "", type=str)
+        search = request.query.get("search", "", type=str)
+        data = await self.monitor.get_cmd_stats(category=category, search=search)
+        return json_response(data)
+
+    async def _api_monitor_trend(self):
+        if not self.monitor:
+            return json_response({"error": "监控未初始化"})
+        cmd = request.query.get("cmd", "", type=str)
+        days = request.query.get("days", 7, type=int)
+        data = await self.monitor.get_cmd_trend(cmd_name=cmd, days=max(1, min(90, days)))
+        return json_response(data)
+
+    async def _api_monitor_hourly(self):
+        if not self.monitor:
+            return json_response({"error": "监控未初始化"})
+        date = request.query.get("date", "", type=str)
+        data = await self.monitor.get_hourly_distribution(date=date)
+        return json_response(data)
+
+    async def _api_monitor_errors(self):
+        if not self.monitor:
+            return json_response({"error": "监控未初始化"})
+        limit = request.query.get("limit", 50, type=int)
+        offset = request.query.get("offset", 0, type=int)
+        level = request.query.get("level", "", type=str)
+        rows, total = await self.monitor.get_errors(limit=min(limit, 200), offset=offset, level=level)
+        return json_response({"rows": rows, "total": total})
+
+    async def _api_monitor_deploy(self):
+        dm = self.deploy_manager
+        try:
+            status = dm.status()
+        except Exception:
+            return json_response({"error": "获取部署状态失败"})
+        return json_response({
+            "mode": dm.mode,
+            "state": status.state,
+            "backend_dir": str(status.backend_dir) if status.backend_dir else "",
+            "backend_port": status.backend_port,
+            "backend_host": status.backend_host,
+            "git_commit": status.git_commit,
+            "process_alive": status.process_alive,
+            "process_pid": status.process_pid,
+            "last_deploy_time": status.last_deploy_time,
+            "last_error": status.last_error,
+        })
+
+    async def _api_monitor_errors_stream(self):
+        if not self.monitor_sse:
+            return error_response("监控未初始化", status_code=503)
+
+        async def stream():
+            if self.monitor:
+                existing = await self.monitor.get_all_errors()
+                import json as _json
+                yield f"event: init\ndata: {_json.dumps(existing[-100:], ensure_ascii=False)}\n\n"
+            async for event in self.monitor_sse.subscribe(poll_timeout=5.0):
+                import json as _json
+                if event.get("_heartbeat"):
+                    yield ": heartbeat\n\n"
+                else:
+                    yield f"data: {_json.dumps(event, ensure_ascii=False)}\n\n"
+
+        return stream_response(stream())
+
+    async def _api_monitor_backend_perf(self):
+        db_path = getattr(self, "_req_metrics_db_path", None)
+        if not db_path or not str(db_path):
+            return json_response({"available": False, "data": []})
+        endpoint = request.query.get("endpoint", "", type=str)
+        hours = request.query.get("hours", 24, type=int)
+        reader = getattr(self, "_backend_metrics_reader", None) or BackendMetricsReader()
+        perf = reader.get_endpoint_perf_stats(str(db_path), endpoint=endpoint, time_range_hours=hours)
+        slow = reader.get_slow_endpoints(str(db_path), time_range_hours=hours)
+        info = reader.get_db_info(str(db_path))
+        return json_response({"available": True, "perf": perf, "slow": slow, "db_info": info})
+
+    async def _api_monitor_backend_upstream(self):
+        db_path = getattr(self, "_req_metrics_db_path", None)
+        if not db_path or not str(db_path):
+            return json_response({"available": False, "data": []})
+        limit = request.query.get("limit", 30, type=int)
+        reader = getattr(self, "_backend_metrics_reader", None) or BackendMetricsReader()
+        data = reader.get_upstream_stats(str(db_path), limit=limit)
+        return json_response({"available": True, "data": data})
+
+    async def _api_monitor_rate_limit(self):
+        if not self.monitor:
+            return json_response({"error": "监控未初始化"})
+        stats = await self.monitor.get_rate_limit_stats()
+        return json_response({
+            "stats": stats,
+            "config": {
+                "cmd_enabled": getattr(self, "_rate_limit_enabled", False),
+                "cmd_max": getattr(self, "_rate_limit_max", 3),
+                "llm_enabled": getattr(self, "_llm_rate_limit_enabled", False),
+                "llm_per_minute": getattr(self, "_llm_rate_limit_per_minute", 10),
+            }
+        })
+
+    async def _api_monitor_clear(self):
+        if not self.monitor:
+            return json_response({"error": "监控未初始化"})
+        deleted = await self.monitor.clear_all_stats()
+        # 同时清空 SSE 队列
+        if self.monitor_sse:
+            pass  # 队列自动丢弃旧消息
+        return json_response({"deleted": deleted, "message": f"已清空 {deleted} 条记录"})

@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Overstats 监控面板</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;600&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./style.css?v=4" />
+</head>
+<body>
+  <!-- 顶部导航 -->
+  <nav class="top-nav" id="top-nav">
+    <div class="nav-left">
+      <span class="nav-logo-mark">&#9678;</span>
+      <span class="nav-title">Overstats 监控</span>
+      <span class="status-dot" id="status-dot" title="运行状态"></span>
+    </div>
+    <div class="nav-right">
+      <span class="nav-uptime" id="nav-uptime">--</span>
+      <button class="btn btn-secondary" id="btn-refresh">刷新</button>
+    </div>
+  </nav>
+
+  <main class="dashboard">
+    <!-- 第一栏：运行总览（4 张指标卡） -->
+    <section class="section" id="section-overview">
+      <h2 class="section-title">运行总览 <span class="section-overline">概览</span> <span id="init-status" style="font-size:13px;color:var(--c-error);margin-left:8px">(初始化中...)</span></h2>
+      <div class="metrics-grid" id="metrics-grid">
+        <div class="feature-card metric-card">
+          <span class="metric-label">运行时长</span>
+          <span class="metric-value" id="m-uptime">--</span>
+        </div>
+        <div class="feature-card metric-card">
+          <span class="metric-label">指令调用</span>
+          <span class="metric-value" id="m-total-cmds">--</span>
+        </div>
+        <div class="feature-card metric-card">
+          <span class="metric-label">成功率</span>
+          <span class="metric-value" id="m-success-rate">--</span>
+        </div>
+        <div class="feature-card metric-card">
+          <span class="metric-label">API 请求</span>
+          <span class="metric-value" id="m-api-total">--</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 第二栏：指令分析（紧凑布局：分类筛选 + 折叠指令列表 + 折线图 + 时段分布） -->
+    <section class="section" id="section-commands">
+      <h2 class="section-title">指令分析 <span class="section-overline">统计</span></h2>
+
+      <!-- 分类筛选 + 搜索 -->
+      <div class="cmd-controls">
+        <div class="category-tabs" id="category-tabs"></div>
+        <div class="cmd-controls-right">
+          <input type="text" class="text-input" id="cmd-search" placeholder="搜索指令..." />
+          <button class="btn btn-compact" id="btn-expand-cmds">展开全部</button>
+        </div>
+      </div>
+
+      <!-- 指令列表（可折叠，默认显示前 5） -->
+      <div class="cmd-list-compact" id="cmd-list"></div>
+
+      <!-- 时间范围选择 -->
+      <div class="time-range-bar">
+        <span class="time-label">时间范围</span>
+        <div class="time-tabs" id="time-tabs">
+          <button class="timetab active" data-range="24h">24 小时</button>
+          <button class="timetab" data-range="3d">三天</button>
+          <button class="timetab" data-range="week">本周</button>
+          <button class="timetab" data-range="month">本月</button>
+          <button class="timetab" data-range="all">全部</button>
+        </div>
+      </div>
+
+      <!-- 图表区：折线图 + 时段柱状图 -->
+      <div class="charts-grid">
+        <div class="chart-panel">
+          <h3 class="subsection-title">调用趋势</h3>
+          <div class="line-chart-wrap" id="trend-chart">
+            <svg class="line-chart-svg" viewBox="0 0 600 200" preserveAspectRatio="xMidYMid meet" id="trend-svg"></svg>
+          </div>
+        </div>
+        <div class="chart-panel">
+          <h3 class="subsection-title" id="hourly-title">时段分布</h3>
+          <div class="bar-chart" id="hourly-chart"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 第三栏：后端 API 性能 -->
+    <section class="section section-dark" id="section-backend-perf">
+      <h2 class="section-title on-dark">后端 API 性能 <span class="badge badge-coral">延迟</span></h2>
+      <div class="dark-card" id="backend-perf-list">
+        <p class="on-dark-soft">加载中...<span id="perf-db-info" class="caption"></span></p>
+      </div>
+      <div id="slow-endpoints" style="margin-top:16px"></div>
+    </section>
+
+    <!-- 第四栏：上游 API 统计 -->
+    <section class="section" id="section-upstream">
+      <h2 class="section-title">上游 API 统计 <span class="badge badge-pill">前 15</span></h2>
+      <div class="cmd-list" id="upstream-list">
+        <p class="muted">加载中...</p>
+      </div>
+    </section>
+
+    <!-- 第五栏：部署 & 限流 -->
+    <section class="section section-dark" id="section-deploy">
+      <h2 class="section-title on-dark">部署与限流</h2>
+      <div class="dark-card-grid" id="deploy-grid">
+        <div class="dark-card-item">
+          <h4 class="card-label">部署状态</h4>
+          <div id="deploy-details"></div>
+        </div>
+        <div class="dark-card-item">
+          <h4 class="card-label">限流控制</h4>
+          <div id="rate-limit-details"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 第六栏：错误日志 -->
+    <section class="section section-dark-full" id="section-errors">
+      <h2 class="section-title on-dark">错误日志 <span class="badge badge-coral" id="badge-live" style="display:none">实时</span></h2>
+      <div class="err-controls">
+        <div class="category-tabs" id="err-level-tabs">
+          <button class="tab active" data-level="">全部</button>
+          <button class="tab" data-level="ERROR">错误</button>
+          <button class="tab" data-level="WARNING">警告</button>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-secondary-on-dark" id="btn-clear-errors">清空视图</button>
+          <button class="btn btn-secondary-on-dark" id="btn-clear-stats" style="background:rgba(198,69,69,0.25);color:#e07070">清空全部统计</button>
+        </div>
+      </div>
+      <div class="code-window" id="error-log">
+        <p class="code-line on-dark-soft">暂无错误记录。</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
+  <script src="./app.js?v=5"></script>
+</body>
+</html>

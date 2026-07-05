@@ -4,6 +4,13 @@
 独立于 main.py，避免主插件文件臃肿。
 """
 from .manager import DeployManager, DeployResult, DeployStatus
+from .monitor import MonitorCollector, MonitorLogHandler, MonitorSSEQueue
+from .backend_metrics import BackendMetricsReader
 from .uninstaller import BackendUninstaller, UninstallResult
 
-__all__ = ["DeployManager", "DeployResult", "DeployStatus", "BackendUninstaller", "UninstallResult"]
+__all__ = [
+    "DeployManager", "DeployResult", "DeployStatus",
+    "MonitorCollector", "MonitorLogHandler", "MonitorSSEQueue",
+    "BackendMetricsReader",
+    "BackendUninstaller", "UninstallResult",
+]

@@ -126,9 +126,9 @@
     "default": "https://gh-proxy.com/"
   },
   "sqlite_db_path": {
-    "description": "SQLite 数据库路径（开庭分段参考用）",
+    "description": "SQLite 数据库路径（开庭分段参考 & 性能监控用）",
     "type": "string",
-    "hint": "留空则不启用。填写 Overstats 后端 match_stats.sqlite3 的完整路径（通常为 Overstats/src/db/match_stats.sqlite3），开庭时将读取本地数据库中的分段英雄统计数据，作为对局分析的参考依据。",
+    "hint": "留空则不启用。填写 Overstats 后端 match_stats.sqlite3 的完整路径（通常为 Overstats/src/db/match_stats.sqlite3），开庭时将读取本地数据库中的分段英雄统计数据。同时，同级目录下的 request_metrics.sqlite3 将被自动用于监控面板的后端性能展示。",
     "obvious_hint": true,
     "default": ""
   },
