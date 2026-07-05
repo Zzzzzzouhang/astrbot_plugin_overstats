@@ -534,32 +534,70 @@ class ShiquManager:
 
     _PRESET_MODES = {"SportPreset", "LeisurePreset", "Sport6v6", "Leisure6v6"}
 
+    @staticmethod
+    def _is_connect_timeout(status: int, data: dict) -> bool:
+        """判断 Overstats API 响应是否为 ConnectTimeout 内部错误。"""
+        if status != 500:
+            return False
+        if not isinstance(data, dict):
+            return False
+        if data.get("error") != "internal_error":
+            return False
+        details = data.get("details")
+        if not isinstance(details, dict):
+            return False
+        return details.get("exception") == "ConnectTimeout"
+
     async def _fetch_one_match(self, bnet_id: str, index: int) -> Optional[dict]:
         url = f"{self._plugin.base_url}/dashen-match/detail"
-        try:
-            session = await self._plugin._get_http_session()
-            async with session.post(url, json={"bnet_id": bnet_id, "index": index}) as resp:
-                data = await resp.json()
-                if data.get("ok") and data.get("detail"):
-                    return data
+        async with self._plugin.overstats_semaphore:
+            async with self._plugin._overstats_inner_semaphore:
+                for attempt in (1, 2):
+                    try:
+                        session = await self._plugin._get_http_session()
+                        async with session.post(url, json={"bnet_id": bnet_id, "index": index}) as resp:
+                            data = await resp.json()
+                            if self._is_connect_timeout(resp.status, data) and attempt == 1:
+                                logger.warning(f"[是区吗][bnet={bnet_id}] 拉取 index={index} ConnectTimeout，1秒后重试…")
+                                await asyncio.sleep(1)
+                                continue
+                            if data.get("ok") and data.get("detail"):
+                                return data
+                            return None
+                    except Exception as e:
+                        if attempt == 1:
+                            logger.warning(f"[是区吗][bnet={bnet_id}] 拉取 index={index} 失败: {e}，1秒后重试…")
+                            await asyncio.sleep(1)
+                            continue
+                        logger.warning(f"[是区吗][bnet={bnet_id}] 拉取 index={index} 重试后仍失败: {e}")
+                        return None
                 return None
-        except Exception as e:
-            logger.warning(f"[是区吗][bnet={bnet_id}] 拉取 index={index} 失败: {e}")
-            return None
 
     async def _fetch_match_by_token_match_id(self, customer_token: str, match_id: str) -> Optional[dict]:
         """用队友的 customer_token + 比赛 match_id 直接查同一局详情，获取 heroList。"""
         url = f"{self._plugin.base_url}/dashen-match/detail"
-        try:
-            session = await self._plugin._get_http_session()
-            async with session.post(url, json={"customer_token": customer_token, "match_id": match_id}) as resp:
-                data = await resp.json()
-                if data.get("ok") and data.get("detail"):
-                    return data
+        async with self._plugin.overstats_semaphore:
+            async with self._plugin._overstats_inner_semaphore:
+                for attempt in (1, 2):
+                    try:
+                        session = await self._plugin._get_http_session()
+                        async with session.post(url, json={"customer_token": customer_token, "match_id": match_id}) as resp:
+                            data = await resp.json()
+                            if self._is_connect_timeout(resp.status, data) and attempt == 1:
+                                logger.warning(f"[是区吗][match={match_id[:12]}] ConnectTimeout，1秒后重试…")
+                                await asyncio.sleep(1)
+                                continue
+                            if data.get("ok") and data.get("detail"):
+                                return data
+                            return None
+                    except Exception as e:
+                        if attempt == 1:
+                            logger.warning(f"[是区吗][match={match_id[:12]}] 拉取队友详情失败: {e}，1秒后重试…")
+                            await asyncio.sleep(1)
+                            continue
+                        logger.warning(f"[是区吗][match={match_id[:12]}] 拉取队友详情重试后仍失败: {e}")
+                        return None
                 return None
-        except Exception as e:
-            logger.warning(f"[是区吗][match={match_id[:12]}] 拉取队友详情失败: {e}")
-            return None
 
     async def _fetch_matches(self, bnet_id: str, target: int = 12) -> list[dict]:
         """仅抓取 SportPreset/LeisurePreset/Sport6v6/Leisure6v6，不足则逐批往后拉，最多 100 场。"""
@@ -905,7 +943,7 @@ class ShiquManager:
    - 好友点评只能基于他们的【比赛数据】，比赛胜负不影响评价，可以对焦点玩家表现上下文进行轻量评价。
    - 评分标准同焦点玩家（≥50夸/赞赏，<50串），但没有数据时语气要保守。
 
-【阴阳话术库（高级风格参考，允许解构融合，禁止机械复读或）】
+【阴阳话术库（高级风格参考，只能结构理解风格，禁止复用）】
 - 看完这 {n} 场数据报告，我的内心毫无波澜甚至想笑。
 - 你就像个情绪不稳定的数据电池，满格电量时输出爆炸，没电了就原地挂机。
 - 虽然你有一两把表现得像职业选手一样准，但更多的时间你都在用空气做掩护，用身体打伤害。
@@ -1665,8 +1703,14 @@ JSON Schema：
             logger.info(f"[是区吗][uid={uid}] 📊 已获取 {len(matches)} 场 ({(t1 - t0):.1f}s)")
 
             if len(matches) < 2:
-                yield event.plain_result(f"❌ {target_id}{_SHIQU_BTN} 仅获取到 {len(matches)} 场对局，至少需要 2 场。")
-                return
+                yield event.plain_result("⏳ 网络波动，正在自动重试，请稍候…")
+                await asyncio.sleep(1)
+                matches = await self._fetch_matches(target_id, target=target_count)
+                t1 = time.time()
+                logger.info(f"[是区吗][uid={uid}] 📊 重试后获取 {len(matches)} 场 ({(t1 - t0):.1f}s)")
+                if len(matches) < 2:
+                    yield event.plain_result(f"❌ {target_id}{_SHIQU_BTN} 仅获取到 {len(matches)} 场对局，至少需要 2 场。")
+                    return
 
             _ACTIVE_META[uid] = "拉取队友详细数据"
             await self._serial_fetch_all_teammate_details(matches, target_id)

@@ -106,6 +106,11 @@ class OverstatsPlugin(Star):
         # 复用 aiohttp.ClientSession（懒加载，首次请求时创建）
         self._http_session: aiohttp.ClientSession | None = None
 
+        # API 全局限流：所有请求最多同时 3 个
+        self.overstats_semaphore = asyncio.Semaphore(3)
+        # Overstats API 限流：Overstats 调用最多同时 2 个（包含在全局限流内）
+        self._overstats_inner_semaphore = asyncio.Semaphore(2)
+
         # 定时清理临时图片（仅本地保存模式下启用，每天凌晨执行一次）
         if self._save_image_locally:
             self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop())
@@ -1075,43 +1080,61 @@ class OverstatsPlugin(Star):
     async def _fetch_image(self, endpoint: str, payload: dict = None, timeout: int = 600) -> tuple[bytes | None, dict | None]:
         url = f"{self.base_url}{endpoint}"
         payload = payload or {}
-        start_ts = time.time()
-        try:
-            session = await self._get_http_session()
-            # 若请求超时与默认不同，使用单次覆盖
-            req_timeout = aiohttp.ClientTimeout(total=timeout) if timeout != 600 else None
-            async with session.post(url, json=payload, timeout=req_timeout) as resp:
-                if resp.status == 200:
-                    if self.monitor:
-                        elapsed = int((time.time() - start_ts) * 1000)
-                        asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
-                    return await resp.read(), None
-                else:
-                    if self.monitor:
-                        elapsed = int((time.time() - start_ts) * 1000)
-                        asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
+        async with self.overstats_semaphore:
+            async with self._overstats_inner_semaphore:
+                for attempt in (1, 2):
+                    start_ts = time.time()
                     try:
-                        error_data = await resp.json()
-                        logger.error(f"Overstats API 错误: {resp.status} - {error_data}")
-                        # 后端超时/网络异常时追加重试提示
-                        if isinstance(error_data, dict):
-                            if error_data.get("error") == "internal_error":
-                                orig_msg = error_data.get("message", "")
-                                error_data["message"] = f"{orig_msg}，网络波动，请重试"
-                            # 请求频率限制时追加提示
-                            if resp.status == 429 or "too many requests" in str(error_data.get("message", "")).lower():
-                                orig_msg = error_data.get("message", "")
-                                error_data["message"] = f"{orig_msg}。使用人数过多，请稍后再试或尝试自部署Overstats或astrbot_plugin_overstats"
-                        return None, error_data
-                    except:
-                        logger.error(f"Overstats API 返回了非 JSON 错误: {resp.status}")
-                        return None, {"error": "non_json_error", "message": "API返回非JSON格式错误"}
-        except Exception as e:
-            if self.monitor:
-                elapsed = int((time.time() - start_ts) * 1000)
-                asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
-            logger.error(f"网络请求异常: {e}")
-            return None, {"error": "network_error", "message": str(e)}
+                        session = await self._get_http_session()
+                        # 若请求超时与默认不同，使用单次覆盖
+                        req_timeout = aiohttp.ClientTimeout(total=timeout) if timeout != 600 else None
+                        async with session.post(url, json=payload, timeout=req_timeout) as resp:
+                            if resp.status == 200:
+                                if self.monitor:
+                                    elapsed = int((time.time() - start_ts) * 1000)
+                                    asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
+                                return await resp.read(), None
+                            else:
+                                if self.monitor:
+                                    elapsed = int((time.time() - start_ts) * 1000)
+                                    asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
+                                try:
+                                    error_data = await resp.json()
+                                    # 后端 ConnectTimeout → 自动重试 1 次
+                                    if (resp.status == 500
+                                            and isinstance(error_data, dict)
+                                            and error_data.get("error") == "internal_error"
+                                            and isinstance(error_data.get("details"), dict)
+                                            and error_data.get("details", {}).get("exception") == "ConnectTimeout"
+                                            and attempt == 1):
+                                        logger.warning(f"Overstats API ConnectTimeout，1秒后重试: {endpoint}")
+                                        await asyncio.sleep(1)
+                                        continue
+                                    logger.error(f"Overstats API 错误: {resp.status} - {error_data}")
+                                    # 后端超时/网络异常时追加重试提示
+                                    if isinstance(error_data, dict):
+                                        if error_data.get("error") == "internal_error":
+                                            orig_msg = error_data.get("message", "")
+                                            error_data["message"] = f"{orig_msg}，网络波动，请重试"
+                                        # 请求频率限制时追加提示
+                                        if resp.status == 429 or "too many requests" in str(error_data.get("message", "")).lower():
+                                            orig_msg = error_data.get("message", "")
+                                            error_data["message"] = f"{orig_msg}。使用人数过多，请稍后再试或尝试自部署Overstats或astrbot_plugin_overstats"
+                                    return None, error_data
+                                except:
+                                    logger.error(f"Overstats API 返回了非 JSON 错误: {resp.status}")
+                                    return None, {"error": "non_json_error", "message": "API返回非JSON格式错误"}
+                    except Exception as e:
+                        if attempt == 1:
+                            logger.warning(f"网络请求异常，1秒后重试: {e}")
+                            await asyncio.sleep(1)
+                            continue
+                        if self.monitor:
+                            elapsed = int((time.time() - start_ts) * 1000)
+                            asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
+                        logger.error(f"网络请求异常: {e}")
+                        return None, {"error": "network_error", "message": str(e)}
+                return None, {"error": "retry_exhausted", "message": "重试耗尽"}
 
     async def _periodic_cleanup_loop(self):
         """定时清理临时图片目录中超过 7 天的文件（每天执行一次）"""
