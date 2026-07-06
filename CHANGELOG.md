@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.7.1 (2026-07-06)
+
+### 🔧 优化
+- **提示词结构重构**：是区吗与开庭提示词统一为 `[ROLE]/[CONTEXT]/[OBJECTIVE]/[CONSTRAINTS]/[WORKFLOW]/[OUTPUT FORMAT]/[INPUT DATA]` 标准化分节，角色设定合并语气/修辞要求，新增修辞比喻库（5 大分类）与英雄名称参考
+- **数据白名单同步**：开庭模块同步是区吗的数据白名单（通用数据 + 按英雄分类的特色数据），`_hero_detail_text` 增加 `_stat_allowed_for_hero` + `should_skip_prompt_stat` 双重过滤
+- **开庭提示词精简**：移除 `_EMOJI_MAP_TEXT`（完整数据已包含英雄位置信息），减少冗余 token
+
 ## v2.7.0 (2026-07-05)
 
 ### ✨ 新增

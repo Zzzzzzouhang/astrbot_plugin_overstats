@@ -15,9 +15,9 @@ from typing import Optional
 
 # OW 游戏数据（从 query_tool.json 加载）
 try:
-    from .stat_db import build_broad_reference_text, load_stat_name_map, normalize_stat_value
+    from .stat_db import build_broad_reference_text, load_stat_name_map, normalize_stat_value, should_skip_prompt_stat
 except ImportError:
-    from stat_db import build_broad_reference_text, load_stat_name_map, normalize_stat_value  # type: ignore[no-redef]
+    from stat_db import build_broad_reference_text, load_stat_name_map, normalize_stat_value, should_skip_prompt_stat  # type: ignore[no-redef]
 
 _QTOOL = json.loads((Path(__file__).resolve().parent / "query_tool.json").read_text("utf-8"))
 HERO_DICT = {h["heroGuid"]: {"name": h["name"], "role": h["roleType"]} for h in _QTOOL["heroList"]}
@@ -29,18 +29,109 @@ _MODE_DICT = {
     "quickfight": "角斗快速", "LeisureFight": "角斗快速", "IT_FIGHT": "角斗快速",
 }
 
+# ── 构建 text ↔ GUID / 英雄名 ↔ GUID 映射 ──
+_ATTR_TEXT_TO_GUID: dict[str, str] = {}
+_ATTR_GUID_TO_TEXT: dict[str, str] = {}
+_HERO_NAME_TO_GUID: dict[str, str] = {}
+for _attr in _QTOOL.get("heroAttrList", []):
+    _vg, _vt = str(_attr.get("valueGuid", "")), str(_attr.get("valueText", ""))
+    if _vg and _vt:
+        _ATTR_TEXT_TO_GUID[_vt] = _vg
+        _ATTR_GUID_TO_TEXT[_vg] = _vt
+for _h in _QTOOL.get("heroList", []):
+    _hn, _hg = str(_h.get("name", "")), str(_h.get("heroGuid", ""))
+    if _hn and _hg:
+        _HERO_NAME_TO_GUID[_hn] = _hg
+
+# ── 用户筛选后的白名单 ──
+# 通用数据：仅保留消灭/阵亡/单独消灭/最后一击/武器命中率/暴击命中率/治疗量
+_ALLOWED_COMMON_TEXTS = {
+    "消灭", "阵亡", "单独消灭", "最后一击",
+    "武器命中率", "暴击命中率",
+}
+# 特色数据：按英雄分类（来自手动筛选，已移除「攻击助攻」）
+_ALLOWED_SPECIAL_BY_HERO: dict[str, set[str]] = {
+    'D.Va': set(),
+    '伊拉锐': {'治疗量'},
+    '半藏': set(),
+    '卡西迪': {'暴击命中率', '武器命中率'},
+    '卢西奥': {'拯救玩家', '治疗量'},
+    '回声': {'黏性炸弹直接命中率'},
+    '埃姆雷': {'暴击命中率', '武器命中率'},
+    '堡垒': set(),
+    '士兵\uff1a76': {'螺旋飞弹命中率'},
+    '天使': {'复活玩家', '拯救玩家', '治疗量'},
+    '奥丽莎': {'能量标枪命中率'},
+    '安娜': {'开镜命中率', '拯救玩家', '麻醉镖命中率', '治疗量'},
+    '安燃': set(),
+    '巴蒂斯特': {'拯救玩家', '治疗命中率', '治疗量'},
+    '布丽吉塔': {'流星飞锤命中率', '鼓舞士气持续时间占比', '治疗量'},
+    '弗蕾娅': set(),
+    '托比昂': set(),
+    '拉玛刹': {'猛拳命中率'},
+    '探奇': {'直接命中率'},
+    '斩仇': {'锋锐剑气命中率'},
+    '无漾': {'治疗量'},
+    '末日铁拳': set(),
+    '朱诺': {'拯救玩家', '治疗量'},
+    '查莉娅': {'主要攻击模式命中率', '辅助攻击模式命中率'},
+    '死怨': {'交叉枪决命中率', '纵情狂飙空中发射命中率'},
+    '死神': set(),
+    '毛加': set(),
+    '法老之鹰': {'击退消灭', '直接命中率'},
+    '渣客女王': {'锯齿利刃命中率'},
+    '温斯顿': {'辅助攻击模式命中率'},
+    '源氏': set(),
+    '狂鼠': {'直接命中率'},
+    '猎空': {'脉冲炸弹命中率'},
+    '瑞稀': {'缚魂锁链命中率', '治疗量'},
+    '生命之梭': {'拯救玩家', '治疗量'},
+    '破坏球': set(),
+    '禅雅塔': {'拯救玩家', '治疗量'},
+    '秩序之光': {'辅助攻击模式命中率'},
+    '索杰恩': {'充能射击命中率', '充能射击暴击率'},
+    '美': {'冰锥命中率', '冰锥暴击率'},
+    '艾什': {'开镜命中率', '开镜暴击率'},
+    '莫伊拉': {'拯救玩家', '治疗量'},
+    '莱因哈特': {'烈焰打击命中率'},
+    '西拉': {'追踪弹命中率'},
+    '西格玛': {'质量吸附命中率'},
+    '路霸': {'链钩命中率'},
+    '金驭': set(),
+    '雾子': {'拯救玩家', '治疗量'},
+    '飞天猫': {'治疗量'},
+    '骇灾': set(),
+    '黑影': set(),
+    '黑百合': {'开镜暴击率'},
+}
+
+# ── 构建白名单 GUID 集合 ──
+_ALLOWED_COMMON_GUIDS: set[str] = {_ATTR_TEXT_TO_GUID[t] for t in _ALLOWED_COMMON_TEXTS if t in _ATTR_TEXT_TO_GUID}
+_HERO_ATTR_GUIDS: dict[str, set[str]] = {}
+_HERO_SPECIAL_ATTR_GUIDS: dict[str, set[str]] = {}
+_GENERAL_ATTR_GUIDS: set[str] = _ALLOWED_COMMON_GUIDS
+
+for _hero_name, _allowed_special_texts in _ALLOWED_SPECIAL_BY_HERO.items():
+    _hero_guid = _HERO_NAME_TO_GUID.get(_hero_name)
+    if not _hero_guid:
+        continue
+    _special_guids: set[str] = set()
+    for _t in _allowed_special_texts:
+        _g = _ATTR_TEXT_TO_GUID.get(_t)
+        if _g:
+            _special_guids.add(_g)
+    _HERO_SPECIAL_ATTR_GUIDS[_hero_guid] = _special_guids
+    _HERO_ATTR_GUIDS[_hero_guid] = _ALLOWED_COMMON_GUIDS | _special_guids
+
+
+def _stat_allowed_for_hero(value_guid: str, hero_guid: str) -> bool:
+    return value_guid in _GENERAL_ATTR_GUIDS or value_guid in _HERO_ATTR_GUIDS.get(hero_guid, set())
+
+
 logger = logging.getLogger("astrbot")
 
 _COURT_COOLDOWN_SECONDS = 60
 _COURT_COOLDOWN_KV_PREFIX = "ow_court_cooldown"
-
-# 用于辅助 LLM 更友好地展示英雄名称
-_EMOJI_MAP_TEXT = """
-【常用英雄名称参考（请按数据匹配实际英雄名）】
-• 坦克(Tank) > D.Va / 莱因哈特 / 温斯顿 / 查莉娅 / 路霸 / 奥丽莎 / 破坏球 / 末日铁拳 / 西格玛 / 渣客女王 / 拉玛刹 / 毛加 / 骇灾 / 金驭
-• 输出(DPS) > 士兵76 / 死神 / 源氏 / 猎空 / 卡西迪 / 法老之鹰 / 黑百合 / 半藏 / 托比昂 / 狂鼠 / 堡垒 / 美 / 秩序之光 / 艾什 / 回声 / 黑影 / 索杰恩 / 探奇 / 弗蕾娅 / 安燃 / 埃姆雷 / 斩仇 / 西拉 / 死怨
-• 辅助(Support) > 天使 / 卢西奥 / 禅雅塔 / 安娜 / 莫伊拉 / 布丽吉塔 / 巴蒂斯特 / 雾子 / 生命之梭 / 伊拉锐 / 朱诺 / 无漾 / 瑞稀 / 飞天猫
-"""
 
 # ── AstrBot 文转图模板 ──────────────────────────────────────
 
@@ -383,20 +474,26 @@ class CourtManager:
             return "{ " + ", ".join(pairs) + " }"
 
         def _hero_detail_text(p_dict: dict) -> str:
-            """将 _heroList 中的 statMap 转成可读文本（与 DB 归一化口径一致）。"""
+            """将 _heroList 中的 statMap 转成可读文本（与 DB 归一化口径一致，遵守白名单）。"""
             hl = p_dict.get("_heroList")
             if not hl or not isinstance(hl, list):
                 return ""
             name_map = load_stat_name_map()
-            parts = []
+            parts: list[str] = []
             for entry in hl:
                 if not isinstance(entry, dict):
                     continue
                 sm = entry.get("statMap", {}) or {}
                 ut = float(entry.get("userTimeSec", 600) or 600)
+                hg = str(entry.get("heroId", ""))
                 for guid, raw_val in sm.items():
+                    guid = str(guid)
                     name = name_map.get(guid)
                     if not name:
+                        continue
+                    if hg and not _stat_allowed_for_hero(guid, hg):
+                        continue
+                    if should_skip_prompt_stat(value_guid=guid, value_text=name):
                         continue
                     nv = normalize_stat_value(raw_val, ut, value_text=name, value_guid=guid)
                     if nv is None:
@@ -447,45 +544,59 @@ class CourtManager:
 
         match_text = "\n".join(lines)
 
-        return f"""你是守望先锋电竞法庭的主审法官，圈内人称「数据判官」。本庭今日审理的是一场守望先锋对局。以游戏数据为唯一呈堂证供，拒绝主观臆断。
+        return f"""[ROLE] 角色与语气设定
+你是一位资深竞技游戏玩家兼数据分析师，擅长用「脱口秀式毒舌」风格对玩家的对局数据进行复盘点评。你的文字既有专业数据的支撑，又有极强的娱乐性和画面感，读起来像是一位又爱又恨的老队友在赛后吐槽。
+语气要求：戏谑、犀利、阴阳怪气但不恶意，保持「损友」般的亲切感。善用反讽、夸张和反转。
+修辞要求：大量使用游戏黑话与生活化比喻的混搭，避免干巴巴的描述。尽可能理解并且创造新的比喻。
+在本庭中，你的身份是守望先锋电竞法庭的主审法官，圈内人称「数据判官」。语气严肃如宣读判决书，有功者当庭嘉奖绝不吝啬溢美之词，有过者罪状罗列条条诛心。可少量使用 emoji。
 
-【角色定义】
-1. 深耕守望先锋全英雄机制、版本环境、赛事与天梯生态。所有判决以对局数据为唯一依据，拒绝空口黑屁。熟稔全社区梗文化。
-2. 人设底色：表面保持「本庭只陈述事实」的中立姿态，语气严肃如宣读判决书，实则字字精准戳中玩家最痛的操作命门。
-3. 核心立场：纯纯乐子人，看数据如同看乐子。毒舌但不恶毒，嘲讽只锁死游戏表现，绝不越界人身攻击。
-4. 核心风格：拒绝扁平化否定。擅长「欲抑先扬」与「一针见血」。有功者当庭嘉奖绝不吝啬溢美之词，有过者罪状罗列条条诛心。
+[CONTEXT] 游戏背景与修辞库
+1. 守望先锋段位名称：青铜、白银、黄金、白金、钻石、大师、宗师、英杰。
+2. 比喻参考库：
+状态不稳定类：情绪不稳定的数据电池、心电图、数据过山车、随机数生成器、情绪盲盒、接触不良的数据电池、人形骰子、薛定谔的C位、信号不好的路由器、间歇性战神体验卡。
+无效贡献类：空气掩护、用身体打伤害、给对面尽孝、行走的充电宝、战术性自杀、蹭地图经验涨KD、团队ATM机、敌方能量加速器、移动复活点。
+高光统治类：战神下凡、把对面点位焊死、职业选手体验生活、人形外挂、把对面当兵线补、输出端装了GPS。
+拉胯下限类：会飞的咸鱼、空中活靶子、开雾逛该的观光客、落地成盒、纯度极高的咸鱼、键盘撒米鸡啄选手、人机练习赛VIP。
+数据结果背离类：华丽数据证明无用、KDA骗子、用队友的命换评分、胜利是队友扛着走的。
 
-【硬性约束】
-- 仅针对游戏内数据、赛场表现点评，绝不涉及外貌、私生活、人品等人身攻击。
-- 所有判决严格基于提供的原始数据，禁止编造数据、篡改数据含义。
-- 严禁跨职责直接比较伤害/治疗等核心指标。
-- 守望先锋段位名称：青铜/白银/黄金/白金/钻石/大师/宗师/英杰
-- 可少量使用 emoji。
+[OBJECTIVE] 核心任务
+严格基于提供的原始对局数据，对焦点玩家及本局所有玩家进行审判分析，输出一份电竞法庭判决书。
 
-【评判规则】
-1. 将焦点玩家数据与同英雄「# 数据参考行」对比，低于参考值应扣分，禁止跨英雄比较。
-2. 同一玩家同一局可能在「英雄片段」内出现多个英雄，时长<3分钟的片段为低权重。
+[CONSTRAINTS] 硬性约束与底线
+1. 仅针对游戏内数据、赛场表现、英雄数据点评，绝不涉及外貌、私生活、人品等人身攻击；不输出任何歧视、引战、恶意辱骂内容。
+2. 所有判决严格基于提供的原始数据，禁止编造数据、篡改数据含义、夸大数据结论。
+3. 严禁跨职责直接比较伤害或治疗等核心指标，阴阳调侃必须对应明确的数据论据。
+4. 不讨论外挂、代练等违规行为，禁止进行反事实推演或假设性陈述，仅限描述已发生事件。
+
+[WORKFLOW] 评判规则与审判工作流
+步骤一：职责核心指标评估（综合评估，技能指标权重低）
+坦克位参考：单独消灭、最后一击、(伤害减受疗)、阵亡数、击杀参与率等其他技能指标。
+输出位参考：单独消灭、最后一击、伤害、阵亡数、击杀参与率等其他技能指标。
+辅助位参考：最后一击、阵亡数、拯救玩家、单独消灭、伤害、治疗量、击杀参与率等其他技能指标。
+
+步骤二：数据对比与评分
+1. 将焦点玩家数据与同英雄「数据参考行」对比，低于参考值应扣分，禁止跨英雄比较。
+2. 同一玩家同一局可能在「英雄片段」内出现多个英雄，时长小于3分钟的片段为低权重。
 3. 最后一击和单独消灭应额外加分，频繁阵亡且团队贡献低应加重扣分。
-4. 需要综合看英雄数据。比如有的输出英雄伤害低但最后一击高，有的辅助英雄输出高但治疗会少一些，需要综合参考值考虑，不要跨英雄对比。
-5. 解构无效数据：不要把「助攻低」或「没有助攻」机械地当成负面结论。同时，不要被某些表面上很高的「虚高数据」欺骗（例如：坦克一味刷伤害却无击杀且击杀参与率低；辅助一味刷治疗却无拯救玩家，击杀参与率低；输出也是伤害数据高但是击杀参与率低）。如果数据显示其空有治疗量/伤害量，但击杀参与率极低，应评价其为「无效数据刷子」。注意部分输出英雄定位为收割或者骚扰，可能伤害低，击杀参与率高，最后一击多，值得赞赏。
-6. 比赛胜负不影响评分，只论数据。
-7. 若某局数据异常（如焦点玩家和队友，英雄全部为空，全部字段为空；击杀，助攻，阵亡是参考值正负230%，参考价值低）该局不参与评分或者低权重，comment 写「数据缺失，无法评价」。
+4. 综合看英雄数据。例如有的输出英雄伤害低但最后一击高，有的辅助英雄输出高但治疗少，需综合参考值考虑，不要跨英雄对比。
+5. 解构无效数据：不要被表面虚高数据欺骗（如坦克刷伤害无击杀且参与率低；辅助刷治疗无拯救且参与率低；输出伤害高但参与率低）。若空有治疗或伤害但击杀参与率极低，评价为「无效数据刷子」。注意部分输出英雄定位为收割或骚扰，可能伤害低但参与率高、最后一击多，值得赞赏。
+6. 对于单独消灭高的玩家应赞赏，单独消灭低不批评不评价。
+7. 比赛胜负不影响评分，只论数据。
+8. 若某局数据异常（如焦点玩家和队友英雄全空、字段全空；击杀阵亡是参考值正负230%导致参考价值低），注释写「数据缺失，无法评价」。
 
-【审判任务】
-1. 从焦点玩家所在队伍的队友（不含对手）中找出本局 MVP（表现最佳者），给出判决理由。
+步骤三：审判任务
+1. 从焦点玩家所在队伍的队友（不含对手）中找出本局 MVP（最佳表现者），给出判决理由。
 2. 从焦点玩家所在队伍的队友（不含对手）中找出本局最差玩家（被告），给出判决理由和「原罪清单」（具体犯了哪些错误，用数据说话）。
 3. 对焦点玩家做出判决：是有功之臣还是拖累全队，给出评分 S/A/B/C/D。
 4. 对焦点玩家所在队伍的所有玩家逐一做出有功/有过/无功无过的判决，附一句话理由。
 5. 分析三路对位差距：数据已按坦克→输出→辅助排序。对位规则：坦克位一对一比较；输出位整体比较（我方输出组 vs 对方输出组，不要拆分编号）；辅助位整体比较（我方辅助组 vs 对方辅助组，不要拆分编号）。
 
-{_EMOJI_MAP_TEXT}
-
-【输出要求】
-1. 必须严格使用中文，只输出纯文本（不要 markdown 代码块），严格遵循输出格式。
+[OUTPUT FORMAT] 输出格式与字段规范
+1. 必须严格使用中文，只输出纯文本（不要 markdown 代码块）。
 2. 判决必须基于数据事实，好的表现必须肯定赞赏，差的表现应毒舌调侃。
-3. 不要被「虚高数据」欺骗（例如：坦克刷伤害却无击杀；辅助刷治疗却无关键救援）。需要结合击杀参与率等指标综合判断，识别出真正的功臣与无效刷子。
+3. 不要被「虚高数据」欺骗（例如：坦克刷伤害却无击杀；辅助刷治疗却无关键救援）。需要结合击杀参与率等指标综合判断。
+4. 严格遵循下方输出格式，填空并写入分析内容：
 
-【输出格式】
 ⚖️ **电竞法庭判决书**
 
 📋 **案件编号**：第 {{index_hint}} 局
@@ -510,7 +621,7 @@ class CourtManager:
 - 输出位：我方（英雄1 + 英雄2）vs 对方（英雄1 + 英雄2）—— 整体对比输出火力与击杀效率
 - 辅助位：我方（英雄1 + 英雄2）vs 对方（英雄1 + 英雄2）—— 整体对比治疗量与生存/功能性
 
-【比赛数据（数组格式，每个玩家一个对象）】
+[INPUT DATA] 输入数据
 {match_text}
 """
 

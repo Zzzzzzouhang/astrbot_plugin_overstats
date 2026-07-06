@@ -1100,19 +1100,20 @@ class OverstatsPlugin(Star):
                                     # bnet_not_found / summary_empty 是正常业务结果，不算 API 失败
                                     _soft_errors = {"bnet_not_found", "summary_empty"}
                                     _is_soft = isinstance(error_data, dict) and error_data.get("error") in _soft_errors
-                                    if self.monitor:
-                                        elapsed = int((time.time() - start_ts) * 1000)
-                                        asyncio.ensure_future(self.monitor.record_api(endpoint, _is_soft, elapsed))
-                                    # 后端 ConnectTimeout → 自动重试 1 次
-                                    if (resp.status == 500
-                                            and isinstance(error_data, dict)
-                                            and error_data.get("error") == "internal_error"
-                                            and isinstance(error_data.get("details"), dict)
-                                            and error_data.get("details", {}).get("exception") == "ConnectTimeout"
-                                            and attempt == 1):
+                                    # 后端 ConnectTimeout → 自动重试 1 次（用字符串包含判断，兼容各种嵌套结构）
+                                    _is_timeout = (resp.status == 500
+                                                   and isinstance(error_data, dict)
+                                                   and "ConnectTimeout" in str(error_data))
+                                    if _is_timeout and attempt == 1:
+                                        if self.monitor:
+                                            elapsed = int((time.time() - start_ts) * 1000)
+                                            asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
                                         logger.warning(f"Overstats API ConnectTimeout，1秒后重试: {endpoint}")
                                         await asyncio.sleep(1)
                                         continue
+                                    if self.monitor:
+                                        elapsed = int((time.time() - start_ts) * 1000)
+                                        asyncio.ensure_future(self.monitor.record_api(endpoint, _is_soft, elapsed))
                                     logger.error(f"Overstats API 错误: {resp.status} - {error_data}")
                                     # 后端超时/网络异常时追加重试提示
                                     if isinstance(error_data, dict):
