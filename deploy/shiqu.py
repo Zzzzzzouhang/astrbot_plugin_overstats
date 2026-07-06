@@ -9,6 +9,7 @@
 
 import asyncio
 import json
+import random
 import re
 import time
 import logging
@@ -981,6 +982,21 @@ class ShiquManager:
 
         match_text = "\n".join(lines)
 
+        # 随机打乱比喻参考库，避免大模型总是使用第一个
+        _metaphor_categories = [
+            ("状态不稳定类", ["数据过山车", "随机数生成器", "情绪盲盒", "情绪不稳定的数据电池", "人形骰子", "薛定谔的C位", "信号不好的路由器", "间歇性战神体验卡"]),
+            ("无效贡献类", ["空气掩护", "用身体打伤害", "行走的充电宝", "战术性自杀", "蹭地图经验涨KD", "团队ATM机", "敌方能量加速器", "移动复活点"]),
+            ("高光统治类", ["战神下凡", "把对面点位焊死", "职业选手体验生活", "人形外挂", "把对面当兵补", "准心端装了GPS"]),
+            ("拉胯下限类", ["会飞的咸鱼", "空中活靶子", "观光客", "落地成盒", "纯度极高的咸鱼", "键盘撒米鸡啄选手", "人机练习赛VIP"]),
+            ("数据结果背离类", ["华丽数据证明无用", "KDA骗子", "用队友的命换评分", "胜利是队友扛着走的"]),
+        ]
+        random.shuffle(_metaphor_categories)
+        _metaphor_lines = []
+        for _cat_name, _items in _metaphor_categories:
+            random.shuffle(_items)
+            _metaphor_lines.append(f"{_cat_name}：{'、'.join(_items)}。")
+        _metaphor_text = "\n".join(_metaphor_lines)
+
         return f"""[ROLE] 角色与语气设定
 你是一位资深竞技游戏玩家兼数据分析师，擅长用「脱口秀式毒舌」风格对玩家的对局数据进行复盘点评。你的文字既有专业数据的支撑，又有极强的娱乐性和画面感，读起来像是一位又爱又恨的老队友在赛后吐槽。
 语气要求：戏谑、犀利、阴阳怪气但不恶意，保持「损友」般的亲切感。善用反讽、夸张和反转。
@@ -990,11 +1006,7 @@ class ShiquManager:
 [CONTEXT] 游戏背景与修辞库
 1. 守望先锋段位名称：青铜、白银、黄金、白金、钻石、大师、宗师、英杰。
 2. 比喻参考库：
-状态不稳定类：数据过山车、随机数生成器、情绪盲盒、情绪不稳定的数据电池、人形骰子、薛定谔的C位、信号不好的路由器、间歇性战神体验卡。
-无效贡献类：空气掩护、用身体打伤害、行走的充电宝、战术性自杀、蹭地图经验涨KD、团队ATM机、敌方能量加速器、移动复活点。
-高光统治类：战神下凡、把对面点位焊死、职业选手体验生活、人形外挂、把对面当兵补、准心端装了GPS。
-拉胯下限类：会飞的咸鱼、空中活靶子、观光客、落地成盒、纯度极高的咸鱼、键盘撒米鸡啄选手、人机练习赛VIP。
-数据结果背离类：华丽数据证明无用、KDA骗子、用队友的命换评分、胜利是队友扛着走的。
+{_metaphor_text}
 
 [OBJECTIVE] 核心任务
 严格基于提供的原始对局数据，对焦点玩家及其好友进行复盘点评，并最终输出符合指定 JSON Schema 的合法 JSON 对象。
@@ -1736,7 +1748,13 @@ JSON Schema 定义：
             if cached_image:
                 _LAST_IMAGE[uid] = cached_image
                 try:
-                    yield event.chain_result([Image.fromFileSystem(cached_image)])
+                    try:
+                        yield event.chain_result([Image.fromFileSystem(cached_image)])
+                    except Exception as _re:
+                        if "违规" in str(_re) or "violation" in str(_re).lower():
+                            raise
+                        await asyncio.sleep(3)
+                        yield event.chain_result([Image.fromFileSystem(cached_image)])
                     # 缓存图发送成功 → 标记 image_sent，后续白名单可跳过二次确认
                     if record:
                         record["image_sent"] = True
@@ -1859,7 +1877,14 @@ JSON Schema 定义：
             })
             if image_path:
                 try:
-                    yield event.chain_result([Image.fromFileSystem(image_path)])
+                    # 重试发送：平台偶发 upload image 返回 None
+                    try:
+                        yield event.chain_result([Image.fromFileSystem(image_path)])
+                    except Exception as _re:
+                        if "违规" in str(_re) or "violation" in str(_re).lower():
+                            raise
+                        await asyncio.sleep(3)
+                        yield event.chain_result([Image.fromFileSystem(image_path)])
                     # 图片发送成功 → 标记，供白名单二次确认判断用
                     record = self._load_user_record(uid)
                     if record:
@@ -1966,7 +1991,13 @@ JSON Schema 定义：
             if cached_image and Path(cached_image).is_file():
                 _LAST_IMAGE[uid] = cached_image
                 try:
-                    yield event.chain_result([Image.fromFileSystem(cached_image)])
+                    try:
+                        yield event.chain_result([Image.fromFileSystem(cached_image)])
+                    except Exception as _re:
+                        if "违规" in str(_re) or "violation" in str(_re).lower():
+                            raise
+                        await asyncio.sleep(3)
+                        yield event.chain_result([Image.fromFileSystem(cached_image)])
                 except Exception as exc:
                     err_msg = str(exc)
                     logger.error(f"[是区吗][uid={uid}] 发送结果图片失败: {err_msg}")
@@ -1989,7 +2020,13 @@ JSON Schema 定义：
                     record["image_path"] = str(image_path)
                     self._save_user_record(uid, record)
                     try:
-                        yield event.chain_result([Image.fromFileSystem(image_path)])
+                        try:
+                            yield event.chain_result([Image.fromFileSystem(image_path)])
+                        except Exception as _re:
+                            if "违规" in str(_re) or "violation" in str(_re).lower():
+                                raise
+                            await asyncio.sleep(3)
+                            yield event.chain_result([Image.fromFileSystem(image_path)])
                     except Exception as send_exc:
                         err_msg = str(send_exc)
                         logger.error(f"[是区吗][uid={uid}] 发送重渲染图片失败: {err_msg}")
