@@ -57,6 +57,8 @@ class OverstatsPlugin(Star):
         self.config = config
 
         self.file_lock = asyncio.Lock()
+        self._cmd_concurrent_lock = asyncio.Lock()  # 保护并发计数器的原子操作
+        self._cmd_concurrent_count = 0
         self._load_rate_limit_config()
         self._semaphore_reset_task = asyncio.create_task(self._daily_semaphore_reset_loop())
         self.daily_group_prompt_suffix = "[今日已提示，群内后续指令不再提示将直接返回结果]"
@@ -259,7 +261,7 @@ class OverstatsPlugin(Star):
             logger.error(f"群聊每日首次提示重置任务异常: {e}")
 
     async def _daily_semaphore_reset_loop(self):
-        """每日凌晨 4 点重建指令限流 semaphore，防止槽位泄漏累积导致死锁。"""
+        """每日凌晨 4 点重置指令并发计数器，防止槽位泄漏累积。"""
         try:
             while True:
                 now = datetime.now()
@@ -268,8 +270,9 @@ class OverstatsPlugin(Star):
                     next4 += timedelta(days=1)
                 wait_sec = max(1, (next4 - now).total_seconds())
                 await asyncio.sleep(wait_sec)
-                self._cmd_semaphore = asyncio.Semaphore(self._rate_limit_max)
-                logger.info(f"[Overstats] 每日 4 点已重置指令限流槽位（max={self._rate_limit_max}）")
+                async with self._cmd_concurrent_lock:
+                    self._cmd_concurrent_count = 0
+                logger.info(f"[Overstats] 每日 4 点已重置指令限流计数器（max={self._rate_limit_max}）")
         except asyncio.CancelledError:
             logger.info("指令限流每日重置任务已停止")
         except Exception as e:
@@ -558,7 +561,6 @@ class OverstatsPlugin(Star):
             cfg = {}
         self._rate_limit_enabled = bool(cfg.get("enabled", False))
         self._rate_limit_max = max(1, int(cfg.get("max_concurrent", 3) or 3))
-        self._cmd_semaphore = asyncio.Semaphore(self._rate_limit_max)
 
         # ── LLM 频率限制 ──
         raw_llm = str(self.config.get("llm_rate_limit", "{}") or "{}").strip()
@@ -589,18 +591,35 @@ class OverstatsPlugin(Star):
         """白名单群/用户 或 AstrBot 管理员不受限流控制。限流关闭时所有人视为特权。"""
         return not self._rate_limit_enabled or self._is_whitelisted(event) or self._is_astrbot_admin(event)
 
+    # ── 指令并发限流（非阻塞 fail-fast）──
+    _RATE_LIMIT_REJECT_MSG = "⏳ 同时执行的指令过多，请等待当前指令返回结果后再重试"
+
+    async def _try_acquire_cmd_slot(self) -> bool:
+        """非阻塞尝试获取指令并发槽位（异步锁保护原子性）。返回 True=获取成功。"""
+        async with self._cmd_concurrent_lock:
+            if self._cmd_concurrent_count >= self._rate_limit_max:
+                return False
+            self._cmd_concurrent_count += 1
+            return True
+
+    def _release_cmd_slot(self) -> None:
+        """释放指令并发槽位（防止每日重置后 count 变为负值）。"""
+        if self._cmd_concurrent_count > 0:
+            self._cmd_concurrent_count -= 1
+
     @asynccontextmanager
     async def _rate_limit_slot(self, event: AstrMessageEvent):
-        """非特权用户指令并发限流。捕获当前 semaphore 引用防止 4 点重置泄漏。"""
+        """非特权用户指令并发限流。槽位不足时 yield None 供调用方识别后立即拒绝；否则 yield True。"""
         if self._is_privileged(event):
-            yield
+            yield True
             return
-        sem = self._cmd_semaphore  # 捕获引用，防止 4 点换 semaphore 后 release 到新对象
-        await sem.acquire()
+        if not await self._try_acquire_cmd_slot():
+            yield None  # 信号：并发已满，调用方应拒绝
+            return
         try:
-            yield
+            yield True  # 信号：获取成功
         finally:
-            sem.release()
+            self._release_cmd_slot()
 
     # ── 违规封禁（JSON 文件存储，按 用户+指令 隔离，12小时）──
 
@@ -756,15 +775,15 @@ class OverstatsPlugin(Star):
             else:
                 return self._maintenance_state.get("content", "系统维护中"), None, True
 
-        # ── 指令并发限流：非特权用户最多3条指令同时执行 ──
-        # 捕获当前 semaphore 引用，防止每日 4 点换 semaphore 后 release 到错误对象
-        slot_sem = None
+        # ── 指令并发限流：非特权用户非阻塞获取槽位，满则立即拒绝 ──
+        need_release = False
         if not self._is_privileged(event):
-            slot_sem = self._cmd_semaphore
-            await slot_sem.acquire()
+            if not await self._try_acquire_cmd_slot():
+                return self._RATE_LIMIT_REJECT_MSG, None, True
+            need_release = True
 
         if not self._is_group_message(event):
-            return base_text, (None, slot_sem), False
+            return base_text, (None, need_release), False
 
         # 确保群组配置已加载
         await self._ensure_group_config_loaded()
@@ -783,7 +802,7 @@ class OverstatsPlugin(Star):
                 prompted_users = self.daily_prompt_state.setdefault("prompted_users", {})
                 if prompted_users.get(user_id) or user_id in self.daily_prompt_pending_users:
                     # 今日已提示过，不再显示加载提示，直接返回结果
-                    return None, (None, slot_sem), False
+                    return None, (None, need_release), False
                 else:
                     self.daily_prompt_pending_users.add(user_id)
 
@@ -800,26 +819,26 @@ class OverstatsPlugin(Star):
             if notice not in prompt_text:
                 prompt_text = f"{prompt_text}\n💡 {notice}"
 
-        # prompt_token 统一包含 (daily_user_id, slot_sem) 以便 finally 释放
-        prompt_token = (user_id if (daily_prompt_enabled and user_id) else None, slot_sem)
+        # prompt_token 统一包含 (daily_user_id, need_release) 以便 finally 释放
+        prompt_token = (user_id if (daily_prompt_enabled and user_id) else None, need_release)
         return prompt_text, prompt_token, False
 
     async def _finalize_business_status_prompt(self, reservation_user_id, success: bool, cmd_name: str = ""):
         """释放每日提示预留和限流槽位，并记录指令统计。
 
-        reservation_user_id 可以是 str|None 或 (str|None, Semaphore|None)。
+        reservation_user_id 可以是 str|None 或 (str|None, bool)。
         cmd_name 可选，传入后将自动记录到监控采集器。
         """
         daily_user_id: str | None = None
-        slot_sem = None
+        need_release = False
         if isinstance(reservation_user_id, tuple):
-            daily_user_id, slot_sem = reservation_user_id
+            daily_user_id, need_release = reservation_user_id
         else:
             daily_user_id = reservation_user_id
 
-        # 释放限流槽位（用捕获时的 semaphore 引用，防止 4 点重置后释放到新对象）
-        if slot_sem is not None:
-            slot_sem.release()
+        # 释放限流槽位
+        if need_release:
+            self._release_cmd_slot()
 
         # 记录指令统计
         if cmd_name and self.monitor:
@@ -2041,7 +2060,10 @@ class OverstatsPlugin(Star):
         if banned:
             yield event.plain_result(self._VIOLATION_BAN_MSG.format(command=CMD, remain=self._violation_ban_remain_str(ban_remain)))
             return
-        async with self._rate_limit_slot(event):
+        async with self._rate_limit_slot(event) as slot_ok:
+            if slot_ok is None:
+                yield event.plain_result(self._RATE_LIMIT_REJECT_MSG)
+                return
             async for r in self.court_manager.run_court(event, arg1, arg2):
                 yield r
 
@@ -2073,7 +2095,10 @@ class OverstatsPlugin(Star):
             else:
                 bnet_id = arg
 
-        async with self._rate_limit_slot(event):
+        async with self._rate_limit_slot(event) as slot_ok:
+            if slot_ok is None:
+                yield event.plain_result(self._RATE_LIMIT_REJECT_MSG)
+                return
             async for r in self.shiqu_manager.run(event, bnet_id, match_count=match_count):
                 yield r
 
