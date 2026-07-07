@@ -31,6 +31,25 @@
     <!-- ═══════════ 页面一：总览 ═══════════ -->
     <div class="page active" id="page-dashboard">
 
+    <!-- 全局时间范围（运行总览 + 指令分析 共用，默认本周） -->
+    <div class="time-range-bar global" id="global-time-range">
+      <span class="time-label">时间范围</span>
+      <div class="time-tabs" id="time-tabs">
+        <button class="timetab" data-range="24h">24 小时</button>
+        <button class="timetab" data-range="3d">三天</button>
+        <button class="timetab active" data-range="week">本周</button>
+        <button class="timetab" data-range="month">本月</button>
+        <button class="timetab" data-range="all">全部</button>
+      </div>
+      <div class="custom-range">
+        <input type="date" id="range-start" class="text-input" title="开始日期" />
+        <span class="range-sep">至</span>
+        <input type="date" id="range-end" class="text-input" title="结束日期" />
+        <button class="btn btn-compact" id="btn-apply-range">应用</button>
+      </div>
+      <span class="range-summary" id="range-summary"></span>
+    </div>
+
     <!-- 第一栏：运行总览（4 张指标卡） -->
     <section class="section" id="section-overview">
       <h2 class="section-title">运行总览 <span class="section-overline">概览</span> <span id="init-status" style="font-size:13px;color:var(--c-error);margin-left:8px">(初始化中...)</span></h2>
@@ -65,16 +84,7 @@
         </div>
       </div>
       <div class="cmd-list-compact" id="cmd-list"></div>
-      <div class="time-range-bar">
-        <span class="time-label">时间范围</span>
-        <div class="time-tabs" id="time-tabs">
-          <button class="timetab" data-range="24h">24 小时</button>
-          <button class="timetab" data-range="3d">三天</button>
-          <button class="timetab active" data-range="week">本周</button>
-          <button class="timetab" data-range="month">本月</button>
-          <button class="timetab" data-range="all">全部</button>
-        </div>
-      </div>
+      <div class="cmd-failures-panel" id="cmd-failures-panel" style="display:none"></div>
       <div class="charts-grid">
         <div class="chart-panel">
           <h3 class="subsection-title">调用趋势</h3>

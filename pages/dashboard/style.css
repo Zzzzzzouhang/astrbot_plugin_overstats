@@ -229,6 +229,74 @@ button { cursor: pointer; font-family: var(--ff-body); border: none; outline: no
   border-color: var(--c-primary);
 }
 
+/* 全局时间范围（置顶卡片，运行总览 + 指令分析 共用） */
+.time-range-bar.global {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-md);
+  padding: var(--s-sm) var(--s-md);
+  margin: 0 0 var(--s-md);
+  background: var(--c-surface-card);
+  border: 1px solid var(--c-hairline);
+  border-radius: var(--r-lg);
+  box-shadow: 0 1px 4px rgba(20,20,19,0.06);
+}
+.time-range-bar.global .time-label { font-weight: 600; color: var(--c-ink); }
+.custom-range { display: flex; align-items: center; gap: 6px; }
+.custom-range .text-input { width: 150px; height: 30px; }
+.range-sep { color: var(--c-muted); font-size: 12px; }
+.range-summary {
+  font-size: 12px; color: var(--c-muted-soft);
+  margin-left: auto; white-space: nowrap;
+}
+@media (max-width: 720px) {
+  .range-summary { margin-left: 0; width: 100%; }
+}
+
+/* 指令行选中态 */
+.cmd-row-slim.selected {
+  background: var(--c-primary-soft);
+  box-shadow: inset 2px 0 0 var(--c-primary);
+}
+
+/* ═══════════════ 指令失败原因面板 ═══════════════ */
+.cmd-failures-panel {
+  margin: var(--s-sm) 0 var(--s-md);
+  padding: var(--s-md);
+  background: var(--c-surface-card);
+  border: 1px solid var(--c-hairline);
+  border-radius: var(--r-lg);
+  animation: fadeIn 200ms ease;
+}
+.cf-header {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 14px; font-weight: 600; color: var(--c-ink);
+  margin-bottom: var(--s-sm); padding-bottom: var(--s-xs);
+  border-bottom: 1px solid var(--c-hairline);
+}
+.cf-empty { color: var(--c-muted); font-size: 13px; padding: var(--s-xs) 0; }
+.cf-reason {
+  display: grid; grid-template-columns: minmax(120px, 200px) 1fr auto auto;
+  align-items: center; gap: var(--s-sm);
+  padding: 8px 0;
+}
+.cf-code { font-size: 13px; font-weight: 500; color: var(--c-ink); }
+.cf-bar-wrap {
+  height: 14px; background: var(--c-surface-soft);
+  border-radius: var(--r-xs); overflow: hidden;
+}
+.cf-bar-fill {
+  height: 100%; background: var(--c-error);
+  border-radius: var(--r-xs); transition: width 400ms ease-out;
+}
+.cf-bar-fill.soft { background: var(--c-muted-soft); }
+.cf-count { font-size: 13px; font-weight: 600; color: var(--c-ink); text-align: right; }
+.badge-soft {
+  background: var(--c-muted-soft); color: #fff;
+  font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: var(--r-pill);
+}
+
+@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
 /* ═══════════════ Command Controls ═══════════════ */
 .cmd-controls {
   display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between;

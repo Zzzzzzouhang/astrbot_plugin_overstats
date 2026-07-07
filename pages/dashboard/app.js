@@ -73,6 +73,9 @@ let backendPerf = [];
 let upstreamData = [];
 let selectedCategory = "";
 let selectedTimeRange = "week";
+let customStart = null;      // 自定义开始 (ISO, 无时区后缀)
+let customEnd = null;        // 自定义结束
+let customDays = 7;          // 自定义区间对应天数（供趋势图）
 let selectedErrorLevel = "";
 let selectedTrendDate = new Date().toISOString().slice(0, 10); // 默认最新24小时
 let cmdListExpanded = false;
@@ -84,9 +87,6 @@ let shiquSelectedIdx = -1; // 当前选中行（侧边栏显示详情）
 
 // ── Category list ──
 const CATEGORIES = ["基础绑定", "数据查询", "总结", "图表排行", "游戏资讯", "AI开庭", "管理部署"];
-
-// ── Time range ─ days mapping ──
-const TRANGE_DAYS = { "24h": 1, "3d": 3, "week": 7, "month": 30, "all": 90 };
 
 // ══════════ Init ══════════
 
@@ -107,6 +107,7 @@ async function init() {
   }
   safeBind("btn-expand-cmds", "click", toggleCmdList);
   safeBind("btn-refresh", "click", refreshAll);
+  safeBind("btn-apply-range", "click", applyCustomRange);
   safeBind("btn-clear-errors", "click", clearErrors);
   safeBind("btn-clear-stats", "click", clearAllStats);
   safeBind("btn-shiqu-search", "click", shiquSearch);
@@ -151,7 +152,45 @@ function handleContextChange() {
   if (ctx) document.documentElement.setAttribute("data-theme", ctx.isDark ? "dark" : "light");
 }
 
-// ══════════ Time Range ══════════
+// ══════════ Time Range（运行总览 + 指令分析 共用）══════════
+
+// ISO 字符串（UTC，无时区后缀）——与后端 datetime.utcnow().isoformat() 存储格式一致，
+// 保证字符串比较正确（避免 Z 后缀导致排序错位）。
+function _fmt2(n) { return String(n).padStart(2, "0"); }
+function isoUTC(d) {
+  return d.getUTCFullYear() + "-" + _fmt2(d.getUTCMonth() + 1) + "-" + _fmt2(d.getUTCDate()) +
+    "T" + _fmt2(d.getUTCHours()) + ":" + _fmt2(d.getUTCMinutes()) + ":" + _fmt2(d.getUTCSeconds()) +
+    "." + String(d.getUTCMilliseconds()).padStart(3, "0") + "000";
+}
+function startOfWeekUTC(now) {
+  const day = now.getUTCDay();               // 0=Sun..6=Sat
+  const diff = day === 0 ? 6 : day - 1;      // 距本周一的天数
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - diff, 0, 0, 0, 0));
+}
+function startOfMonthUTC(now) {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+}
+
+// 根据当前选择的时间范围返回 {start, end, days}
+// start/end 为 ISO 字符串（无时区后缀），null 表示不限（全部）。
+function getRangeParams() {
+  const now = new Date();
+  let start = null, end = null, days = 7;
+  if (selectedTimeRange === "24h") {
+    start = isoUTC(new Date(now.getTime() - 86400000)); end = isoUTC(now); days = 1;
+  } else if (selectedTimeRange === "3d") {
+    start = isoUTC(new Date(now.getTime() - 3 * 86400000)); end = isoUTC(now); days = 3;
+  } else if (selectedTimeRange === "week") {
+    start = isoUTC(startOfWeekUTC(now)); end = isoUTC(now); days = 7;
+  } else if (selectedTimeRange === "month") {
+    start = isoUTC(startOfMonthUTC(now)); end = isoUTC(now); days = 30;
+  } else if (selectedTimeRange === "custom") {
+    start = customStart; end = customEnd; days = customDays;
+  } else { // all
+    start = null; end = null; days = 90;
+  }
+  return { start, end, days };
+}
 
 function setTimeRange(range) {
   console.log("[Monitor] setTimeRange:", range);
@@ -159,10 +198,47 @@ function setTimeRange(range) {
   document.querySelectorAll("#time-tabs .timetab").forEach(t =>
     t.classList.toggle("active", t.dataset.range === range)
   );
-  // 临时状态
+  applyTimeRange();
+}
+
+function applyCustomRange() {
+  const s = document.getElementById("range-start")?.value;
+  const e = document.getElementById("range-end")?.value;
+  if (!s || !e) { alert("请选择开始和结束日期"); return; }
+  if (new Date(s) > new Date(e)) { alert("开始日期不能晚于结束日期"); return; }
+  customStart = s + "T00:00:00";
+  customEnd = e + "T23:59:59.999999";
+  customDays = Math.max(1, Math.min(90, Math.round((new Date(e) - new Date(s)) / 86400000) + 1));
+  selectedTimeRange = "custom";
+  document.querySelectorAll("#time-tabs .timetab").forEach(t => t.classList.remove("active"));
+  applyTimeRange();
+}
+
+// 时间范围变更后：重新拉取 总览 + 指令统计 + 趋势 并渲染
+async function applyTimeRange() {
   const st = document.getElementById("init-status");
-  if (st) st.textContent = `加载趋势: ${range}...`;
-  fetchTrend().then(() => { renderTrend(); if (st) st.textContent = ""; });
+  if (st) st.textContent = "加载时间范围数据...";
+  await Promise.all([fetchOverview(), fetchCommands(), fetchTrend()]);
+  renderOverview();
+  renderCommands();
+  renderTrend();
+  updateRangeSummary();
+  if (st) st.textContent = "";
+}
+
+function updateRangeSummary() {
+  const el = document.getElementById("range-summary");
+  if (!el) return;
+  const { start, end } = getRangeParams();
+  let text;
+  if (selectedTimeRange === "week") text = "本周";
+  else if (selectedTimeRange === "24h") text = "近 24 小时";
+  else if (selectedTimeRange === "3d") text = "近 3 天";
+  else if (selectedTimeRange === "month") text = "本月";
+  else if (selectedTimeRange === "all") text = "全部时间";
+  else text = `${customStart?.slice(0, 10)} ~ ${customEnd?.slice(0, 10)}`;
+  if (start && end) text += `（${start.slice(0, 10)} ~ ${end.slice(0, 10)}）`;
+  el.textContent = text;
 }
 
 // ══════════ Trend Node Click → 筛选时段分布 ══════════
@@ -209,7 +285,13 @@ async function refreshAll() {
 }
 
 async function fetchOverview() {
-  try { overviewData = await bridge.apiGet("monitor/overview"); }
+  try {
+    const { start, end } = getRangeParams();
+    const params = {};
+    if (start) params.start = start;
+    if (end) params.end = end;
+    overviewData = await bridge.apiGet("monitor/overview", params);
+  }
   catch (e) { console.error("overview:", e.message); }
 }
 
@@ -219,6 +301,9 @@ async function fetchCommands() {
     if (selectedCategory) params.category = selectedCategory;
     const q = document.getElementById("cmd-search")?.value?.trim();
     if (q) params.search = q;
+    const { start, end } = getRangeParams();
+    if (start) params.start = start;
+    if (end) params.end = end;
     console.log("[Monitor] fetchCommands:", params);
     commandsData = await bridge.apiGet("monitor/commands", params);
     console.log("[Monitor] commandsData received:", commandsData?.length, "items, first:", commandsData?.[0]?.cmd_name);
@@ -227,7 +312,7 @@ async function fetchCommands() {
 
 async function fetchTrend() {
   try {
-    const days = TRANGE_DAYS[selectedTimeRange] || 7;
+    const { days } = getRangeParams();
     console.log("[Monitor] fetchTrend days:", days);
     trendData = await bridge.apiGet("monitor/trend", { days });
     console.log("[Monitor] trendData:", trendData?.length, "items");
@@ -592,6 +677,7 @@ function renderAll() {
   renderUpstream();
   renderShiqu();
   renderDeployAndRL();
+  updateRangeSummary();
 }
 
 // ── 运行总览 ──
@@ -633,15 +719,19 @@ function renderCommands() {
   const list = document.getElementById("cmd-list");
   if (!commandsData || !commandsData.length) {
     list.innerHTML = `<p class="muted">暂无指令使用数据</p>`;
+    closeCmdFailures();
     return;
   }
   const sorted = [...commandsData].sort((a, b) => b.total - a.total);
   const maxTotal = sorted[0]?.total || 1;
   list.innerHTML = sorted.map(c => {
-    const rate = c.total > 0 ? c.success / c.total : 0;
-    const rateCls = rate >= 0.95 ? "good" : rate >= 0.80 ? "warn" : "bad";
-    const rateText = (rate * 100).toFixed(1) + "%";
-    return `<div class="cmd-row-slim">
+    // 有效成功率（soft errors 不计入分母）；为 null 时（全是 soft）显示 —
+    const rate = (c.success_rate != null) ? c.success_rate : null;
+    const rateCls = rate == null ? "muted" : rate >= 0.95 ? "good" : rate >= 0.80 ? "warn" : "bad";
+    const rateText = rate == null ? "—" : (rate * 100).toFixed(1) + "%";
+    const softHint = (c.soft > 0) ? `（含 ${c.soft} 次不计入成功率）` : "";
+    const sel = (c.cmd_name === selectedCmd) ? " selected" : "";
+    return `<div class="cmd-row-slim${sel}" data-cmd="${esc(c.cmd_name)}" style="cursor:pointer" title="点击查看失败原因${softHint}">
       <span class="cmd-name" title="${esc(c.cmd_name)}">${esc(c.cmd_name)}</span>
       <div class="cmd-bar-mini"><div class="cmd-bar-mini-fill" style="width:${(c.total / maxTotal * 100).toFixed(0)}%"></div></div>
       <span class="cmd-count">${c.total.toLocaleString()}</span>
@@ -654,12 +744,81 @@ function renderCommands() {
   else list.classList.remove("expanded");
   document.getElementById("btn-expand-cmds").textContent = cmdListExpanded ? "收起" : "展开全部";
 
+  // 绑定点击 → 失败原因下钻
+  list.querySelectorAll(".cmd-row-slim").forEach(row => {
+    row.addEventListener("click", () => selectCommand(row.dataset.cmd));
+  });
+
   // 更新分类指示器
   const st = document.getElementById("init-status");
   if (st) st.textContent = selectedCategory ? `已筛选: ${selectedCategory} (${sorted.length}条)` : `全部指令 (${sorted.length}条)`;
 }
 
+// ── 指令失败原因下钻 ──
+
+let selectedCmd = "";
+
+function selectCommand(cmd) {
+  if (selectedCmd === cmd) { closeCmdFailures(); return; } // 再次点击收起
+  selectedCmd = cmd;
+  document.querySelectorAll(".cmd-row-slim").forEach(r =>
+    r.classList.toggle("selected", r.dataset.cmd === cmd)
+  );
+  fetchCmdFailures(cmd);
+}
+
+async function fetchCmdFailures(cmd) {
+  const panel = document.getElementById("cmd-failures-panel");
+  panel.style.display = "block";
+  panel.innerHTML = `<div class="cf-header">指令「${esc(cmd)}」失败原因</div><div class="cf-empty">加载中...</div>`;
+  const { start, end } = getRangeParams();
+  const params = { cmd };
+  if (start) params.start = start;
+  if (end) params.end = end;
+  try {
+    const resp = await bridge.apiGet("monitor/commands/failures", params);
+    renderCmdFailures(cmd, resp.reasons || []);
+  } catch (e) {
+    console.error("cmd failures:", e.message);
+    panel.innerHTML = `<div class="cf-header">指令「${esc(cmd)}」失败原因</div><div class="cf-empty">加载失败：${esc(e.message || e)}</div>`;
+  }
+}
+
+function renderCmdFailures(cmd, reasons) {
+  const panel = document.getElementById("cmd-failures-panel");
+  if (!reasons.length) {
+    panel.innerHTML = `<div class="cf-header">指令「${esc(cmd)}」失败原因</div><div class="cf-empty">该指令在当前时间范围内没有记录到失败原因</div>`;
+    return;
+  }
+  const max = Math.max(1, ...reasons.map(r => r.count));
+  const rows = reasons.map(r => {
+    const pct = (r.count / max * 100).toFixed(0);
+    const softBadge = r.is_soft
+      ? `<span class="badge badge-soft" title="属于正常业务结果，不计入成功率">不计入成功率</span>`
+      : "";
+    return `<div class="cf-reason">
+      <span class="cf-code">${esc(r.label)}</span>
+      <div class="cf-bar-wrap"><div class="cf-bar-fill ${r.is_soft ? "soft" : ""}" style="width:${pct}%"></div></div>
+      <span class="cf-count">${r.count} 次</span>
+      ${softBadge}
+    </div>`;
+  }).join("");
+  panel.innerHTML = `<div class="cf-header">
+      指令「${esc(cmd)}」失败原因分布
+      <button class="btn btn-compact" id="cf-close">关闭</button>
+    </div>${rows}`;
+  document.getElementById("cf-close").addEventListener("click", closeCmdFailures);
+}
+
+function closeCmdFailures() {
+  selectedCmd = "";
+  const panel = document.getElementById("cmd-failures-panel");
+  if (panel) panel.style.display = "none";
+  document.querySelectorAll(".cmd-row-slim").forEach(r => r.classList.remove("selected"));
+}
+
 function onSearchInput() {
+  closeCmdFailures();
   // 搜索时自动展开
   if (!cmdListExpanded) toggleCmdList();
   fetchCommands().then(renderCommands);
@@ -947,6 +1106,7 @@ function buildCategoryTabs() {
 function selectCategory(cat) {
   console.log("[Monitor] selectCategory:", cat);
   selectedCategory = cat;
+  closeCmdFailures();
   document.querySelectorAll("#category-tabs .tab").forEach(t =>
     t.classList.toggle("active", t.dataset.cat === cat)
   );

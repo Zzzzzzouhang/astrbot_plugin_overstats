@@ -83,6 +83,47 @@ def _resolve_category(cmd_name: str) -> str:
     return CMD_CATEGORY_MAP.get(canonical, "其他")
 
 
+# ── Soft errors（正常业务结果，不计入成功率，但要在失败原因中展示）──
+# 这些错误码来自 Overstats 后端：玩家无近期对局 / 战网 ID 无法解析为 token，
+# 属于「用户侧数据缺失」而非「系统故障」，因此成功率计算时将其排除在分母之外。
+SOFT_ERRORS = {"summary_empty", "bnet_not_found"}
+
+# 失败原因的中文友好标签（用于前端展示）
+ERROR_CODE_LABELS = {
+    "summary_empty": "无对局记录",
+    "bnet_not_found": "战网 ID 未找到",
+    "network_error": "网络异常",
+    "non_json_error": "后端返回非 JSON",
+    "internal_error": "后端内部错误",
+    "retry_exhausted": "重试耗尽",
+    "timeout": "请求超时",
+    "too_many_requests": "请求频率限制",
+}
+
+
+def error_code_label(code: str) -> str:
+    return ERROR_CODE_LABELS.get(code, code or "未知错误")
+
+
+def _range_clause(start: str | None, end: str | None) -> tuple[str, list]:
+    """构造时间范围 WHERE 片段（针对 recorded_at 的 ISO 字符串比较）。
+
+    返回 (snippet, params)：snippet 形如 " AND recorded_at >= ? AND recorded_at <= ?"，
+    params 为对应的 [start, end]。start/end 为 None 时表示不限制（全量）。
+    """
+    clauses: list[str] = []
+    params: list[str] = []
+    if start:
+        clauses.append("recorded_at >= ?")
+        params.append(start)
+    if end:
+        clauses.append("recorded_at <= ?")
+        params.append(end)
+    if clauses:
+        return " AND " + " AND ".join(clauses), params
+    return "", []
+
+
 # ── SQL DDL ──
 
 _SCHEMA = """
@@ -94,6 +135,7 @@ CREATE TABLE IF NOT EXISTS cmd_records (
     duration_ms   INTEGER NOT NULL DEFAULT 0,
     user_id       TEXT    NOT NULL DEFAULT '',
     error_msg     TEXT    NOT NULL DEFAULT '',
+    error_code    TEXT    NOT NULL DEFAULT '',
     recorded_at   TEXT    NOT NULL
 );
 
@@ -159,6 +201,11 @@ class MonitorCollector:
         """同步建表 + 索引（__init__ 中直接调用，不走 executor）。"""
         conn = sqlite3.connect(str(self._db_path))
         conn.executescript(_SCHEMA)
+        # 兼容旧库：补充 error_code 列（已存在则忽略）
+        try:
+            conn.execute("ALTER TABLE cmd_records ADD COLUMN error_code TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
         conn.close()
 
@@ -193,14 +240,20 @@ class MonitorCollector:
         duration_ms: int = 0,
         user_id: str = "",
         error_msg: str = "",
+        error_code: str = "",
     ) -> None:
-        """记录一条指令调用。"""
+        """记录一条指令调用。
+
+        error_code: 失败原因码（如 summary_empty / bnet_not_found / network_error）。
+                    成功调用或未知失败传空字符串。soft errors 仍会写入 error_code，
+                    但成功率计算时会将其从分母中剔除（见 get_overview / get_cmd_stats）。
+        """
         category = _resolve_category(cmd_name)
         now = datetime.utcnow().isoformat()
         await self._run_sync(
-            """INSERT INTO cmd_records (cmd_name, category, success, duration_ms, user_id, error_msg, recorded_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (cmd_name, category, int(success), duration_ms, str(user_id or ""), str(error_msg or ""), now),
+            """INSERT INTO cmd_records (cmd_name, category, success, duration_ms, user_id, error_msg, error_code, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (cmd_name, category, int(success), duration_ms, str(user_id or ""), str(error_msg or ""), str(error_code or ""), now),
         )
 
     async def record_api(self, endpoint: str, success: bool, duration_ms: int = 0) -> None:
@@ -232,14 +285,38 @@ class MonitorCollector:
 
     # ── 查询接口 ──
 
-    async def get_overview(self) -> dict:
-        """总览数据。"""
+    async def get_overview(self, start: str = None, end: str = None) -> dict:
+        """总览数据（可按时间范围过滤）。
+
+        成功率（cmd_success_rate）采用「有效成功率」：分母排除 soft errors
+        （summary_empty / bnet_not_found），即 成功 / (总数 - soft)。
+        """
         def _q():
             conn = sqlite3.connect(str(self._db_path))
-            r = conn.execute("SELECT COUNT(*), SUM(success), COUNT(*) - SUM(success) FROM cmd_records").fetchone()
-            cmd_total, cmd_success, cmd_fail = (r[0] or 0), (r[1] or 0), (r[2] or 0)
-            r2 = conn.execute("SELECT COUNT(*), SUM(success), COUNT(*) - SUM(success) FROM api_records").fetchone()
+            rng, rng_params = _range_clause(start, end)
+            soft_list = list(SOFT_ERRORS)
+            soft_ph = ",".join("?" * len(soft_list))
+            row = conn.execute(
+                f"""SELECT COUNT(*),
+                           SUM(success),
+                           SUM(CASE WHEN success=0 THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN error_code IN ({soft_ph}) THEN 1 ELSE 0 END)
+                    FROM cmd_records WHERE 1=1{rng}""",
+                soft_list + rng_params,
+            ).fetchone()
+            cmd_total = row[0] or 0
+            cmd_success = row[1] or 0
+            cmd_hard_fail = row[2] or 0
+            cmd_soft = row[3] or 0
+            effective_denom = cmd_total - cmd_soft
+            cmd_effective_rate = round(cmd_success / effective_denom, 4) if effective_denom > 0 else None
+
+            r2 = conn.execute(
+                f"SELECT COUNT(*), SUM(success) FROM api_records WHERE 1=1{rng}", rng_params
+            ).fetchone()
             api_total = r2[0] or 0
+            api_success = r2[1] or 0
+
             r3 = conn.execute("SELECT COUNT(*) FROM rate_limit_log").fetchone()
             rl_total = r3[0] or 0
             r4 = conn.execute("SELECT COUNT(*) FROM rate_limit_log WHERE recorded_at >= ?",
@@ -250,30 +327,40 @@ class MonitorCollector:
                 "uptime_seconds": self.uptime_seconds,
                 "cmd_total": cmd_total,
                 "cmd_success": cmd_success,
-                "cmd_fail": cmd_fail,
-                "cmd_success_rate": round(cmd_success / max(cmd_total, 1), 4),
+                "cmd_fail": cmd_hard_fail,           # 硬失败（不含 soft errors）
+                "cmd_soft": cmd_soft,                # soft errors 数量
+                "cmd_success_rate": cmd_effective_rate if cmd_effective_rate is not None else 0.0,
+                "cmd_raw_success_rate": round(cmd_success / max(cmd_total, 1), 4),
                 "api_total": api_total,
+                "api_success": api_success,
                 "rl_total": rl_total,
                 "rl_today": rl_today,
             }
         return await self._run_sync(_q)
 
-    async def get_cmd_stats(self, category: str = "", search: str = "") -> list[dict]:
-        """按指令名聚合统计（支持分类筛选 + 搜索）。"""
+    async def get_cmd_stats(self, category: str = "", search: str = "", start: str = None, end: str = None) -> list[dict]:
+        """按指令名聚合统计（支持分类筛选 + 搜索 + 时间范围）。
+
+        返回字段含 soft（soft errors 数量）与 fail（硬失败 = 总数 - 成功 - soft）。
+        前端据此计算「有效成功率」= success / (total - soft)。
+        """
         def _q():
             conn = sqlite3.connect(str(self._db_path))
             conn.row_factory = sqlite3.Row
-            sql = """
+            rng, rng_params = _range_clause(start, end)
+            soft_list = list(SOFT_ERRORS)
+            soft_ph = ",".join("?" * len(soft_list))
+            sql = f"""
                 SELECT cmd_name, category,
                        COUNT(*) AS total,
                        SUM(success) AS success,
-                       SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) AS fail,
+                       SUM(CASE WHEN error_code IN ({soft_ph}) THEN 1 ELSE 0 END) AS soft,
                        ROUND(AVG(duration_ms), 0) AS avg_duration_ms,
                        MAX(recorded_at) AS last_used
                 FROM cmd_records
-                WHERE 1=1
+                WHERE 1=1{rng}
             """
-            params: list = []
+            params: list = list(soft_list) + list(rng_params)
             if category:
                 sql += " AND category = ?"
                 params.append(category)
@@ -283,7 +370,55 @@ class MonitorCollector:
             sql += " GROUP BY cmd_name ORDER BY total DESC"
             rows = conn.execute(sql, params).fetchall()
             conn.close()
-            return [dict(r) for r in rows]
+            result = []
+            for r in rows:
+                d = dict(r)
+                total = d.get("total") or 0
+                success = d.get("success") or 0
+                soft = d.get("soft") or 0
+                d["fail"] = total - success - soft   # 硬失败（不含 soft errors）
+                # 有效成功率（soft 不计入分母）；分母为 0 时记为 None，由前端展示为 —
+                denom = total - soft
+                d["success_rate"] = round(success / denom, 4) if denom > 0 else None
+                result.append(d)
+            return result
+        return await self._run_sync(_q)
+
+    async def get_cmd_failure_reasons(self, cmd_name: str, start: str = None, end: str = None) -> list[dict]:
+        """某指令的失败原因分布（按 error_code 聚合）。
+
+        包含 soft errors（summary_empty / bnet_not_found），并标注 is_soft=True，
+        表示其不计入成功率但需在失败原因中展示。仅返回有计数的原因码。
+        """
+        def _q():
+            conn = sqlite3.connect(str(self._db_path))
+            conn.row_factory = sqlite3.Row
+            rng, rng_params = _range_clause(start, end)
+            soft_list = list(SOFT_ERRORS)
+            soft_ph = ",".join("?" * len(soft_list))
+            sql = f"""
+                SELECT error_code,
+                       COUNT(*) AS cnt,
+                       SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) AS hard_fail
+                FROM cmd_records
+                WHERE cmd_name = ? AND error_code != ''{rng}
+                GROUP BY error_code
+                ORDER BY cnt DESC
+            """
+            params: list = [cmd_name] + list(rng_params)
+            rows = conn.execute(sql, params).fetchall()
+            conn.close()
+            result = []
+            for r in rows:
+                code = r["error_code"]
+                is_soft = code in SOFT_ERRORS
+                result.append({
+                    "code": code,
+                    "label": error_code_label(code),
+                    "count": r["cnt"],
+                    "is_soft": is_soft,
+                })
+            return result
         return await self._run_sync(_q)
 
     async def get_cmd_trend(self, cmd_name: str = "", days: int = 7) -> list[dict]:
