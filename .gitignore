@@ -210,3 +210,4 @@ __marimo__/
 /.codebuddy
 /tests
 pytest.ini
+/.workbuddy

@@ -3,7 +3,7 @@
 ## v2.7.2 (2026-07-07)
 
 ### 🔧 优化
-- **代码结构重构**：`main.py` 按职责拆分为 6 个 mixin 模块（`deploy/plugin_modules/`），`deploy/` 整理为 `ops/`（部署运维）与 `ow/`（OW 业务）子包。纯内部重构，功能与 v2.7.1 完全一致。
+- **指令集中**：所有 `@filter.command` 指令注册与事件监听器统一集中在 `main.py` 单体（`OverstatsPlugin(Star)`），撤回此前的 mixin 拆分。辅助类保留在 `deploy/ow/`（OW 业务）与 `deploy/ops/`（部署运维）子包。功能与 v2.7.1 完全一致。
 
 ## v2.7.1 (2026-07-06)
 
