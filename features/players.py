@@ -226,9 +226,7 @@ async def dashen_sameplay(plugin, event: AstrMessageEvent, p1: str = '', p2: str
     p1 = (p1 or '').strip()
     p2 = (p2 or '').strip()
     bound_id = await plugin._get_bnet_id(event) or ''
-    if p1 and p2:
-        pass
-    elif p1 and (not p2):
+    if p1 and (not p2):
         p2 = p1
         p1 = bound_id
     elif not p1 and p2:

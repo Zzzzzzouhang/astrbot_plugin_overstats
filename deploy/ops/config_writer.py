@@ -398,6 +398,13 @@ def write_config(backend_dir: str | Path, config: dict) -> tuple[bool, str]:
         except py_compile.PyCompileError as e:
             logger.error(f"[OverstatsDeploy] 生成的 config.py 语法错误: {e}")
             return False, f"生成的 config.py 语法错误: {e}"
+        # 一并下发 shiqu LLM 配置（独立模块，缺省时后端仍可正常 import）
+        try:
+            ok, msg = write_shiqu_config(backend_dir, config)
+            if not ok:
+                logger.warning(f"[OverstatsDeploy] shiqu 配置下发未成功: {msg}")
+        except Exception as e:
+            logger.warning(f"[OverstatsDeploy] shiqu 配置下发异常（已忽略）: {e}")
     except Exception as e:
         logger.error(f"[OverstatsDeploy] 写入 config.py 失败: {e}")
         return False, f"写入配置文件失败: {e}"
@@ -438,3 +445,130 @@ def validate_accounts(config: dict) -> tuple[bool, str]:
     if valid_count == 0:
         return False, "未配置任何有效的大神账号，请先在 AstrBot 插件配置面板填写至少一个账号的 role_id 和 token，或配置账号文件路径"
     return True, f"已配置 {valid_count} 个有效账号"
+
+
+# ════════════════ 是区吗（shiqu）独立 LLM 配置 ════════════════
+# 后端 config/shiqu_config.py 默认被 gitignore，auto 部署时由插件根据
+# shiqu_llm_* 配置生成自包含文件并下发，确保后端能正常 import 与读取 LLM 配置。
+# 模板中 {{key}} 为占位符，由 _safe_render 直接替换（不使用 str.format，
+# 以避免模板内 f-string 的 {base} 等被误当作格式化字段）。
+_SHIQU_CONFIG_TEMPLATE = '''from __future__ import annotations
+
+"""是区吗（shiqu）独立 LLM 配置（由 astrbot_plugin_overstats auto 部署自动生成）。
+
+本文件由插件根据 shiqu_llm_* 配置下发生成，所有值已内嵌为默认值。
+环境变量 OVERSTATS_SHIQU_LLM_* 仍可覆盖对应字段（优先级高于默认值）。
+"""
+
+import os
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass(frozen=True)
+class ShiquLLMConfig:
+    base_url: str = {{base_url}}
+    api_key: str = {{api_key}}
+    model: str = {{model}}
+    stream: bool = {{stream}}
+    timeout_seconds: int = {{timeout_seconds}}
+    retry: int = {{retry}}
+
+    @property
+    def chat_url(self) -> str:
+        base = str(self.base_url or "").rstrip("/")
+        if base.endswith("/chat/completions"):
+            return base
+        if base.endswith("/v1") or base.endswith("/openai"):
+            return f"{base}/chat/completions"
+        return f"{base}/chat/completions"
+
+
+def _get(name: str, default: str = "") -> str:
+    env_value = os.getenv(f"OVERSTATS_{name}")
+    if env_value:
+        return env_value.strip()
+    return str(default or "").strip()
+
+
+def _parse_bool(value: str, default: bool = True) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    return text in {"1", "true", "yes", "on"}
+
+
+def get_shiqu_llm_config() -> ShiquLLMConfig:
+    return ShiquLLMConfig(
+        base_url=_get("SHIQU_LLM_BASE_URL", {{base_url}}),
+        api_key=_get("SHIQU_LLM_API_KEY", {{api_key}}),
+        model=_get("SHIQU_LLM_MODEL", {{model}}),
+        stream=_parse_bool(_get("SHIQU_LLM_STREAM", {{stream}}), {{stream}}),
+        timeout_seconds=int(_get("SHIQU_LLM_TIMEOUT", {{timeout_seconds}}) or {{timeout_seconds}}),
+        retry=int(_get("SHIQU_LLM_RETRY", {{retry}}) or {{retry}}),
+    )
+
+
+def is_shiqu_llm_configured() -> bool:
+    cfg = get_shiqu_llm_config()
+    return bool(cfg.base_url and cfg.api_key and cfg.model)
+
+
+def get_shiqu_match_count(default: int = 12) -> int:
+    try:
+        return max(2, min(25, int(_get("SHIQU_MATCH_COUNT", str(default)) or default)))
+    except (TypeError, ValueError):
+        return default
+'''
+
+
+def _safe_render(template: str, **kw) -> str:
+    """将模板中的 {{key}} 占位符替换为对应值（避免与模板内 f-string 冲突）。"""
+    out = template
+    for k, v in kw.items():
+        out = out.replace("{{" + k + "}}", v)
+    return out
+
+
+def generate_shiqu_config(config: dict) -> str:
+    """根据 AstrBot 配置生成自包含的 config/shiqu_config.py 文件内容。
+
+    将 shiqu_llm_* 插件配置内嵌为 ShiquLLMConfig 的字段默认值，
+    后端 get_shiqu_llm_config() 无需环境变量即可工作；环境变量仍可覆盖。
+    """
+    base_url = repr(str(config.get("shiqu_llm_api_base", "") or ""))
+    api_key = repr(str(config.get("shiqu_llm_api_key", "") or ""))
+    model = repr(str(config.get("shiqu_llm_model", "") or ""))
+    stream = "True" if bool(config.get("shiqu_llm_stream", True)) else "False"
+    timeout_seconds = int(config.get("shiqu_llm_timeout_seconds", 600) or 600)
+    retry = int(config.get("shiqu_llm_retry", 0) or 0)
+    return _safe_render(
+        _SHIQU_CONFIG_TEMPLATE,
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        stream=stream,
+        timeout_seconds=str(timeout_seconds),
+        retry=str(retry),
+    )
+
+
+def write_shiqu_config(backend_dir: str | Path, config: dict) -> tuple[bool, str]:
+    """生成并写入 config/shiqu_config.py 到后端目录。"""
+    backend = Path(backend_dir)
+    config_dir = backend / "config"
+    config_file = config_dir / "shiqu_config.py"
+    try:
+        config_dir.mkdir(parents=True, exist_ok=True)
+        content = generate_shiqu_config(config)
+        config_file.write_text(content, encoding="utf-8")
+        import py_compile
+        try:
+            py_compile.compile(str(config_file), doraise=True)
+        except py_compile.PyCompileError as e:
+            logger.error(f"[OverstatsDeploy] 生成的 config/shiqu_config.py 语法错误: {e}")
+            return False, f"生成的 config/shiqu_config.py 语法错误: {e}"
+    except Exception as e:
+        logger.error(f"[OverstatsDeploy] 写入 config/shiqu_config.py 失败: {e}")
+        return False, f"写入 shiqu 配置文件失败: {e}"
+    return True, f"shiqu 配置文件已写入: {config_file}"

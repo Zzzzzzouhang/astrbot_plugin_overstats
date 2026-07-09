@@ -403,28 +403,28 @@ function renderShiqu() {
   const s = shiquData.summary || {};
   const avail = shiquData.available !== false;
   if (!avail) {
-    grid.innerHTML = `<div class="feature-card metric-card" style="grid-column:1/-1"><span class="metric-label">日志不可用</span><span class="metric-value" style="font-size:16px">shiqu_calls.log 未找到</span></div>`;
+    grid.innerHTML = `<div class="feature-card metric-card" style="grid-column:1/-1"><span class="metric-label">日志不可用</span><span class="metric-value" style="font-size:16px">shiqu_llm.sqlite3 未找到（后端未启用数据库写入？）</span></div>`;
   } else {
     const total = s.total ?? 0;
-    const rate = ((s.success_rate || 0) * 100).toFixed(1);
+    const success = s.success ?? 0;
+    const rate = total ? ((success / total) * 100).toFixed(1) : "0.0";
     const avgMs = s.avg_duration_ms ? (s.avg_duration_ms / 1000).toFixed(1) + "s" : "--";
-    const avgScore = s.avg_score ? s.avg_score.toFixed(0) : "--";
     grid.innerHTML = `
       <div class="feature-card metric-card">
         <span class="metric-label">总调用次数</span>
         <span class="metric-value">${total.toLocaleString()}</span>
       </div>
       <div class="feature-card metric-card">
-        <span class="metric-label">成功率</span>
-        <span class="metric-value" style="color:${rate > 90 ? 'var(--c-success)' : 'var(--c-warning)'}">${rate}%</span>
+        <span class="metric-label">成功次数</span>
+        <span class="metric-value" style="color:${rate > 90 ? 'var(--c-success)' : 'var(--c-warning)'}">${success.toLocaleString()}（${rate}%）</span>
       </div>
       <div class="feature-card metric-card">
         <span class="metric-label">平均耗时</span>
         <span class="metric-value">${avgMs}</span>
       </div>
       <div class="feature-card metric-card">
-        <span class="metric-label">平均评分</span>
-        <span class="metric-value">${avgScore}</span>
+        <span class="metric-label">失败次数</span>
+        <span class="metric-value">${(s.failed ?? 0).toLocaleString()}</span>
       </div>`;
   }
 
@@ -436,71 +436,27 @@ function renderShiqu() {
     closeShiquDetail();
   } else {
     tbody.innerHTML = records.map((r, i) => {
-      const ts = r.ts ? new Date(r.ts).toLocaleString() : "--";
+      const ts = r.created_at ? new Date(r.created_at * 1000).toLocaleString() : "--";
       const dur = r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "--";
       const durCls = r.duration_ms > 120000 ? "shiqu-slow" : "";
-      const okBadge = r.success
+      const okBadge = r.ok
         ? `<span class="badge badge-success">成功</span>`
         : `<span class="badge badge-error">失败</span>`;
-      const attemptBadge = r.attempt > 1 ? `<span style="font-size:10px;color:var(--c-warning);margin-left:4px">×${r.attempt}</span>` : "";
+      const callBadge = (r.call_count > 1) ? `<span style="font-size:10px;color:var(--c-warning);margin-left:4px">调用×${r.call_count}</span>` : "";
       const globalIdx = shiquCurrentPage * SHIQU_PAGE_SIZE + i;
-      const selected = shiquSelectedIdx === globalIdx ? " selected" : "";
 
-      return `<tr class="shiqu-row${selected}" data-index="${globalIdx}">
+      return `<tr class="shiqu-row" data-index="${globalIdx}">
         <td class="shiqu-ts">${ts}</td>
         <td class="shiqu-target" title="${esc(r.target_id||'')}">${esc((r.target_id||'--').length > 16 ? r.target_id.slice(0,16)+'…' : (r.target_id||'--'))}</td>
-        <td class="shiqu-dur ${durCls}">${dur}${attemptBadge}</td>
+        <td class="shiqu-dur ${durCls}">${dur}</td>
+        <td class="shiqu-call">${r.call_count ?? 1}${callBadge}</td>
         <td style="white-space:nowrap">${okBadge}</td>
-        <td><button class="btn btn-compact btn-shiqu-detail" data-idx="${globalIdx}">详情</button></td>
       </tr>`;
     }).join("");
   }
 
-  // 绑定行点击 + 详情按钮
-  document.querySelectorAll(".shiqu-row").forEach(row => {
-    row.addEventListener("click", function (e) {
-      if (e.target.tagName === "BUTTON") return; // 按钮有自己的事件
-      const idx = parseInt(this.dataset.index);
-      openShiquDetail(idx);
-    });
-  });
-  document.querySelectorAll(".btn-shiqu-detail").forEach(btn => {
-    btn.addEventListener("click", function (e) {
-      e.stopPropagation();
-      openShiquDetail(parseInt(this.dataset.idx));
-    });
-  });
-
   // 分页
   renderShiquPagination();
-
-  // 分页后重新恢复选中行的高亮
-  if (shiquSelectedIdx >= 0) {
-    const row = document.querySelector(`.shiqu-row[data-index="${shiquSelectedIdx}"]`);
-    if (row) row.classList.add("selected");
-  }
-}
-
-function openShiquDetail(idx) {
-  shiquSelectedIdx = idx;
-  // 高亮行
-  document.querySelectorAll(".shiqu-row").forEach(r => r.classList.remove("selected"));
-  const row = document.querySelector(`.shiqu-row[data-index="${idx}"]`);
-  if (row) row.classList.add("selected");
-
-  // 查找记录
-  const localIdx = idx - shiquCurrentPage * SHIQU_PAGE_SIZE;
-  const record = (shiquData.records || [])[localIdx];
-  if (!record) { closeShiquDetail(); return; }
-
-  const body = document.getElementById("shiqu-side-body");
-  if (!body) return;
-
-  const dur = record.duration_ms ? (record.duration_ms / 1000).toFixed(1) + "s" : "--";
-  body.innerHTML = `
-    <div class="sr-gentime">${record.ts ? new Date(record.ts).toLocaleString() : "--"} · ${esc(record.target_id||"--")} · 耗时 ${dur} · 字符 ${(record.llm_chars||0).toLocaleString()}</div>
-    ${renderShiquHTML(record)}
-  `;
 }
 
 function closeShiquDetail() {
@@ -538,109 +494,6 @@ function bindNavTabs() {
 function switchPage(page) {
   document.querySelectorAll(".nav-tab").forEach(t => t.classList.toggle("active", t.dataset.page === page));
   document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.id === "page-" + page));
-}
-
-// ══════════ 是区吗 LLM 响应 → HTML 渲染 ══════════
-
-const _SHIQU_SCORE_RULES = [
-  { min: 83, cls: "god",     label: "你是职业吗？",       emoji: "😱" },
-  { min: 75, cls: "boom",    label: "来了，暴力炸！",     emoji: "🤤" },
-  { min: 68, cls: "butterfly", label: "化蛹成蝶（？）",   emoji: "🦋" },
-  { min: 60, cls: "ok",      label: "恭喜，你不是区！",   emoji: "😂" },
-  { min: 52, cls: "mid",     label: "不幸，你可能是区？", emoji: "🤔" },
-  { min: 43, cls: "bad",     label: "哦灭跌多，你就是区！", emoji: "🎉" },
-  { min: 0,  cls: "terrible", label: "你个大区！！！",     emoji: "😡" },
-];
-
-function _shiquScoreRule(score) {
-  for (const r of _SHIQU_SCORE_RULES) { if (score >= r.min) return r; }
-  return _SHIQU_SCORE_RULES[_SHIQU_SCORE_RULES.length - 1];
-}
-
-function _sqEsc(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-const _SHIQU_RESULT_CLASSES = { "胜": "sr-result-win", "负": "sr-result-loss", "平": "sr-result-draw" };
-
-function renderShiquHTML(record) {
-  const resp = record.llm_response;
-  if (!resp) return `<div class="sr-empty">(无 LLM 响应内容)</div>`;
-  if (!record.success) {
-    return `<div class="sr-disclaimer">调用失败</div><pre class="sr-overall" style="white-space:pre-wrap">${_sqEsc(resp.slice(0, 2000))}</pre>`;
-  }
-
-  let data;
-  try { data = JSON.parse(resp); } catch (e) { return `<pre class="sr-overall" style="white-space:pre-wrap">${_sqEsc(resp)}</pre>`; }
-  if (!data || typeof data !== "object") return `<pre class="sr-overall" style="white-space:pre-wrap">${_sqEsc(resp)}</pre>`;
-
-  const score = (typeof data.score === "number") ? Math.round(data.score) : (record.score || 0);
-  const rule = _shiquScoreRule(score);
-  const scoreColor = { god: "#e67e22", boom: "#ff6b6b", butterfly: "#a78bfa", ok: "#4ecdc4", mid: "#f9ca24", bad: "#e17055", terrible: "#d63031" }[rule.cls] || "#ffd700";
-
-  const parts = [];
-
-  // 评分
-  parts.push(`<div class="sr-score" style="color:${scoreColor}">${score}/100</div>`);
-  parts.push(`<div class="sr-verdict ${rule.cls}">${rule.emoji} ${rule.label}</div>`);
-
-  // 数据概况
-  if (data.summary) {
-    parts.push(`<div class="sr-subsection">数据概况</div>`);
-    parts.push(`<p class="sr-summary">${_sqEsc(String(data.summary))}</p>`);
-  }
-
-  // 逐局点评
-  if (Array.isArray(data.match_comments) && data.match_comments.length) {
-    parts.push(`<div class="sr-section">逐局点评</div>`);
-    for (const m of data.match_comments) {
-      const idx = m.index || "?";
-      const result = String(m.result || "未知");
-      const hero = String(m.hero || "未知英雄");
-      const comment = String(m.comment || "");
-      const rCls = _SHIQU_RESULT_CLASSES[result] || "sr-result-unknown";
-      parts.push(
-        `<p class="sr-game"><b>第${idx}局: </b>` +
-        `<span class="${rCls}">${_sqEsc(result)}</span>` +
-        `<span class="sr-sep"> </span>` +
-        `<span class="sr-hero">${_sqEsc(hero)}</span>` +
-        `<span class="sr-sep">: </span>` +
-        `<span>${_sqEsc(comment)}</span></p>`
-      );
-    }
-  }
-
-  // 综合评价
-  if (data.overall_comment) {
-    parts.push(`<div class="sr-section">综合评价</div>`);
-    parts.push(`<p class="sr-overall">${_sqEsc(String(data.overall_comment))}</p>`);
-  }
-
-  // 队友点评
-  if (Array.isArray(data.teammate_comments) && data.teammate_comments.length) {
-    parts.push(`<div class="sr-section">队友点评</div>`);
-    for (const t of data.teammate_comments) {
-      const name = String(t.name || "未知队友");
-      const tScore = (typeof t.score === "number") ? Math.round(t.score) : 0;
-      const tRule = _shiquScoreRule(tScore);
-      const tMateColor = { god: "#f6a863", boom: "#f58989", butterfly: "#bfacfa", ok: "#7eddd6", mid: "#f5d35a", bad: "#f09c88", terrible: "#ee6566" }[tRule.cls] || "#b0a080";
-      const games = t.games ? `（共同${t.games}局）` : "";
-      const comment = String(t.comment || "");
-      parts.push(
-        `<div class="sr-mate-entry">` +
-        `<p class="sr-mate-head">` +
-        `<span class="sr-mate-name">${_sqEsc(name)}</span>` +
-        `<span class="sr-mate-games">${games}</span>` +
-        `<span class="sr-sep">: </span>评分 ` +
-        `<span class="sr-mate-score" style="color:${tMateColor}">${tScore}/100</span>` +
-        `</p>` +
-        `<p class="sr-mate-comment"><span class="sr-iv ${tRule.cls}">${tRule.emoji} ${tRule.label}</span> ${_sqEsc(comment)}</p>` +
-        `</div>`
-      );
-    }
-  }
-
-  return parts.join("\n");
 }
 
 // ══════════ SSE ══════════

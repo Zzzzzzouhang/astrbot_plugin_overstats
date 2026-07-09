@@ -440,26 +440,6 @@ class MonitorCollector:
             return [dict(r) for r in rows]
         return await self._run_sync(_q)
 
-    async def get_top_users(self, top_n: int = 10) -> list[dict]:
-        """Top N 活跃用户（按指令调用量）。"""
-        def _q():
-            conn = sqlite3.connect(str(self._db_path))
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """SELECT user_id, COUNT(*) AS total,
-                          SUM(success) AS success,
-                          ROUND(CAST(SUM(success) AS FLOAT) / MAX(COUNT(*), 1), 3) AS success_rate
-                   FROM cmd_records
-                   WHERE user_id != ''
-                   GROUP BY user_id
-                   ORDER BY total DESC
-                   LIMIT ?""",
-                (top_n,),
-            ).fetchall()
-            conn.close()
-            return [dict(r) for r in rows]
-        return await self._run_sync(_q)
-
     async def get_hourly_distribution(self, date: str = "") -> list[dict]:
         """按小时聚合的指令调用分布（基于本地时间）。可指定 date（YYYY-MM-DD）筛选某天。"""
         def _q():

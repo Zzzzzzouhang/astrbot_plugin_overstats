@@ -9,7 +9,6 @@ logger = logging.getLogger("astrbot")
 async def group_config_cmd(plugin, event: AstrMessageEvent, action: str = '', value: str = ''):
     if plugin.monitor:
         asyncio.ensure_future(plugin.monitor.record_command('群设置', True))
-    '查看/切换群组功能配置: /群设置 或 /群设置 提示 开|关 或 /群设置 追加提示 开|关'
     if not plugin._is_group_message(event):
         yield event.plain_result('⚠️ 此命令仅支持在群聊中使用')
         return

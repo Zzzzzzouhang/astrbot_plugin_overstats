@@ -9,7 +9,6 @@ import json
 import time
 import inspect
 import urllib.parse
-from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
@@ -39,11 +38,11 @@ try:
 except ImportError:
     from deploy import MonitorCollector, MonitorLogHandler, MonitorSSEQueue, BackendMetricsReader  # type: ignore[no-redef]
 
-# 是区吗调用日志读取
+# 是区吗调用日志读取（后端 shiqu_llm.sqlite3）
 try:
-    from .deploy.ow.shiqu_log import ShiquCallReader
+    from .deploy.ow.shiqu_sqlite import ShiquSqliteReader
 except ImportError:
-    from deploy.ow.shiqu_log import ShiquCallReader  # type: ignore[no-redef]
+    from deploy.ow.shiqu_sqlite import ShiquSqliteReader  # type: ignore[no-redef]
 
 # Web API helpers
 from astrbot.api.web import request, json_response, error_response, stream_response
@@ -150,7 +149,7 @@ class OverstatsPlugin(Star):
         self.daily_prompt_state = self._load_daily_prompt_state()
         self.daily_prompt_reset_task = asyncio.create_task(self._daily_prompt_reset_loop())
         self._http_session: aiohttp.ClientSession | None = None
-        self.overstats_semaphore = asyncio.Semaphore(3)
+        self.overstats_semaphore = asyncio.Semaphore(5)
         self._overstats_inner_semaphore = asyncio.Semaphore(2)
         if self._save_image_locally:
             self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop())
@@ -162,7 +161,7 @@ class OverstatsPlugin(Star):
         self.full_adapt_config: dict | None = None
         self._bot_nickname_cache: str | None = None
         self._full_adapt_map: dict | None = None
-        self._admin_cmd_set: set[str] = {'多图测试', '单图测试', 'ow开庭', '开庭', 'ow是区吗', '是区吗', 'ow是区吗结果', '是区吗结果', 'owAI检测', 'AI检测', '维护', 'ow违禁封禁', 'ow违禁解封', 'ow连接测试', 'ow部署', 'ow部署状态', 'ow更新后端', 'ow停止后端', 'ow重启后端', 'ow部署日志', 'ow后端日志', 'ow卸载后端', 'ow卸载后端执行确认', 'ow卸载后端执行仅代码', 'ow卸载后端执行仅venv', 'ow卸载后端执行强制', '群设置', '全量适配开', '全量适配开完全匹配', '全量适配关', '管理'}
+        self._admin_cmd_set: set[str] = {'多图测试', '单图测试', 'ow开庭', '开庭', 'ow是区吗', '是区吗', 'ow是区吗结果', '是区吗结果', 'ow开庭结果', '开庭结果', 'owAI检测', 'AI检测', '维护', 'ow违禁封禁', 'ow违禁解封', 'ow连接测试', 'ow部署', 'ow部署状态', 'ow更新后端', 'ow停止后端', 'ow重启后端', 'ow部署日志', 'ow后端日志', 'ow卸载后端', 'ow卸载后端执行确认', 'ow卸载后端执行仅代码', 'ow卸载后端执行仅venv', 'ow卸载后端执行强制', '群设置', '全量适配开', '全量适配开完全匹配', '全量适配关', '管理'}
         self.court_manager = CourtManager(self)
         self.shiqu_manager = ShiquManager(self)
         self._register_monitor_apis()
@@ -534,29 +533,6 @@ class OverstatsPlugin(Star):
             cfg = {}
         self._rate_limit_enabled = bool(cfg.get('enabled', False))
         self._rate_limit_max = max(1, int(cfg.get('max_concurrent', 3) or 3))
-        raw_llm = str(self.config.get('llm_rate_limit', '{}') or '{}').strip()
-        try:
-            llm_cfg = json.loads(raw_llm) if raw_llm else {}
-        except Exception:
-            llm_cfg = {}
-        self._llm_rate_limit_enabled = bool(llm_cfg.get('enabled', False))
-        self._llm_rate_limit_per_minute = max(1, int(llm_cfg.get('per_minute', 10) or 10))
-        self._llm_rate_limit_timestamps: deque = deque()
-
-    def _try_llm_rate_limit(self) -> bool:
-        """LLM 调用频率限制检查并记录。返回 True=放行, False=超限。"""
-        if not self._llm_rate_limit_enabled:
-            return True
-        now = time.time()
-        cutoff = now - 60
-        while self._llm_rate_limit_timestamps and self._llm_rate_limit_timestamps[0] < cutoff:
-            self._llm_rate_limit_timestamps.popleft()
-        if len(self._llm_rate_limit_timestamps) >= self._llm_rate_limit_per_minute:
-            if self.monitor:
-                asyncio.ensure_future(self.monitor.record_rate_limit('llm'))
-            return False
-        self._llm_rate_limit_timestamps.append(now)
-        return True
 
     def _is_privileged(self, event: AstrMessageEvent) -> bool:
         """白名单群/用户 或 AstrBot 管理员不受限流控制。限流关闭时所有人视为特权。"""
@@ -1685,6 +1661,12 @@ class OverstatsPlugin(Star):
         async for r in features_court.ow_shiqu_result(self, event):
             yield r
 
+    @filter.command('ow开庭结果', alias={'开庭结果'})
+    async def ow_court_result(self, event: AstrMessageEvent):
+        """OW 开庭结果：返回上次开庭审理的判决书图片。"""
+        async for r in features_court.ow_court_result(self, event):
+            yield r
+
     @filter.command('owAI检测', alias={'AI检测'})
     async def ow_ai_test(self, event: AstrMessageEvent):
         """测试是区吗 LLM API 连通性。"""
@@ -1907,7 +1889,7 @@ class OverstatsPlugin(Star):
         data['deploy'] = {'mode': dm.mode, 'state': status.state if status else 'unknown', 'process_alive': status.process_alive if status else False, 'backend_port': status.backend_port if status else 0, 'pid': status.process_pid if status else None, 'git_commit': status.git_commit if status else 'unknown', 'last_deploy_time': status.last_deploy_time if status else 0, 'last_error': status.last_error if status else ''} if status else {'mode': dm.mode, 'state': 'unknown'}
         rl_stats = await self.monitor.get_rate_limit_stats()
         data['rate_limit'] = rl_stats
-        data['rate_limit_config'] = {'cmd_enabled': getattr(self, '_rate_limit_enabled', False), 'cmd_max': getattr(self, '_rate_limit_max', 3), 'llm_enabled': getattr(self, '_llm_rate_limit_enabled', False), 'llm_per_minute': getattr(self, '_llm_rate_limit_per_minute', 10)}
+        data['rate_limit_config'] = {'cmd_enabled': getattr(self, '_rate_limit_enabled', False), 'cmd_max': getattr(self, '_rate_limit_max', 3)}
         return json_response(data)
 
     async def _api_monitor_commands(self):
@@ -2007,7 +1989,7 @@ class OverstatsPlugin(Star):
         if not self.monitor:
             return json_response({'error': '监控未初始化'})
         stats = await self.monitor.get_rate_limit_stats()
-        return json_response({'stats': stats, 'config': {'cmd_enabled': getattr(self, '_rate_limit_enabled', False), 'cmd_max': getattr(self, '_rate_limit_max', 3), 'llm_enabled': getattr(self, '_llm_rate_limit_enabled', False), 'llm_per_minute': getattr(self, '_llm_rate_limit_per_minute', 10)}})
+        return json_response({'stats': stats, 'config': {'cmd_enabled': getattr(self, '_rate_limit_enabled', False), 'cmd_max': getattr(self, '_rate_limit_max', 3)}})
 
     async def _api_monitor_clear(self):
         if not self.monitor:
@@ -2018,21 +2000,24 @@ class OverstatsPlugin(Star):
         return json_response({'deleted': deleted, 'message': f'已清空 {deleted} 条记录'})
 
     async def _api_monitor_shiqu_calls(self):
-        """GET /monitor/shiqu/calls?limit=30&offset=0&openid=&target_id=&success=&verdict=&search="""
-        log_dir = self.plugin_data_dir / 'shiqu'
+        """GET /monitor/shiqu/calls?limit=30&offset=0&target_id=&success=&search=
+
+        读取后端 shiqu_llm.sqlite3（位于 sqlite_db_path 父目录），不再使用本地 JSONL。
+        """
         limit = request.query.get('limit', 30, type=int)
         offset = request.query.get('offset', 0, type=int)
-        openid = request.query.get('openid', '', type=str)
         target_id = request.query.get('target_id', '', type=str)
         success_str = request.query.get('success', '')
-        verdict = request.query.get('verdict', '', type=str)
         search = request.query.get('search', '', type=str)
         success = None
         if success_str.lower() in ('true', '1', 'yes'):
             success = True
         elif success_str.lower() in ('false', '0', 'no'):
             success = False
-        reader = ShiquCallReader()
+        # 后端 shiqu_llm.sqlite3 仅支持按 target_id 精确匹配；search 作为 target_id 模糊前缀使用
+        reader = ShiquSqliteReader(self.config.get('sqlite_db_path', '') or '')
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, reader.query, log_dir, limit, offset, openid, target_id, success, verdict, search)
+        if search and not target_id:
+            target_id = search
+        result = await loop.run_in_executor(None, reader.query, limit, offset, target_id, success)
         return json_response(result)

@@ -42,30 +42,6 @@
     "obvious_hint": true,
     "default": false
   },
-  "shiqu_llm_api_base": {
-    "description": "是区吗 LLM API Base URL",
-    "type": "string",
-    "hint": "OpenAI 兼容接口地址，例如 https://api.deepseek.com/v1。留空则回退使用 AstrBot 内置 LLM。",
-    "default": ""
-  },
-  "shiqu_llm_api_key": {
-    "description": "是区吗 LLM API Key",
-    "type": "string",
-    "hint": "对应 API Base URL 的密钥。",
-    "default": ""
-  },
-  "shiqu_llm_model": {
-    "description": "是区吗 LLM 模型名",
-    "type": "string",
-    "hint": "例如 deepseek-ai/DeepSeek-V3.2。",
-    "default": ""
-  },
-  "shiqu_llm_stream": {
-    "description": "是区吗 LLM 流式传输",
-    "type": "bool",
-    "hint": "开启后使用 SSE 流式接收 LLM 响应，降低超时风险。",
-    "default": true
-  },
   "shiqu_cd_map": {
     "description": "是区吗分级配置（JSON）",
     "type": "text",
@@ -93,12 +69,6 @@
     "type": "text",
     "hint": "非白名单/管理员的用户同时执行的指令上限。JSON 格式：{\"enabled\":开true关false,\"max_concurrent\":上限数}。默认 {\"enabled\":false,\"max_concurrent\":3}。",
     "default": "{\"enabled\":false,\"max_concurrent\":3}"
-  },
-  "llm_rate_limit": {
-    "description": "LLM 调用频率限制",
-    "type": "text",
-    "hint": "每分钟 LLM 调用上限（无论成功失败均计数）。JSON 格式：{\"enabled\":开true关false,\"per_minute\":每分钟上限}。默认 {\"enabled\":false,\"per_minute\":10}。",
-    "default": "{\"enabled\":false,\"per_minute\":10}"
   },
   "github_proxy_enabled": {
     "description": "是否启用 GitHub 加速",
@@ -278,6 +248,42 @@
     "type": "string",
     "hint": "auto 模式下可选。本地 OW 猜测资源包（图片/音频）的根目录路径，默认 ow_guess_assets。无需此功能则保持默认。",
     "default": "ow_guess_assets"
+  },
+  "shiqu_llm_api_base": {
+    "description": "【AUTO】是区吗 LLM API Base URL",
+    "type": "string",
+    "hint": "OpenAI 兼容接口地址，例如 https://api.deepseek.com/v1。留空则回退使用 AstrBot 内置 LLM。仅在 auto 部署模式下会写入后端 config/shiqu_config.py，手动部署后端需自行配置。",
+    "default": ""
+  },
+  "shiqu_llm_api_key": {
+    "description": "【AUTO】是区吗 LLM API Key",
+    "type": "string",
+    "hint": "对应 API Base URL 的密钥。仅在 auto 部署模式下会写入后端 config/shiqu_config.py，手动部署后端需自行配置。",
+    "default": ""
+  },
+  "shiqu_llm_model": {
+    "description": "【AUTO】是区吗 LLM 模型名",
+    "type": "string",
+    "hint": "例如 deepseek-ai/DeepSeek-V3.2。仅在 auto 部署模式下会写入后端 config/shiqu_config.py，手动部署后端需自行配置。",
+    "default": ""
+  },
+  "shiqu_llm_stream": {
+    "description": "【AUTO】是区吗 LLM 流式传输",
+    "type": "bool",
+    "hint": "开启后使用 SSE 流式接收 LLM 响应，降低超时风险。仅在 auto 部署模式下会写入后端 config/shiqu_config.py。",
+    "default": true
+  },
+    "shiqu_llm_timeout_seconds": {
+    "description": "【AUTO】是区吗 LLM 单次请求超时（秒）",
+    "type": "int",
+    "hint": "判定书 Prompt 较长，默认 300（5 分钟）。该配置将在 auto 部署时下发到后端 config/shiqu_config.py。",
+    "default": 300
+  },
+  "shiqu_llm_retry": {
+    "description": "【AUTO】是区吗 LLM 失败重试次数",
+    "type": "int",
+    "hint": "0 = 仅调用 1 次（不重试）；N = 初始 1 次 + 失败重试 N 次。默认 0。该配置将在 auto 部署时下发到后端 config/shiqu_config.py。",
+    "default": 0
   },
   "analysis_base_url": {
     "description": "【AUTO】AI 分析 Base URL",

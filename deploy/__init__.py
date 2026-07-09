@@ -6,12 +6,12 @@
 from .ops.manager import DeployManager, DeployResult, DeployStatus
 from .ow.monitor import MonitorCollector, MonitorLogHandler, MonitorSSEQueue
 from .ow.backend_metrics import BackendMetricsReader
-from .ow.shiqu_log import ShiquCallReader
+from .ow.shiqu_sqlite import ShiquSqliteReader
 from .ops.uninstaller import BackendUninstaller, UninstallResult
 
 __all__ = [
     "DeployManager", "DeployResult", "DeployStatus",
     "MonitorCollector", "MonitorLogHandler", "MonitorSSEQueue",
-    "BackendMetricsReader", "ShiquCallReader",
+    "BackendMetricsReader", "ShiquSqliteReader",
     "BackendUninstaller", "UninstallResult",
 ]

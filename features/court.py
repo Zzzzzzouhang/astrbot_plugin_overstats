@@ -27,6 +27,11 @@ async def ow_shiqu(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = 
     """OW 是区吗：展示上次判定结果。5 分钟内再次发送确认后开启新查询（分级 CD）。可加局数 1~25。"""
     if plugin.monitor:
         asyncio.ensure_future(plugin.monitor.record_command('ow是区吗', True))
+    CMD = '是区吗'
+    banned, ban_remain = await plugin._check_violation_ban(event, CMD)
+    if banned:
+        yield event.plain_result(plugin._VIOLATION_BAN_MSG.format(command=CMD, remain=plugin._violation_ban_remain_str(ban_remain)))
+        return
     positional, kw = plugin._extract_keywords([arg1, arg2, arg3])
     bnet_id = ''
     match_count = 0
@@ -60,6 +65,14 @@ async def ow_shiqu_result(plugin, event: AstrMessageEvent):
     if plugin.monitor:
         asyncio.ensure_future(plugin.monitor.record_command('ow是区吗结果', True))
     async for r in plugin.shiqu_manager.last_result(event):
+        yield r
+
+
+async def ow_court_result(plugin, event: AstrMessageEvent):
+    """OW 开庭结果：返回上次开庭审理的判决书图片。"""
+    if plugin.monitor:
+        asyncio.ensure_future(plugin.monitor.record_command('ow开庭结果', True))
+    async for r in plugin.court_manager.last_result(event):
         yield r
 
 
