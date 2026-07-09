@@ -79,7 +79,7 @@ async def ban_pick_stats(plugin, event: AstrMessageEvent, arg1: str = '', arg2: 
     game_mode = kw.get('game_mode', 'competitive')
     mmr = kw.get('mmr', 'all')
     mode_label = '快速' if game_mode == 'quick' else '竞技'
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🚫 正在获取 {mode_label}（{mmr}）本周天梯英雄大盘选禁用排行，可用参数：[模式] [段位]')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🚫 正在获取 {mode_label}（{mmr}）本周天梯英雄大盘选禁用排行，可用参数 模式 段位')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -124,7 +124,7 @@ async def map_pick_stats(plugin, event: AstrMessageEvent):
 
 async def skin_search(plugin, event: AstrMessageEvent, keyword: str = ''):
     """检索包含指定关键词的精选上架皮肤商品卡片。"""
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f"🔍 正在检索包含关键词【{keyword or '最新'}】的精选上架皮肤商品卡片，可用参数：[关键词]")
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f"🔍 正在检索包含关键词【{keyword or '最新'}】的精选上架皮肤商品卡片，可用参数 关键词")
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -148,9 +148,9 @@ async def ow_patch_notes(plugin, event: AstrMessageEvent, kind: str = 'latest'):
     """拉取外服更新日志卡片（参数：latest / small / big）。"""
     valid_kinds = ['latest', 'small', 'big']
     if kind not in valid_kinds:
-        yield plugin._plain_error_result(event, '❌ 参数错误。支持的日志类型：latest, small, big\n例如：/ow更新 small')
+        yield plugin._plain_error_result(event, '❌ 参数错误。支持的日志类型：latest, small, big\n例如：ow更新 small')
         return
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📰 正在拉取外服 {kind} 更新日志卡片，可用参数：[类型]')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📰 正在拉取外服 {kind} 更新日志卡片，可用参数 类型')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -173,7 +173,7 @@ async def ow_patch_notes(plugin, event: AstrMessageEvent, kind: str = 'latest'):
 async def ow_rank_leaderboard(plugin, event: AstrMessageEvent, province: str, role: str):
     """获取指定地区的大神天梯省榜（位置：tank / dps / healer / open）。"""
     if not province or not role:
-        yield plugin._plain_error_result(event, '❌ 请输入省份名称 and 职责位置，例如：/省榜 北京 tank\n(支持的位置: tank / dps / healer / open)')
+        yield plugin._plain_error_result(event, '❌ 请输入省份名称 and 职责位置，例如：省榜 北京 tank\n(支持的位置: tank / dps / healer / open)')
         return
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🏆 正在获取 {province} 地区 【{role}】 位置的大神天梯省榜，可用参数：<省份> <职责>')
     if status_text:
@@ -202,7 +202,7 @@ async def ow_hero_leaderboard(plugin, event: AstrMessageEvent, province: str, he
     province = _positional[0] if len(_positional) >= 1 else province
     hero = _positional[1] if len(_positional) >= 2 else hero
     if not province or not hero:
-        yield plugin._plain_error_result(event, '❌ 请输入省份和英雄名称，例如：/绝活榜 北京 猎空\n可选附加 开放（开放队列模式），如 /绝活榜 北京 猎空 开放')
+        yield plugin._plain_error_result(event, '❌ 请输入省份和英雄名称，例如：绝活榜 北京 猎空\n可选附加 开放（开放队列模式），如 /绝活榜 北京 猎空 开放')
         return
     mode = kw.get('lb_mode', 'preset')
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f"🎖️ 正在获取 {province} 地区 【{hero}】（{('开放队列' if mode == 'open' else '预设')}）的大神英雄专精绝活榜...")

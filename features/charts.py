@@ -19,7 +19,7 @@ async def quick_strength(plugin, event: AstrMessageEvent, arg1: str = '', arg2: 
     if not target_id:
         yield plugin._plain_error_result(event, plugin._bnet_err('快速强度') + '\n可选附加对局数（3-12），如 /快速强度 Player#12345 8')
         return
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'⚡ 正在评估 {target_id} 的快速强度指数，可用参数：[战网ID]')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'⚡ 正在评估 {target_id} 的<qqbot-cmd-input text="快速强度 " show="快速强度" reference="false" />指数，可用参数 战网id 查询别人。')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -59,7 +59,7 @@ async def competitive_strength(plugin, event: AstrMessageEvent, arg1: str = '', 
     if not target_id:
         yield plugin._plain_error_result(event, plugin._bnet_err('竞技强度') + '\n可选附加对局数（3-12），如 /竞技强度 Player#12345 8')
         return
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🏆 正在评估 {target_id} 的竞技天梯强度指数，可用参数：[战网ID]')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🏆 正在评估 {target_id} 的<qqbot-cmd-input text="竞技强度 " show="竞技强度" reference="false" />指数，可用参数 战网id 查询别人。')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -92,7 +92,7 @@ async def quick_hero_treemap(plugin, event: AstrMessageEvent, arg1: str = '', ar
     if not target_id:
         yield plugin._plain_error_result(event, plugin._bnet_err('快速英雄云图'))
         return
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📊 正在获取 {target_id} 的快速模式英雄云图，可用参数：[战网ID]')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📊 正在获取 {target_id} 的<qqbot-cmd-input text="快速英雄云图 " show="快速英雄云图" reference="false" />，可用参数 战网id 查询别人。')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -125,7 +125,7 @@ async def competitive_hero_treemap(plugin, event: AstrMessageEvent, arg1: str = 
     if not target_id:
         yield plugin._plain_error_result(event, plugin._bnet_err('竞技英雄云图'))
         return
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🏆 正在获取 {target_id} 的竞技模式英雄云图，可用参数：[战网ID]')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🏆 正在获取 {target_id} 的<qqbot-cmd-input text="竞技英雄云图 " show="竞技英雄云图" reference="false" />，可用参数 战网id 查询别人。')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -154,9 +154,9 @@ async def competitive_hero_treemap(plugin, event: AstrMessageEvent, arg1: str = 
 async def ow_hero_perk(plugin, event: AstrMessageEvent, hero_name: str):
     """提取指定英雄的核心威能、机制数据图。"""
     if not hero_name:
-        yield plugin._plain_error_result(event, '❌ 请输入英雄名称，如：/威能 闪光')
+        yield plugin._plain_error_result(event, '❌ 请输入英雄名称，如：威能 闪光')
         return
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🔮 正在提取 {hero_name} 的核心威能数据，可用参数：<英雄名>')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🔮 正在提取 {hero_name} 的<qqbot-cmd-input text="威能 " show="威能" reference="false" />核心威能数据，可用参数：<英雄名>')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -181,11 +181,11 @@ async def ow_hero_pick(plugin, event: AstrMessageEvent, arg1: str = '', arg2: st
     positional, kw = plugin._extract_keywords([arg1, arg2, arg3])
     hero_name = positional[0] if positional else ''
     if not hero_name:
-        yield plugin._plain_error_result(event, '❌ 请输入英雄名称，如：/ow英雄 闪光\n可选附加：快速/竞技 模式、青铜~英杰 段位，如 /ow英雄 安娜 快速 大师')
+        yield plugin._plain_error_result(event, '❌ 请输入英雄名称，如：ow英雄 闪光\n可选附加：快速/竞技 模式、段位，如 /ow英雄 安娜 快速 大师')
         return
     mode_label = '快速' if kw.get('game_mode') == 'quick' else '竞技'
     mmr_label = kw.get('mmr', 'all')
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🔥 正在读取 {hero_name} 的 {mode_label}（{mmr_label}）Pick 率走势图，可用参数：<英雄名> [模式] [段位]')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🔥 正在读取 {hero_name} 的 {mode_label}（{mmr_label}）<qqbot-cmd-input text="ow英雄 " show="ow英雄" reference="false" />Pick 率走势图，可用参数：英雄名 模式 段位')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -212,7 +212,7 @@ async def get_rank_distribution(plugin, event: AstrMessageEvent, arg1: str = '',
     game_mode = kw.get('game_mode', 'competitive')
     mmr = kw.get('mmr', 'all')
     mode_label = '快速' if game_mode == 'quick' else '竞技'
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📊 正在统计 {mode_label}（{mmr}）天梯全服大盘全英雄数据排行与环境分布，可用参数：[模式] [段位]')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📊 正在统计 {mode_label}（{mmr}）天梯全服大盘全英雄数据排行与环境分布，可用参数 模式 段位')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:

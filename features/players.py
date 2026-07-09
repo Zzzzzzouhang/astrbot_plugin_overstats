@@ -15,7 +15,7 @@ async def dashen_profile(plugin, event: AstrMessageEvent, arg1: str = '', arg2: 
     if not target_id:
         yield plugin._plain_error_result(event, plugin._bnet_err('大神数据'))
         return
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🔍 正在生成 {target_id} 的玩家详情，可用参数：[战网ID]')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🔍 正在生成 {target_id} 的<qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" />，可用参数 战网id 查询别人。')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -44,7 +44,7 @@ async def dashen_match(plugin, event: AstrMessageEvent, bnet_id: str = ''):
     if not target_id:
         yield plugin._plain_error_result(event, plugin._bnet_err('大神对局'))
         return
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📊 正在拉取 {target_id} 的最近对局，可用参数：[战网ID]')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📊 正在拉取 {target_id} 的<qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" />，可用参数 战网id 查询别人。')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -91,9 +91,9 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
         bnet_id = await plugin._get_user_bind_id(user_id)
     target_id = await plugin._get_bnet_id(event, bnet_id)
     if not target_id:
-        yield plugin._plain_error_result(event, '❌ 请输入战网ID，如：/单局详细 1 Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345')
+        yield plugin._plain_error_result(event, '❌ 请输入战网ID，如：单局详细 Player#12345 1 \n或先使用 /绑定 战网ID，示例：/绑定 Player#12345')
         return
-    base_prompt = f'⏳ 正在拉取 {target_id} 第 {index + 1} 局的单局多图详细战绩，可用参数：<序号> [战网ID]'
+    base_prompt = f'⏳ 正在拉取 {target_id} 第 {index + 1} 局的<qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />多图详细战绩，可用参数：战网id 序号 查询别人。'
     if kw.get('analyze') is False:
         base_prompt += '（本次已跳过 AI 锐评，出图更快）'
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, base_prompt)
@@ -193,7 +193,7 @@ async def dashen_rank_history(plugin, event: AstrMessageEvent, arg1: str = '', a
         season_hint = f'（从 S{season_nums[0]} 起）'
     elif len(season_nums) >= 2:
         season_hint = f'（S{season_nums[0]} ~ S{season_nums[1]})'
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📜 正在追溯 {target_id} 的历史段位记录{season_hint}，可用参数：[战网ID] [赛季号]')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📜 正在追溯 {target_id} 的<qqbot-cmd-input text="历史段位 " show="历史段位" reference="false" />记录{season_hint}，可用参数 战网id 赛季号 查询别人。')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -236,12 +236,12 @@ async def dashen_sameplay(plugin, event: AstrMessageEvent, p1: str = '', p2: str
     else:
         p1 = bound_id
     if not p1:
-        yield plugin._plain_error_result(event, '❌ 请先绑定战网ID（/绑定 Player#12345）或输入对战网ID，可用参数：[p1战网id] [p2战网id]')
+        yield plugin._plain_error_result(event, '❌ 请先绑定战网ID（/绑定 Player#12345）或输入对战网ID，可用参数：p1战网id p2战网id')
         return
     if not p2:
-        yield plugin._plain_error_result(event, '❌ 缺少第二个战网ID，可用参数：[p1战网id] [p2战网id]\n示例：/同玩查询 Player#12345 OtherPlayer#67890')
+        yield plugin._plain_error_result(event, '❌ 缺少第二个战网ID，可用参数：p1战网id p2战网id\n示例：/同玩查询 Player#12345 OtherPlayer#67890')
         return
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'👥 正在分析 {p1} 与 {p2} 的同玩胜率，可用参数：<战网ID1> <战网ID2>')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'👥 正在分析 {p1} 与 {p2} 的<qqbot-cmd-input text="同玩查询 " show="同玩查询" reference="false" />胜率，可用参数：战网ID1 战网ID2 查询别人。')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:

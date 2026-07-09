@@ -714,7 +714,7 @@ class OverstatsPlugin(Star):
 
     def _bnet_err(self, cmd: str) -> str:
         """ponytail: 10 处重复的战网ID必填错误提示，统一收敛到此"""
-        return f'❌ 请输入战网ID，如：/{cmd} Player#12345\n或先使用 /绑定 战网ID，示例：/绑定 Player#12345'
+        return f'❌ 请输入战网ID，如：{cmd} Player#12345\n或先使用 绑定 战网ID，示例：绑定 Player#12345'
 
     async def _prepare_business_status_prompt(self, event: AstrMessageEvent, base_text: str) -> tuple[str | None, str | None, bool]:
         """准备业务状态提示。返回 (提示文本, 跟踪token, 是否应提前终止)。
@@ -1042,14 +1042,14 @@ class OverstatsPlugin(Star):
             header = f"❌ `{cmd_display}` 暂时未匹配到指令\n\n"
         text = header + """📌 Overstats 快速指南
 
-🔗 ➤ <qqbot-cmd-input text="/绑定 " show="绑定" reference="false" />示例：/绑定 Player#12345
-📊 ➤ <qqbot-cmd-input text="/今日总结 " show="今日总结" reference="false" /> ➤ <qqbot-cmd-input text="/本周总结 " show="本周总结" reference="false" />
-📈 ➤ <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="/大神对局 " show="对局" reference="false" />
-💪 ➤ <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" /> ➤ <qqbot-cmd-input text="/竞技强度 " show="竞技强度" reference="false" />
-☁️ ➤ <qqbot-cmd-input text="/快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="/竞技英雄云图 " show="竞技云图" reference="false" />
-📋 全部功能 <qqbot-cmd-input text="/owhelp " show="owhelp" reference="false" />
+🔗 ➤ <qqbot-cmd-input text="绑定 " show="绑定" reference="false" />示例：/绑定 Player#12345
+📊 ➤ <qqbot-cmd-input text="今日总结 " show="今日总结" reference="false" /> ➤ <qqbot-cmd-input text="本周总结 " show="本周总结" reference="false" />
+📈 ➤ <qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="大神对局 " show="对局" reference="false" />
+💪 ➤ <qqbot-cmd-input text="快速强度 " show="快速强度" reference="false" /> ➤ <qqbot-cmd-input text="竞技强度 " show="竞技强度" reference="false" />
+☁️ ➤ <qqbot-cmd-input text="快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="竞技英雄云图 " show="竞技云图" reference="false" />
+📋 全部功能 <qqbot-cmd-input text="owhelp " show="owhelp" reference="false" />
 💡 必须<qqbot-cmd-input text=" " show="@机器人" reference="false"/>，不能复制纯文本识别不到
-💡 大部分指令都可以带[战网id]参数，查询对应的数据，无需重新绑定"""
+💡 大部分指令都可以带 战网id 参数，查询对应的数据，无需重新绑定"""
         return self._format_markdown_by_platform(event, text)
 
 
@@ -1422,37 +1422,37 @@ class OverstatsPlugin(Star):
         text = """📋 **【Overstats 指令及别称大全】**
 
 🔹 **基础与绑定类：**
-• <qqbot-cmd-input text="/owhelp " show="owhelp" reference="false" /> (别称：<qqbot-cmd-input text="/ow菜单 " show="ow菜单" reference="false" />, <qqbot-cmd-input text="/ow帮助 " show="ow帮助" reference="false" />, <qqbot-cmd-input text="/OW帮助 " show="OW帮助" reference="false" />, <qqbot-cmd-input text="/help " show="help" reference="false" />)
-• <qqbot-cmd-input text="/所有指令 " show="所有指令" reference="false" /> (别称：<qqbot-cmd-input text="/别称 " show="别称" reference="false" />)
-• <qqbot-cmd-input text="/大神绑定 " show="大神绑定" reference="false" /> (别称：<qqbot-cmd-input text="/绑定 " show="绑定" reference="false" />)
+• <qqbot-cmd-input text="owhelp " show="owhelp" reference="false" /> (别称：<qqbot-cmd-input text="ow菜单 " show="ow菜单" reference="false" />, <qqbot-cmd-input text="ow帮助 " show="ow帮助" reference="false" />, <qqbot-cmd-input text="OW帮助 " show="OW帮助" reference="false" />, <qqbot-cmd-input text="help " show="help" reference="false" />)
+• <qqbot-cmd-input text="所有指令 " show="所有指令" reference="false" /> (别称：<qqbot-cmd-input text="别称 " show="别称" reference="false" />)
+• <qqbot-cmd-input text="大神绑定 " show="大神绑定" reference="false" /> (别称：<qqbot-cmd-input text="绑定 " show="绑定" reference="false" />)
 
 🔹 **数据查询类：**
-• <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> (别称：<qqbot-cmd-input text="/详情卡片 " show="详情卡片" reference="false" />, <qqbot-cmd-input text="/战绩查询 " show="战绩查询" reference="false" />, <qqbot-cmd-input text="/数据 " show="数据" reference="false" />)
-• <qqbot-cmd-input text="/大神对局 " show="大神对局" reference="false" /> (别称：<qqbot-cmd-input text="/最近对局 " show="最近对局" reference="false" />, <qqbot-cmd-input text="/战绩 " show="战绩" reference="false" />, <qqbot-cmd-input text="/对局 " show="对局" reference="false" />)
-• <qqbot-cmd-input text="/单局详细 " show="单局详细" reference="false" /> (别称：<qqbot-cmd-input text="/单局详情 " show="单局详情" reference="false" />, <qqbot-cmd-input text="/单局 " show="单局" reference="false" />)
-• <qqbot-cmd-input text="/同玩查询 " show="同玩查询" reference="false" /> (别称：<qqbot-cmd-input text="/开黑胜率 " show="开黑胜率" reference="false" />)
+• <qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" /> (别称：<qqbot-cmd-input text="详情卡片 " show="详情卡片" reference="false" />, <qqbot-cmd-input text="战绩查询 " show="战绩查询" reference="false" />, <qqbot-cmd-input text="数据 " show="数据" reference="false" />)
+• <qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" /> (别称：<qqbot-cmd-input text="最近对局 " show="最近对局" reference="false" />, <qqbot-cmd-input text="战绩 " show="战绩" reference="false" />, <qqbot-cmd-input text="对局 " show="对局" reference="false" />)
+• <qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" /> (别称：<qqbot-cmd-input text="单局详情 " show="单局详情" reference="false" />, <qqbot-cmd-input text="单局 " show="单局" reference="false" />)
+• <qqbot-cmd-input text="同玩查询 " show="同玩查询" reference="false" /> (别称：<qqbot-cmd-input text="开黑胜率 " show="开黑胜率" reference="false" />)
 
 🔹 **总结类：**
-• <qqbot-cmd-input text="/今日总结 " show="今日总结" reference="false" /> (别称：<qqbot-cmd-input text="/今日 " show="今日" reference="false" />, <qqbot-cmd-input text="/今日数据 " show="今日数据" reference="false" />)
-• <qqbot-cmd-input text="/昨日总结 " show="昨日总结" reference="false" /> (别称：<qqbot-cmd-input text="/昨日 " show="昨日" reference="false" />, <qqbot-cmd-input text="/昨日数据 " show="昨日数据" reference="false" />, <qqbot-cmd-input text="/昨天数据 " show="昨天数据" reference="false" />)
-• <qqbot-cmd-input text="/周度总结 " show="周度总结" reference="false" /> (别称：<qqbot-cmd-input text="/本周总结 " show="本周总结" reference="false" />, <qqbot-cmd-input text="/本周数据 " show="本周数据" reference="false" />, <qqbot-cmd-input text="/本周 " show="本周" reference="false" />)
+• <qqbot-cmd-input text="今日总结 " show="今日总结" reference="false" /> (别称：<qqbot-cmd-input text="今日 " show="今日" reference="false" />, <qqbot-cmd-input text="今日数据 " show="今日数据" reference="false" />)
+• <qqbot-cmd-input text="昨日总结 " show="昨日总结" reference="false" /> (别称：<qqbot-cmd-input text="昨日 " show="昨日" reference="false" />, <qqbot-cmd-input text="昨日数据 " show="昨日数据" reference="false" />, <qqbot-cmd-input text="昨天数据 " show="昨天数据" reference="false" />)
+• <qqbot-cmd-input text="周度总结 " show="周度总结" reference="false" /> (别称：<qqbot-cmd-input text="本周总结 " show="本周总结" reference="false" />, <qqbot-cmd-input text="本周数据 " show="本周数据" reference="false" />, <qqbot-cmd-input text="本周 " show="本周" reference="false" />)
 
 🔹 **图表与排行类：**
-• <qqbot-cmd-input text="/历史段位 " show="历史段位" reference="false" /> (别称：<qqbot-cmd-input text="/历届段位 " show="历届段位" reference="false" />)
-• <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" /> (别称：<qqbot-cmd-input text="/快速强度指数 " show="快速强度指数" reference="false" />)
-• <qqbot-cmd-input text="/竞技强度 " show="竞技强度" reference="false" /> (别称：<qqbot-cmd-input text="/竞技强度指数 " show="竞技强度指数" reference="false" />)
-• <qqbot-cmd-input text="/快速英雄云图 " show="快速英雄云图" reference="false" /> (别称：<qqbot-cmd-input text="/快速云图 " show="快速云图" reference="false" />)
-• <qqbot-cmd-input text="/竞技英雄云图 " show="竞技英雄云图" reference="false" /> (别称：<qqbot-cmd-input text="/竞技云图 " show="竞技云图" reference="false" />)
-• <qqbot-cmd-input text="/省榜 " show="省榜" reference="false" /> (别称：<qqbot-cmd-input text="/排行 " show="排行" reference="false" />)
-• <qqbot-cmd-input text="/绝活榜 " show="绝活榜" reference="false" /> (别称：<qqbot-cmd-input text="/英雄省榜 " show="英雄省榜" reference="false" />)
-• <qqbot-cmd-input text="/banpick " show="banpick" reference="false" /> (别称：<qqbot-cmd-input text="/全英雄排行 " show="全英雄排行" reference="false" />)
+• <qqbot-cmd-input text="历史段位 " show="历史段位" reference="false" /> (别称：<qqbot-cmd-input text="历届段位 " show="历届段位" reference="false" />)
+• <qqbot-cmd-input text="快速强度 " show="快速强度" reference="false" /> (别称：<qqbot-cmd-input text="快速强度指数 " show="快速强度指数" reference="false" />)
+• <qqbot-cmd-input text="竞技强度 " show="竞技强度" reference="false" /> (别称：<qqbot-cmd-input text="竞技强度指数 " show="竞技强度指数" reference="false" />)
+• <qqbot-cmd-input text="快速英雄云图 " show="快速英雄云图" reference="false" /> (别称：<qqbot-cmd-input text="快速云图 " show="快速云图" reference="false" />)
+• <qqbot-cmd-input text="竞技英雄云图 " show="竞技英雄云图" reference="false" /> (别称：<qqbot-cmd-input text="竞技云图 " show="竞技云图" reference="false" />)
+• <qqbot-cmd-input text="省榜 " show="省榜" reference="false" /> (别称：<qqbot-cmd-input text="排行 " show="排行" reference="false" />)
+• <qqbot-cmd-input text="绝活榜 " show="绝活榜" reference="false" /> (别称：<qqbot-cmd-input text="英雄省榜 " show="英雄省榜" reference="false" />)
+• <qqbot-cmd-input text="banpick " show="banpick" reference="false" /> (别称：<qqbot-cmd-input text="全英雄排行 " show="全英雄排行" reference="false" />)
 
 🔹 **游戏资讯类：**
-• <qqbot-cmd-input text="/威能 " show="威能" reference="false" />, <qqbot-cmd-input text="/ow英雄 " show="ow英雄" reference="false" />, <qqbot-cmd-input text="/获取段位分布 " show="获取段位分布" reference="false" />, <qqbot-cmd-input text="/mappick " show="mappick" reference="false" />, <qqbot-cmd-input text="/皮肤搜索 " show="皮肤搜索" reference="false" />
-• <qqbot-cmd-input text="/商店 " show="商店" reference="false" /> (别称：<qqbot-cmd-input text="/ow商店 " show="ow商店" reference="false" />)
-• <qqbot-cmd-input text="/ow赛事 " show="ow赛事" reference="false" /> (别称：<qqbot-cmd-input text="/赛事 " show="赛事" reference="false" />)
-• <qqbot-cmd-input text="/ow活动 " show="ow活动" reference="false" /> (别称：<qqbot-cmd-input text="/活动 " show="活动" reference="false" />)
-• <qqbot-cmd-input text="/ow更新 " show="ow更新" reference="false" /> (别称：<qqbot-cmd-input text="/版本更新 " show="版本更新" reference="false" />)"""
+• <qqbot-cmd-input text="威能 " show="威能" reference="false" />, <qqbot-cmd-input text="ow英雄 " show="ow英雄" reference="false" />, <qqbot-cmd-input text="获取段位分布 " show="获取段位分布" reference="false" />, <qqbot-cmd-input text="mappick " show="mappick" reference="false" />, <qqbot-cmd-input text="皮肤搜索 " show="皮肤搜索" reference="false" />
+• <qqbot-cmd-input text="商店 " show="商店" reference="false" /> (别称：<qqbot-cmd-input text="ow商店 " show="ow商店" reference="false" />)
+• <qqbot-cmd-input text="ow赛事 " show="ow赛事" reference="false" /> (别称：<qqbot-cmd-input text="赛事 " show="赛事" reference="false" />)
+• <qqbot-cmd-input text="ow活动 " show="ow活动" reference="false" /> (别称：<qqbot-cmd-input text="活动 " show="活动" reference="false" />)
+• <qqbot-cmd-input text="ow更新 " show="ow更新" reference="false" /> (别称：<qqbot-cmd-input text="版本更新 " show="版本更新" reference="false" />)"""
 
         yield event.plain_result(self._format_markdown_by_platform(event, text))
 
@@ -1496,19 +1496,19 @@ class OverstatsPlugin(Star):
     async def ow_help(self, event: AstrMessageEvent):
         """显示 Overstats 查询菜单，列出所有常用指令入口。"""
         help_text = """📌 Overstats 查询菜单
-🔗 ➤ <qqbot-cmd-input text="/绑定 " show="绑定" reference="false" />示例：/绑定 Player#12345
-📋 ➤ <qqbot-cmd-input text="/今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="/昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="/周度总结 " show="本周" reference="false" />
-📊 ➤ <qqbot-cmd-input text="/大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="/大神对局 " show="大神对局" reference="false" /> ➤ <qqbot-cmd-input text="/单局详细 " show="单局详细" reference="false" />「数字」可加 锐评关/全员关
-📈 ➤ <qqbot-cmd-input text="/快速强度 " show="快速强度" reference="false" />「可选对局数」 ➤ <qqbot-cmd-input text="/竞技强度 " show="竞技强度" reference="false" />「可选对局数」 ➤ <qqbot-cmd-input text="/获取段位分布 " show="获取段位分布" reference="false" />「可选 快速/竞技 段位」
-🗺️ ➤ <qqbot-cmd-input text="/快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="/竞技英雄云图 " show="竞技云图" reference="false" /> ➤ <qqbot-cmd-input text="/历史段位 " show="历史段位" reference="false" />
-🏆 ➤ <qqbot-cmd-input text="/省榜 " show="省榜" reference="false" />「省份」「位置」 ➤ <qqbot-cmd-input text="/绝活榜 " show="绝活榜" reference="false" />「省份」「英雄」可加 开放
-⚔️ ➤ <qqbot-cmd-input text="/威能 " show="威能" reference="false" />「英雄名」 ➤ <qqbot-cmd-input text="/ow英雄 " show="ow 英雄" reference="false" />「英雄名」可加 快速/竞技 段位 ➤ <qqbot-cmd-input text="/banpick " show="banpick" reference="false" />「可选 快速/竞技 段位」 ➤ <qqbot-cmd-input text="/mappick " show="mappick" reference="false" />
-🌍 ➤ <qqbot-cmd-input text="/同玩查询 " show="同玩查询" reference="false" />「ID1」「ID2」 ➤ <qqbot-cmd-input text="/商店 " show="商店" reference="false" /> ➤ <qqbot-cmd-input text="/皮肤搜索 " show="皮肤搜索" reference="false" /> ➤ <qqbot-cmd-input text="/ow赛事 " show="ow 赛事" reference="false" />
-📰 ➤ <qqbot-cmd-input text="/ow更新 " show="ow更新" reference="false" />「latest/small/big」
-🧪 ➤ <qqbot-cmd-input text="/ow是区吗 " show="ow是区吗" reference="false" />「战网ID」 ➤ <qqbot-cmd-input text="/ow是区吗结果 " show="ow是区吗结果" reference="false" />
+🔗 ➤ <qqbot-cmd-input text="绑定 " show="绑定" reference="false" />示例：/绑定 Player#12345
+📋 ➤ <qqbot-cmd-input text="今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="周度总结 " show="本周" reference="false" />
+📊 ➤ <qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" /> ➤ <qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />数字 锐评关/全员关
+📈 ➤ <qqbot-cmd-input text="快速强度 " show="快速强度" reference="false" />可选对局数 ➤ <qqbot-cmd-input text="竞技强度 " show="竞技强度" reference="false" />可选对局数 ➤ <qqbot-cmd-input text="获取段位分布 " show="获取段位分布" reference="false" />可选 快速/竞技 段位
+🗺️ ➤ <qqbot-cmd-input text="快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="竞技英雄云图 " show="竞技云图" reference="false" /> ➤ <qqbot-cmd-input text="历史段位 " show="历史段位" reference="false" />
+🏆 ➤ <qqbot-cmd-input text="省榜 " show="省榜" reference="false" />省份 位置 ➤ <qqbot-cmd-input text="绝活榜 " show="绝活榜" reference="false" />省份 英雄 开放
+⚔️ ➤ <qqbot-cmd-input text="威能 " show="威能" reference="false" />英雄名 ➤ <qqbot-cmd-input text="ow英雄 " show="ow 英雄" reference="false" />英雄名 快速/竞技 段位 ➤ <qqbot-cmd-input text="banpick " show="banpick" reference="false" />可选 快速/竞技 段位 ➤ <qqbot-cmd-input text="mappick " show="mappick" reference="false" />
+🌍 ➤ <qqbot-cmd-input text="同玩查询 " show="同玩查询" reference="false" />ID1 ID2 ➤ <qqbot-cmd-input text="商店 " show="商店" reference="false" /> ➤ <qqbot-cmd-input text="皮肤搜索 " show="皮肤搜索" reference="false" /> ➤ <qqbot-cmd-input text="ow赛事 " show="ow 赛事" reference="false" />
+📰 ➤ <qqbot-cmd-input text="ow更新 " show="ow更新" reference="false" />latest/small/big
+🧪 ➤ <qqbot-cmd-input text="ow是区吗 " show="ow是区吗" reference="false" />战网ID ➤ <qqbot-cmd-input text="ow是区吗结果 " show="ow是区吗结果" reference="false" />
 🎁 ➤ 段位关键词：青铜/白银/黄金/白金/钻石/大师/宗师/英杰
-💡 大部分指令都可以带[战网id]参数，查询对应的数据，无需重新绑定
-💡 发送 <qqbot-cmd-input text="/别称 " show="别称" reference="false" /> 可查看所有指令对应别称列表。"""
+💡 大部分指令都可以带 战网id 参数，查询对应的数据，无需重新绑定
+💡 发送 <qqbot-cmd-input text="别称 " show="别称" reference="false" /> 可查看所有指令对应别称列表。"""
 
         yield event.plain_result(self._format_markdown_by_platform(event, help_text))
 
@@ -1827,37 +1827,37 @@ class OverstatsPlugin(Star):
         text = """🛠️ 管理员维护指令菜单
 
 🔧 **维护管理：**
-• <qqbot-cmd-input text="/维护 " show="/维护 内容" reference="false" /> 开启维护模式（如：/维护 服务升级中，暂停服务）
-• <qqbot-cmd-input text="/维护 取消 " show="/维护 取消" reference="false" /> 关闭维护模式
+• <qqbot-cmd-input text="维护 " show="维护 内容" reference="false" /> 开启维护模式（如：维护 服务升级中，暂停服务）
+• <qqbot-cmd-input text="维护 取消 " show="维护 取消" reference="false" /> 关闭维护模式
 
 ⛔ **违规封禁管理：**
-• <qqbot-cmd-input text="/ow违禁封禁 " show="/ow违禁封禁 用户ID 指令名" reference="false" /> 封禁用户指定指令12h（如：/ow违禁封禁 qqofficial:1170599013 单局详细）
-• <qqbot-cmd-input text="/ow违禁解封 " show="/ow违禁解封 用户ID 指令名" reference="false" /> 解除用户指定指令封禁
+• <qqbot-cmd-input text="ow违禁封禁 " show="ow违禁封禁 用户ID 指令名" reference="false" /> 封禁用户指定指令12h（如：ow违禁封禁 qqofficial:1170599013 单局详细）
+• <qqbot-cmd-input text="ow违禁解封 " show="ow违禁解封 用户ID 指令名" reference="false" /> 解除用户指定指令封禁
 
 ⚙️ **群组配置：**
-• <qqbot-cmd-input text="/群设置 " show="/群设置" reference="false" /> 查看当前群组功能配置
-• <qqbot-cmd-input text="/群设置 提示 开 " show="/群设置 提示 开" reference="false" /> / <qqbot-cmd-input text="/群设置 提示 关 " show="/群设置 提示 关" reference="false" /> 切换首次提示后不再提示
-• <qqbot-cmd-input text="/群设置 追加提示 开 " show="/群设置 追加提示 开" reference="false" /> / <qqbot-cmd-input text="/群设置 追加提示 关 " show="/群设置 追加提示 关" reference="false" /> 切换追加交互提示
-• <qqbot-cmd-input text="/全量适配开 " show="/全量适配开" reference="false" /> [昵称] / <qqbot-cmd-input text="/全量适配开完全匹配 " show="/全量适配开完全匹配" reference="false" /> / <qqbot-cmd-input text="/全量适配关 " show="/全量适配关" reference="false" /> 全量适配（@昵称/直接匹配/关闭，按群独立）
+• <qqbot-cmd-input text="群设置 " show="群设置" reference="false" /> 查看当前群组功能配置
+• <qqbot-cmd-input text="群设置 提示 开 " show="群设置 提示 开" reference="false" /> / <qqbot-cmd-input text="群设置 提示 关 " show="群设置 提示 关" reference="false" /> 切换首次提示后不再提示
+• <qqbot-cmd-input text="群设置 追加提示 开 " show="群设置 追加提示 开" reference="false" /> / <qqbot-cmd-input text="群设置 追加提示 关 " show="群设置 追加提示 关" reference="false" /> 切换追加交互提示
+• <qqbot-cmd-input text="全量适配开 " show="全量适配开" reference="false" /> [昵称] / <qqbot-cmd-input text="全量适配开完全匹配 " show="全量适配开完全匹配" reference="false" /> / <qqbot-cmd-input text="全量适配关 " show="全量适配关" reference="false" /> 全量适配（@昵称/直接匹配/关闭，按群独立）
 
 🔌 **系统诊断（所有模式通用）：**
-• <qqbot-cmd-input text="/ow连接测试 " show="/ow连接测试" reference="false" /> 测试 Overstats 后端连接状态
-• <qqbot-cmd-input text="/ow部署状态 " show="/ow部署状态" reference="false" /> 查看后端接入模式与运行状态
+• <qqbot-cmd-input text="ow连接测试 " show="ow连接测试" reference="false" /> 测试 Overstats 后端连接状态
+• <qqbot-cmd-input text="ow部署状态 " show="ow部署状态" reference="false" /> 查看后端接入模式与运行状态
 
 🚀 **一键部署（仅 auto 托管模式）：**
-• <qqbot-cmd-input text="/ow部署 " show="/ow部署" reference="false" /> 一键部署后端（首次使用必执行）
-• <qqbot-cmd-input text="/ow更新后端 " show="/ow更新后端" reference="false" /> 拉取最新代码并重启（跟进原项目更新）
-• <qqbot-cmd-input text="/ow停止后端 " show="/ow停止后端" reference="false" /> 停止后端进程
-• <qqbot-cmd-input text="/ow重启后端 " show="/ow重启后端" reference="false" /> 重启后端（修改配置后需执行）
-• <qqbot-cmd-input text="/ow部署日志 " show="/ow部署日志" reference="false" /> 查看后端运行日志（内存，最近50行）
-• <qqbot-cmd-input text="/ow后端日志 " show="/ow后端日志" reference="false" /> 查看 Overstats 后端持久化日志（文件，最新30条）
+• <qqbot-cmd-input text="ow部署 " show="ow部署" reference="false" /> 一键部署后端（首次使用必执行）
+• <qqbot-cmd-input text="ow更新后端 " show="ow更新后端" reference="false" /> 拉取最新代码并重启（跟进原项目更新）
+• <qqbot-cmd-input text="ow停止后端 " show="ow停止后端" reference="false" /> 停止后端进程
+• <qqbot-cmd-input text="ow重启后端 " show="ow重启后端" reference="false" /> 重启后端（修改配置后需执行）
+• <qqbot-cmd-input text="ow部署日志 " show="ow部署日志" reference="false" /> 查看后端运行日志（内存，最近50行）
+• <qqbot-cmd-input text="ow后端日志 " show="ow后端日志" reference="false" /> 查看 Overstats 后端持久化日志（文件，最新30条）
 
 🗑️ **后端卸载（仅 auto 托管模式）：**
-• <qqbot-cmd-input text="/ow卸载后端 " show="/ow卸载后端" reference="false" /> 预览卸载影响（空间/数据库/进程）
-• <qqbot-cmd-input text="/ow卸载后端执行确认 " show="/ow卸载后端执行确认" reference="false" /> 删除全部后端资源（代码+venv+数据库）
-• <qqbot-cmd-input text="/ow卸载后端执行仅代码 " show="/ow卸载后端执行仅代码" reference="false" /> 仅删除后端代码（保留venv）
-• <qqbot-cmd-input text="/ow卸载后端执行仅venv " show="/ow卸载后端执行仅venv" reference="false" /> 仅删除虚拟环境（保留代码）
-• <qqbot-cmd-input text="/ow卸载后端执行强制 " show="/ow卸载后端执行强制" reference="false" /> 强制删除（进程无法停止时使用）
+• <qqbot-cmd-input text="ow卸载后端 " show="ow卸载后端" reference="false" /> 预览卸载影响（空间/数据库/进程）
+• <qqbot-cmd-input text="ow卸载后端执行确认 " show="ow卸载后端执行确认" reference="false" /> 删除全部后端资源（代码+venv+数据库）
+• <qqbot-cmd-input text="ow卸载后端执行仅代码 " show="ow卸载后端执行仅代码" reference="false" /> 仅删除后端代码（保留venv）
+• <qqbot-cmd-input text="ow卸载后端执行仅venv " show="ow卸载后端执行仅venv" reference="false" /> 仅删除虚拟环境（保留代码）
+• <qqbot-cmd-input text="ow卸载后端执行强制 " show="ow卸载后端执行强制" reference="false" /> 强制删除（进程无法停止时使用）
 
 💡 维护模式开启后，所有指令将直接返回维护内容，不再执行业务逻辑。
 💡 一键部署指令需在配置面板切换为 auto 模式后使用，配置修改后需重载插件生效。

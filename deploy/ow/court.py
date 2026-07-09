@@ -655,7 +655,7 @@ class CourtManager:
             return
 
         logger.info(f"[开庭] {target_id} #{index + 1}  start")
-        yield event.plain_result(f"⚖️ 正在为 {target_id} 的第 {index + 1} 局开庭审理，请稍候，可用参数：<序号> [战网ID]")
+        yield event.plain_result(f'⚖️ 正在为 {target_id} 的第 {index + 1} 局开庭审理（<qqbot-cmd-input text="ow开庭 " show="ow开庭" reference="false" />），请稍候，可用参数：序号 战网ID 查询别人。')
 
         try:
             # 5. 拉数据
