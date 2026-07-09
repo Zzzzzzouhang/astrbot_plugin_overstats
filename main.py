@@ -1249,13 +1249,15 @@ class OverstatsPlugin(Star):
                 except Exception as e:
                     logger.debug(f'无空格指令派发失败（{cmd_name}）: {e}')
                     return
-        bind_match = re.match('^(?:/?(?:大神)?绑定\\s+)?(?:/?(?:大神)?绑定)?\\s*([^#＃\\s]+[#＃]\\d+)$', msg)
-        if bind_match:
-            clean_bnet_id = bind_match.group(1)
-            async for result in self.dashen_bind(event, bnet_id=clean_bnet_id):
-                yield result
-            event.stop_event()
-            return
+        if not msg.startswith('/'):
+            # 带斜杠的命令形式（/绑定）由框架原生 command 派发处理；此处仅兜底无斜杠的“直接粘贴战网ID”等场景，避免重复响应
+            bind_match = re.match('^(?:/?(?:大神)?绑定\\s+)?(?:/?(?:大神)?绑定)?\\s*([^#＃\\s]+[#＃]\\d+)$', msg)
+            if bind_match:
+                clean_bnet_id = bind_match.group(1)
+                async for result in self.dashen_bind(event, bnet_id=clean_bnet_id):
+                    yield result
+                event.stop_event()
+                return
         if hasattr(event, 'is_at_or_wake_command') and event.is_at_or_wake_command and self.config.get('unmatched_cmd_guide_enabled', False):
             if not is_group or self._is_real_at_bot(event):
                 cmd_first_token = msg.split()[0].lstrip('/')
@@ -1374,12 +1376,14 @@ class OverstatsPlugin(Star):
                 except Exception as e:
                     logger.debug(f'全量适配无空格派发失败（{cmd_name}）: {e}')
                     return
-        bind_m = re.match('^(?:/?(?:大神)?绑定\\s+)?(?:/?(?:大神)?绑定)?\\s*([^#＃\\s]+[#＃]\\d+)$', cmd_text)
-        if bind_m:
-            async for r in self.dashen_bind(event, bnet_id=bind_m.group(1)):
-                yield r
-            event.stop_event()
-            return
+        if not cmd_text.startswith('/'):
+            # 带斜杠的命令形式（/绑定）由框架原生 command 派发处理；此处仅兜底无斜杠场景，避免重复响应
+            bind_m = re.match('^(?:/?(?:大神)?绑定\\s+)?(?:/?(?:大神)?绑定)?\\s*([^#＃\\s]+[#＃]\\d+)$', cmd_text)
+            if bind_m:
+                async for r in self.dashen_bind(event, bnet_id=bind_m.group(1)):
+                    yield r
+                event.stop_event()
+                return
         tokens = cmd_text.split()
         cmd = tokens[0].lstrip('/')
         rest = tokens[1:]
