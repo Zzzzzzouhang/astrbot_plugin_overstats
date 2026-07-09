@@ -1042,7 +1042,7 @@ class OverstatsPlugin(Star):
             header = f"❌ `{cmd_display}` 暂时未匹配到指令\n\n"
         text = header + """📌 Overstats 快速指南
 
-🔗 ➤ <qqbot-cmd-input text="绑定 " show="绑定" reference="false" />示例：/绑定 Player#12345
+🔗 ➤ <qqbot-cmd-input text="绑定 " show="绑定" reference="false" />示例：绑定 Player#12345
 📊 ➤ <qqbot-cmd-input text="今日总结 " show="今日总结" reference="false" /> ➤ <qqbot-cmd-input text="本周总结 " show="本周总结" reference="false" />
 📈 ➤ <qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="大神对局 " show="对局" reference="false" />
 💪 ➤ <qqbot-cmd-input text="快速强度 " show="快速强度" reference="false" /> ➤ <qqbot-cmd-input text="竞技强度 " show="竞技强度" reference="false" />
@@ -1214,6 +1214,9 @@ class OverstatsPlugin(Star):
                 return
         if not msg:
             return
+        # ponytail: 原生 @filter.command 已匹配该事件（斜杠指令），交给原生处理器，避免重复响应
+        if event.get_extra("handlers_parsed_params"):
+            return
         if msg.isdigit():
             num = int(msg)
             if 0 < num <= 20:
@@ -1319,6 +1322,9 @@ class OverstatsPlugin(Star):
         if self._is_real_at_bot(event):
             return
         msg = (event.message_str or '').strip()
+        # ponytail: 原生 @filter.command 已匹配该事件，交给原生处理器，避免重复响应
+        if event.get_extra("handlers_parsed_params"):
+            return
         direct_mode = adapt_cfg.get('mode', 'nickname') == 'direct'
         if direct_mode:
             if not msg or msg.isdigit():
@@ -1500,7 +1506,7 @@ class OverstatsPlugin(Star):
     async def ow_help(self, event: AstrMessageEvent):
         """显示 Overstats 查询菜单，列出所有常用指令入口。"""
         help_text = """📌 Overstats 查询菜单
-🔗 ➤ <qqbot-cmd-input text="绑定 " show="绑定" reference="false" />示例：/绑定 Player#12345
+🔗 ➤ <qqbot-cmd-input text="绑定 " show="绑定" reference="false" />示例：绑定 Player#12345
 📋 ➤ <qqbot-cmd-input text="今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="周度总结 " show="本周" reference="false" />
 📊 ➤ <qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" /> ➤ <qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />数字 锐评关/全员关
 📈 ➤ <qqbot-cmd-input text="快速强度 " show="快速强度" reference="false" />可选对局数 ➤ <qqbot-cmd-input text="竞技强度 " show="竞技强度" reference="false" />可选对局数 ➤ <qqbot-cmd-input text="获取段位分布 " show="获取段位分布" reference="false" />可选 快速/竞技 段位
