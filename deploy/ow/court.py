@@ -13,9 +13,11 @@
    `plugin._check_violation_ban(event, "开庭")` 检查，发送时由插件级助手自动封禁。
 """
 
+import asyncio
 import time
 import json
 import logging
+from typing import Optional
 
 logger = logging.getLogger("astrbot")
 
@@ -27,6 +29,9 @@ _COURT_LAST_TARGET_KV_PREFIX = "ow_court_last_target"
 
 _COURT_BTN = '<qqbot-cmd-input text="ow开庭 " show="ow开庭" reference="false" />'
 _COURT_RESULT_BTN = '<qqbot-cmd-input text="ow开庭结果" show="ow开庭结果" reference="false" />'
+
+# 与是区吗共用 _ow_executing，超时时间保持一致
+_OW_EXECUTING_TIMEOUT = 300  # 锁自动释放时间（秒）
 
 
 class CourtManager:
@@ -158,6 +163,18 @@ class CourtManager:
             yield event.plain_result("⏳ 你已有一条 OW 分析（是区吗/开庭）正在生成中，请稍候…")
             return
         self._plugin._ow_executing.add(uid)
+        # 自动超时释放锁（_OW_EXECUTING_TIMEOUT 秒后），避免后端卡死导致锁永远不释放
+        _timeout_task: Optional[asyncio.Task] = None
+
+        async def _auto_release():
+            try:
+                await asyncio.sleep(_OW_EXECUTING_TIMEOUT)
+                self._plugin._ow_executing.discard(uid)
+                logger.warning(f"[开庭][uid={uid}] 锁超时自动释放 ({_OW_EXECUTING_TIMEOUT}s)")
+            except asyncio.CancelledError:
+                pass
+
+        _timeout_task = asyncio.create_task(_auto_release())
         try:
             # 3. 分级冷却检查（与是区吗独立计算）
             ok, remaining = await self._check_cooldown(event)
@@ -207,6 +224,8 @@ class CourtManager:
             await self._set_cooldown(event)
             logger.info(f"[开庭] done total={time.time() - t_start:.1f}s")
         finally:
+            if _timeout_task is not None and not _timeout_task.done():
+                _timeout_task.cancel()
             self._plugin._ow_executing.discard(uid)
 
     async def last_result(self, event):

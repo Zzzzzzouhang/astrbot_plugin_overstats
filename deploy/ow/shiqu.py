@@ -12,6 +12,7 @@
    `plugin._check_violation_ban(event, "是区吗")` 检查，发送时由插件级助手自动封禁。
 """
 
+import asyncio
 import time
 import json
 import logging
@@ -27,6 +28,7 @@ _SHIQU_LAST_TARGET_KV_PREFIX = "ow_shiqu_last_target"
 _SHIQU_LAST_QUERY_TS_KV_PREFIX = "ow_shiqu_last_query_ts"
 _SHIQU_IMAGE_SENT_KV_PREFIX = "ow_shiqu_image_sent"
 _SHIQU_PENDING_SECONDS = 300  # 5 分钟内再发确认
+_OW_EXECUTING_TIMEOUT = 300  # 锁自动释放时间（秒）
 
 # 后端图片接口路径（base_url 已含 /api/v2，故此处不带前缀）
 _SHIQU_IMAGE_ENDPOINT = "/dashen-shiqu/image"
@@ -201,6 +203,18 @@ class ShiquManager:
                 yield event.plain_result("🔒 是区吗功能暂未对普通用户开放。")
                 return
         self._plugin._ow_executing.add(uid)
+        # 自动超时释放锁（_OW_EXECUTING_TIMEOUT 秒后），避免后端卡死导致锁永远不释放
+        _timeout_task: Optional[asyncio.Task] = None
+
+        async def _auto_release():
+            try:
+                await asyncio.sleep(_OW_EXECUTING_TIMEOUT)
+                self._plugin._ow_executing.discard(uid)
+                logger.warning(f"[是区吗][uid={uid}] 锁超时自动释放 ({_OW_EXECUTING_TIMEOUT}s)")
+            except asyncio.CancelledError:
+                pass
+
+        _timeout_task = asyncio.create_task(_auto_release())
         try:
 
             # 获取 bnet_id
@@ -265,6 +279,8 @@ class ShiquManager:
             else:
                 yield event.plain_result(f"❌ 暂无可用的最近结果，请直接发送 {_SHIQU_BTN} 开启新查询。")
         finally:
+            if _timeout_task is not None and not _timeout_task.done():
+                _timeout_task.cancel()
             self._plugin._ow_executing.discard(uid)
 
     async def _do_query(self, event, uid: str, target_id: str, match_count: int = 0):
