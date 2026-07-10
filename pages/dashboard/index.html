@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;600&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./style.css?v=7" />
+  <link rel="stylesheet" href="./style.css?v=10" />
 </head>
 <body>
   <!-- 顶部导航 -->
@@ -20,6 +20,7 @@
     <div class="nav-center">
       <button class="nav-tab active" data-page="dashboard">总览</button>
       <button class="nav-tab" data-page="shiqu">是区吗调用日志</button>
+      <button class="nav-tab" data-page="court">开庭调用日志</button>
     </div>
     <div class="nav-right">
       <span class="nav-uptime" id="nav-uptime">--</span>
@@ -198,11 +199,13 @@
         <!-- 右侧详情面板 -->
         <aside class="shiqu-side-panel" id="shiqu-side-panel">
           <div class="shiqu-side-header">
-            <span class="shiqu-side-title">LLM 分析详情</span>
+            <span class="shiqu-side-title" id="shiqu-side-title">LLM 分析详情</span>
+            <span class="shiqu-side-mode" id="shiqu-side-mode"></span>
+            <button class="shiqu-side-copy" id="shiqu-side-copy" title="复制提示词" style="display:none">复制</button>
             <button class="shiqu-side-close" id="shiqu-side-close" title="关闭">&times;</button>
           </div>
           <div class="shiqu-side-body" id="shiqu-side-body">
-            <p class="shiqu-side-placeholder">← 点击左侧表格中的「详情」查看 LLM 完整分析</p>
+            <p class="shiqu-side-placeholder">← 点击左侧表格行查看 <b>LLM 分析详情</b><br>点击「状态」列下的数字查看 <b>本次提示词</b></p>
           </div>
         </aside>
       </div>
@@ -211,9 +214,73 @@
 
     </div><!-- /#page-shiqu -->
 
+    <!-- ═══════════ 页面三：开庭调用日志 ═══════════ -->
+    <div class="page" id="page-court">
+
+    <section class="section">
+      <h2 class="section-title">开庭调用日志 <span class="section-overline">电竞法庭</span></h2>
+
+      <!-- 汇总卡片 -->
+      <div class="metrics-grid" id="court-summary-grid"></div>
+
+      <!-- 筛选栏 + 分页 -->
+      <div class="cmd-controls" style="margin-top:var(--s-md)">
+        <div style="display:flex;align-items:center;gap:var(--s-sm);flex-wrap:wrap">
+          <input type="text" class="text-input" id="court-search" placeholder="搜索玩家..." style="width:180px" />
+          <select class="text-input" id="court-success-filter" style="width:120px">
+            <option value="">全部状态</option>
+            <option value="true">成功</option>
+            <option value="false">失败</option>
+          </select>
+          <button class="btn btn-compact" id="btn-court-search">搜索</button>
+          <button class="btn btn-compact" id="btn-court-reset">重置</button>
+        </div>
+        <div class="shiqu-pagination" id="court-pagination"></div>
+      </div>
+
+      <!-- 表格 + 详情面板 布局 -->
+      <div class="shiqu-layout" id="court-layout">
+        <div class="shiqu-table-wrap" id="court-table-wrap">
+          <table class="shiqu-table" id="court-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>目标玩家</th>
+                <th>地图</th>
+                <th>模式</th>
+                <th>序号</th>
+                <th>耗时</th>
+                <th>状态</th>
+                <th>响应</th>
+              </tr>
+            </thead>
+            <tbody id="court-tbody">
+              <tr><td colspan="8" class="shiqu-loading">加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 右侧详情面板 -->
+        <aside class="shiqu-side-panel" id="court-side-panel">
+          <div class="shiqu-side-header">
+            <span class="shiqu-side-title" id="court-side-title">开庭判决书</span>
+            <span class="shiqu-side-mode" id="court-side-mode"></span>
+            <button class="shiqu-side-copy" id="court-side-copy" title="复制提示词" style="display:none">复制</button>
+            <button class="shiqu-side-close" id="court-side-close" title="关闭">&times;</button>
+          </div>
+          <div class="shiqu-side-body" id="court-side-body">
+            <p class="shiqu-side-placeholder">← 点击左侧表格行查看 <b>开庭判决书</b><br>点击「状态」列下的数字查看 <b>本次提示词</b></p>
+          </div>
+        </aside>
+      </div>
+
+    </section>
+
+    </div><!-- /#page-court -->
+
   </main>
 
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./app.js?v=11"></script>
+  <script src="./app.js?v=14"></script>
 </body>
 </html>

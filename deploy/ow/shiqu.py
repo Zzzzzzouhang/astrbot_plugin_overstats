@@ -38,8 +38,7 @@ _SHIQU_RESULT_BTN = '<qqbot-cmd-input text="ow是区吗结果" show="ow是区吗
 class ShiquManager:
     def __init__(self, plugin):
         self._plugin = plugin
-        # 同一用户正在进行的「是区吗」查询 uid 集合（并发守卫，防重复触发昂贵 LLM 生成）。
-        self._in_flight: set[str] = set()
+        # 并发守卫所用集合已上移到 plugin._ow_executing（与开庭共用，确保同一用户最多一条在执行）。
 
 
     # ── 权限 ──
@@ -190,19 +189,19 @@ class ShiquManager:
 
     async def run(self, event, bnet_id_input: str = "", match_count: int = 0):
         uid = self._user_key(event)
-        # 并发守卫：同一用户已有查询在进行中时直接返回提示，避免重复触发昂贵的 LLM 生成。
-        # 与插件原设计一致；后端接口无法推送状态，故只返回固定提示。
-        if uid in self._in_flight:
+        # 跨功能并发守卫：同一用户 是区吗 / 开庭 最多一条在执行（与开庭共用 plugin._ow_executing）。
+        # 后端接口无法推送状态，故在进行中只返回固定提示。
+        if uid in self._plugin._ow_executing:
             yield event.plain_result("⏳ 判定书正在生成中，当前步骤：AI 生成判定，请稍候…")
             return
-        self._in_flight.add(uid)
+        # 普通用户开关
+        if not self._is_admin(event) and not self._plugin._is_whitelisted(event):
+            cd_map = self._get_config_map()
+            if not cd_map.get("normal_enabled", False):
+                yield event.plain_result("🔒 是区吗功能暂未对普通用户开放。")
+                return
+        self._plugin._ow_executing.add(uid)
         try:
-            # 普通用户开关
-            if not self._is_admin(event) and not self._plugin._is_whitelisted(event):
-                cd_map = self._get_config_map()
-                if not cd_map.get("normal_enabled", False):
-                    yield event.plain_result("🔒 是区吗功能暂未对普通用户开放。")
-                    return
 
             # 获取 bnet_id
             target_id = await self._plugin._get_bnet_id(event, bnet_id_input)
@@ -266,15 +265,14 @@ class ShiquManager:
             else:
                 yield event.plain_result(f"❌ 暂无可用的最近结果，请直接发送 {_SHIQU_BTN} 开启新查询。")
         finally:
-            self._in_flight.discard(uid)
+            self._plugin._ow_executing.discard(uid)
 
     async def _do_query(self, event, uid: str, target_id: str, match_count: int = 0):
 
         """执行实际的新查询：调用后端接口取图并发送，成功后写 CD 与首日标记。"""
         t0 = time.time()
         yield event.plain_result(
-            f'🔍 正在生成 {target_id} 是区吗判定书，请稍候（约数十秒至几分钟）。'
-            f'如需查看上次结果，可使用 {_SHIQU_RESULT_BTN}'
+            f'🔍 正在生成 {target_id} 是区吗判定书，5分钟未自动返回，请使用{_SHIQU_RESULT_BTN}'
         )
         payload = {"bnet_id": target_id, "use_db": False}
         if 0 < match_count <= 25:

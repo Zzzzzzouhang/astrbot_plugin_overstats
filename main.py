@@ -38,11 +38,11 @@ try:
 except ImportError:
     from deploy import MonitorCollector, MonitorLogHandler, MonitorSSEQueue, BackendMetricsReader  # type: ignore[no-redef]
 
-# 是区吗调用日志读取（后端 shiqu_llm.sqlite3）
+# 是区吗 / 开庭调用日志读取（后端 shiqu_llm.sqlite3）
 try:
-    from .deploy.ow.shiqu_sqlite import ShiquSqliteReader
+    from .deploy.ow.shiqu_sqlite import ShiquSqliteReader, CourtSqliteReader
 except ImportError:
-    from deploy.ow.shiqu_sqlite import ShiquSqliteReader  # type: ignore[no-redef]
+    from deploy.ow.shiqu_sqlite import ShiquSqliteReader, CourtSqliteReader  # type: ignore[no-redef]
 
 # Web API helpers
 from astrbot.api.web import request, json_response, error_response, stream_response
@@ -123,6 +123,8 @@ class OverstatsPlugin(Star):
         self.daily_group_prompt_notice = '群内使用请手动<qqbot-cmd-input text=" " show="@机器人" reference="false"/>或点击<qqbot-cmd-input text="快捷指令" show="快捷指令" reference="false"/>按钮，纯文本无法识别。'
         self.error_append_notice = '如需重新发起指令，请手动<qqbot-cmd-input text=" " show="@机器人" reference="false"/>或点击<qqbot-cmd-input text="快捷指令" show="快捷指令" reference="false"/>按钮，纯文本无法识别。'
         self.daily_prompt_pending_users: set[str] = set()
+        # 跨功能并发守卫：同一用户同一时间 是区吗/开庭 最多一条在执行（两管理器共用）
+        self._ow_executing: set[str] = set()
         self.id_resolve_error_hint = '未查询到id或者id错误，id严格区分大小写'
         self._save_image_locally = bool(self.config.get('save_image_locally', True))
         try:
@@ -1872,6 +1874,9 @@ class OverstatsPlugin(Star):
         ctx.register_web_api(f'/{P}/monitor/backend/perf', self._api_monitor_backend_perf, ['GET'], '后端性能')
         ctx.register_web_api(f'/{P}/monitor/backend/upstream', self._api_monitor_backend_upstream, ['GET'], '上游统计')
         ctx.register_web_api(f'/{P}/monitor/shiqu/calls', self._api_monitor_shiqu_calls, ['GET'], '是区吗调用日志')
+        ctx.register_web_api(f'/{P}/monitor/shiqu/detail', self._api_monitor_shiqu_detail, ['GET'], '是区吗调用详情')
+        ctx.register_web_api(f'/{P}/monitor/court/calls', self._api_monitor_court_calls, ['GET'], '开庭调用日志')
+        ctx.register_web_api(f'/{P}/monitor/court/detail', self._api_monitor_court_detail, ['GET'], '开庭调用详情')
         ctx.register_web_api(f'/{P}/monitor/rate_limit', self._api_monitor_rate_limit, ['GET'], '限流统计')
         ctx.register_web_api(f'/{P}/monitor/clear', self._api_monitor_clear, ['POST'], '清空统计')
 
@@ -2021,3 +2026,55 @@ class OverstatsPlugin(Star):
             target_id = search
         result = await loop.run_in_executor(None, reader.query, limit, offset, target_id, success)
         return json_response(result)
+
+    async def _api_monitor_shiqu_detail(self):
+        """GET /monitor/shiqu/detail?id=<record_id>
+
+        按需读取单条完整记录（含 prompt / raw_response），用于点击表格时的详情面板。
+        列表接口不携带大字段，避免常驻内存与重复传输。
+        """
+        record_id = request.query.get('id', 0, type=int)
+        reader = ShiquSqliteReader(self.config.get('sqlite_db_path', '') or '')
+        loop = asyncio.get_event_loop()
+        record = await loop.run_in_executor(None, reader.get_by_id, record_id)
+        if not record:
+            return json_response({"available": False, "record": None})
+        return json_response({"available": True, "record": record})
+
+    async def _api_monitor_court_calls(self):
+        """GET /monitor/court/calls?limit=30&offset=0&target_id=&success=&search=
+
+        读取后端 shiqu_llm.sqlite3 的 court_llm_result 表，列表仅返回精简列，
+        大字段 prompt / raw_response 不随列表返回（按需经 detail 接口拉取）。
+        """
+        limit = request.query.get('limit', 30, type=int)
+        offset = request.query.get('offset', 0, type=int)
+        target_id = request.query.get('target_id', '', type=str)
+        success_str = request.query.get('success', '')
+        search = request.query.get('search', '', type=str)
+        success = None
+        if success_str.lower() in ('true', '1', 'yes'):
+            success = True
+        elif success_str.lower() in ('false', '0', 'no'):
+            success = False
+        # 后端 court_llm_result 仅支持按 target_id 精确匹配；search 作为 target_id 模糊前缀使用
+        reader = CourtSqliteReader(self.config.get('sqlite_db_path', '') or '')
+        loop = asyncio.get_event_loop()
+        if search and not target_id:
+            target_id = search
+        result = await loop.run_in_executor(None, reader.query, limit, offset, target_id, success)
+        return json_response(result)
+
+    async def _api_monitor_court_detail(self):
+        """GET /monitor/court/detail?id=<record_id>
+
+        按需读取单条完整记录（含 prompt / raw_response 纯文本判决书），用于点击表格时的详情面板。
+        列表接口不携带大字段，避免常驻内存与重复传输。
+        """
+        record_id = request.query.get('id', 0, type=int)
+        reader = CourtSqliteReader(self.config.get('sqlite_db_path', '') or '')
+        loop = asyncio.get_event_loop()
+        record = await loop.run_in_executor(None, reader.get_by_id, record_id)
+        if not record:
+            return json_response({"available": False, "record": None})
+        return json_response({"available": True, "record": record})

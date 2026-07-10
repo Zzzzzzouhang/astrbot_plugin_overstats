@@ -84,6 +84,17 @@ let sseSubId = null;
 // 是区吗调用日志状态
 let shiquData = { records: [], summary: {}, total: 0, offset: 0, limit: 30 };
 let shiquSelectedIdx = -1; // 当前选中行（侧边栏显示详情）
+let shiquCurrentMode = "";  // "analysis" | "prompt"
+let shiquDetailReqToken = 0; // 丢弃过期异步详情响应，避免竞态覆盖
+const shiquRecordById = new Map(); // id(Number) -> record
+
+// 开庭调用日志状态
+let courtData = { records: [], summary: {}, total: 0, offset: 0, limit: 30 };
+let courtSelectedIdx = -1; // 当前选中行（侧边栏显示详情）
+let courtCurrentMode = "";  // "verdict" | "prompt"
+let courtDetailReqToken = 0; // 丢弃过期异步详情响应，避免竞态覆盖
+const courtRecordById = new Map(); // id(Number) -> record
+let courtCopyCache = "";
 
 // ── Category list ──
 const CATEGORIES = ["基础绑定", "数据查询", "总结", "图表排行", "游戏资讯", "AI开庭", "管理部署"];
@@ -113,6 +124,11 @@ async function init() {
   safeBind("btn-shiqu-search", "click", shiquSearch);
   safeBind("btn-shiqu-reset", "click", shiquReset);
   safeBind("shiqu-side-close", "click", closeShiquDetail);
+  safeBind("shiqu-side-copy", "click", copyShiquPrompt);
+  safeBind("btn-court-search", "click", courtSearch);
+  safeBind("btn-court-reset", "click", courtReset);
+  safeBind("court-side-close", "click", closeCourtDetail);
+  safeBind("court-side-copy", "click", copyCourtPrompt);
   safeBind("cmd-search", "input", onSearchInput);
   bindNavTabs();
   bindTimeTabs();
@@ -280,6 +296,7 @@ async function refreshAll() {
     fetchUpstream(),
     fetchErrors(),
     fetchShiqu(),
+    fetchCourt(),
   ]);
   renderAll();
 }
@@ -431,28 +448,50 @@ function renderShiqu() {
   // 表格
   const tbody = document.getElementById("shiqu-tbody");
   const records = shiquData.records || [];
+  shiquRecordById.clear();
   if (!records.length) {
     tbody.innerHTML = `<tr><td colspan="5" class="shiqu-loading">暂无调用记录</td></tr>`;
     closeShiquDetail();
   } else {
-    tbody.innerHTML = records.map((r, i) => {
+    tbody.innerHTML = records.map((r) => {
+      shiquRecordById.set(r.id, r);
       const ts = r.created_at ? new Date(r.created_at * 1000).toLocaleString() : "--";
       const dur = r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "--";
       const durCls = r.duration_ms > 120000 ? "shiqu-slow" : "";
       const okBadge = r.ok
         ? `<span class="badge badge-success">成功</span>`
         : `<span class="badge badge-error">失败</span>`;
-      const callBadge = (r.call_count > 1) ? `<span style="font-size:10px;color:var(--c-warning);margin-left:4px">调用×${r.call_count}</span>` : "";
-      const globalIdx = shiquCurrentPage * SHIQU_PAGE_SIZE + i;
+      const callBadge = (r.call_count > 1) ? `<span style="font-size:10px;color:var(--c-warning);margin-left:4px">×${r.call_count}</span>` : "";
 
-      return `<tr class="shiqu-row" data-index="${globalIdx}">
+      return `<tr class="shiqu-row" data-id="${r.id}">
         <td class="shiqu-ts">${ts}</td>
         <td class="shiqu-target" title="${esc(r.target_id||'')}">${esc((r.target_id||'--').length > 16 ? r.target_id.slice(0,16)+'…' : (r.target_id||'--'))}</td>
         <td class="shiqu-dur ${durCls}">${dur}</td>
-        <td class="shiqu-call">${r.call_count ?? 1}${callBadge}</td>
+        <td class="shiqu-call">
+          <button class="shiqu-call-count" data-id="${r.id}" title="点击查看本次提示词">${r.call_count ?? 1}</button>${callBadge}
+        </td>
         <td style="white-space:nowrap">${okBadge}</td>
       </tr>`;
     }).join("");
+
+    // 绑定行点击 → LLM 分析详情（按需拉取单条大字段）
+    tbody.querySelectorAll(".shiqu-row").forEach(row => {
+      row.addEventListener("click", () => openShiquDetail(Number(row.dataset.id), "analysis"));
+    });
+    // 绑定调用次数按钮点击 → 提示词（阻止冒泡，避免同时触发行点击）
+    tbody.querySelectorAll(".shiqu-call-count").forEach(btn => {
+      if (btn.classList.contains("disabled")) return;
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openShiquDetail(Number(btn.dataset.id), "prompt");
+      });
+    });
+
+    // 重绘后恢复已选中行高亮（30s 轮询会重绘表格，避免高亮丢失）
+    if (shiquSelectedIdx > 0) {
+      const sel = tbody.querySelector(`.shiqu-row[data-id="${shiquSelectedIdx}"]`);
+      if (sel) sel.classList.add("selected");
+    }
   }
 
   // 分页
@@ -461,9 +500,187 @@ function renderShiqu() {
 
 function closeShiquDetail() {
   shiquSelectedIdx = -1;
+  shiquCurrentMode = "";
+  shiquDetailReqToken++; // 取消可能在途的详情请求，避免关闭后内容被回填
   document.querySelectorAll(".shiqu-row").forEach(r => r.classList.remove("selected"));
   const body = document.getElementById("shiqu-side-body");
-  if (body) body.innerHTML = `<p class="shiqu-side-placeholder">← 点击左侧表格中的「详情」查看 LLM 完整分析</p>`;
+  if (body) body.innerHTML = `<p class="shiqu-side-placeholder">← 点击左侧表格行查看 <b>LLM 分析详情</b><br>点击「状态」列下的数字查看 <b>本次提示词</b></p>`;
+  const titleEl = document.getElementById("shiqu-side-title");
+  if (titleEl) titleEl.textContent = "LLM 分析详情";
+  const modeEl = document.getElementById("shiqu-side-mode");
+  if (modeEl) modeEl.textContent = "";
+  const copyBtn = document.getElementById("shiqu-side-copy");
+  if (copyBtn) copyBtn.style.display = "none";
+}
+
+// ── 打开详情面板（按需拉取单条大字段，mode: "analysis" 显示 LLM 分析；"prompt" 显示提示词）──
+async function openShiquDetail(id, mode) {
+  shiquSelectedIdx = id;
+  shiquCurrentMode = mode;
+  const body = document.getElementById("shiqu-side-body");
+  const titleEl = document.getElementById("shiqu-side-title");
+  const modeEl = document.getElementById("shiqu-side-mode");
+  const copyBtn = document.getElementById("shiqu-side-copy");
+
+  // 高亮选中行
+  document.querySelectorAll(".shiqu-row").forEach(r =>
+    r.classList.toggle("selected", Number(r.dataset.id) === id)
+  );
+
+  // 轻量记录即可提供标题
+  const lean = shiquRecordById.get(id);
+  if (titleEl) titleEl.textContent = "是区吗 · " + esc((lean && lean.target_id) || "未知玩家");
+  if (modeEl) modeEl.textContent = mode === "prompt" ? "提示词" : "LLM 分析详情";
+  if (copyBtn) copyBtn.style.display = "none";
+  if (body) body.innerHTML = `<p class="shiqu-side-placeholder">加载中…</p>`;
+
+  const myToken = ++shiquDetailReqToken; // 标记本次请求，丢弃后到的过期响应
+  try {
+    const resp = await bridge.apiGet("monitor/shiqu/detail", { id });
+    if (myToken !== shiquDetailReqToken) return; // 已有更新的点击，丢弃本次结果
+    const rec = resp && resp.record;
+    if (!rec) {
+      if (body) body.innerHTML = `<p class="sr-empty">未找到该条记录（数据库可能已清理）。</p>`;
+      return;
+    }
+    if (titleEl) titleEl.textContent = "是区吗 · " + esc(rec.target_id || "未知玩家");
+
+    if (mode === "prompt") {
+      shiquCopyCache = rec.prompt || "";
+      if (copyBtn) copyBtn.style.display = "";
+      if (body) body.innerHTML = renderShiquPromptHTML(rec.prompt);
+    } else {
+      let parsed = null;
+      if (rec.raw_response) {
+        try { parsed = typeof rec.raw_response === "string" ? JSON.parse(rec.raw_response) : rec.raw_response; }
+        catch (e) { parsed = null; }
+      }
+      if (parsed) {
+        if (body) body.innerHTML = renderShiquAnalysisHTML(parsed);
+      } else {
+        const diag = (!rec.ok)
+          ? "本次调用未成功（LLM 未返回有效结果）。"
+          : "数据库中未保存有效的 LLM 分析内容。";
+        if (body) body.innerHTML = `<p class="sr-empty">${esc(diag)}</p>` +
+          (rec.prompt ? `<div class="sr-section">本次提示词（供参考）</div><div class="sr-prompt-wrap"><pre class="sr-prompt">${esc(rec.prompt)}</pre></div>` : "");
+      }
+    }
+  } catch (e) {
+    if (body) body.innerHTML = `<p class="sr-error">加载失败：${esc(e.message || e)}</p>`;
+  }
+  const panel = document.getElementById("shiqu-side-panel");
+  if (panel) panel.scrollTop = 0;
+}
+
+let shiquCopyCache = "";
+
+// ── 渲染：本次提示词 ──
+function renderShiquPromptHTML(prompt) {
+  if (!prompt) return `<p class="sr-empty">本次调用没有记录到提示词。</p>`;
+  return `<div class="sr-prompt-wrap"><pre class="sr-prompt">${esc(prompt)}</pre></div>`;
+}
+
+// ── 渲染：LLM 分析详情（对应 shiqu.py 模板的 .sr-* 结构）──
+function _srScoreClass(score) {
+  score = Number(score) || 0;
+  if (score >= 83) return "god";
+  if (score >= 75) return "boom";
+  if (score >= 68) return "butterfly";
+  if (score >= 60) return "ok";
+  if (score >= 52) return "mid";
+  if (score >= 43) return "bad";
+  return "terrible";
+}
+const _SR_VERDICT_CLASS = {
+  "你是职业吗？": "god", "来了，暴力炸！": "boom", "化蛹成蝶（？）": "butterfly",
+  "恭喜，你不是区！": "ok", "不幸，你可能是区？": "mid", "哦灭跌多，你就是区！": "bad",
+  "你个大区！！！": "terrible",
+};
+const _SR_VERDICT_EMOJI = {
+  "你是职业吗？": "😱", "来了，暴力炸！": "🤤", "化蛹成蝶（？）": "🦋",
+  "恭喜，你不是区！": "😂", "不幸，你可能是区？": "🤔", "哦灭跌多，你就是区！": "🎉", "你个大区！！！": "😡",
+};
+function _srVerdictClass(label) { return _SR_VERDICT_CLASS[(label || "").trim()] || "terrible"; }
+function _srVerdictEmoji(label) { return _SR_VERDICT_EMOJI[(label || "").trim()] || ""; }
+function _srResultClass(result) {
+  return { "胜": "win", "负": "loss", "平": "draw" }[result] || "unknown";
+}
+
+// verdict 由 score 推导（与后端 _score_rule 一致）；raw_response 通常不含该字段，故按阈值还原。
+const _SR_SCORE_VERDICT = [
+  { min: 83, label: "你是职业吗？", emoji: "😱", cls: "god" },
+  { min: 75, label: "来了，暴力炸！", emoji: "🤤", cls: "boom" },
+  { min: 68, label: "化蛹成蝶（？）", emoji: "🦋", cls: "butterfly" },
+  { min: 60, label: "恭喜，你不是区！", emoji: "😂", cls: "ok" },
+  { min: 52, label: "不幸，你可能是区？", emoji: "🤔", cls: "mid" },
+  { min: 43, label: "哦灭跌多，你就是区！", emoji: "🎉", cls: "bad" },
+  { min: 0,  label: "你个大区！！！", emoji: "😡", cls: "terrible" },
+];
+function _srVerdictFromScore(score) {
+  for (const r of _SR_SCORE_VERDICT) if (score >= r.min) return r;
+  return _SR_SCORE_VERDICT[_SR_SCORE_VERDICT.length - 1];
+}
+
+function renderShiquAnalysisHTML(d) {
+  if (!d || typeof d !== "object") return `<p class="sr-empty">无 LLM 分析结果。</p>`;
+  const score = Number(d.score) || 0;
+  const scoreCls = _srScoreClass(score);
+  let verdict = d.verdict;
+  let verdictCls, verdictEmoji;
+  if (verdict) {
+    verdictCls = _srVerdictClass(verdict);
+    verdictEmoji = _srVerdictEmoji(verdict);
+  } else {
+    const vr = _srVerdictFromScore(score);
+    verdict = vr.label; verdictCls = vr.cls; verdictEmoji = vr.emoji;
+  }
+
+  let html = `<div class="sr-score ${scoreCls}">${score}</div>`;
+  html += `<div class="sr-verdict ${verdictCls}">${verdictEmoji} ${esc(verdict)}</div>`;
+
+  html += `<div class="sr-section">数据概况</div>`;
+  html += `<div class="sr-summary">${esc(d.summary || "暂无数据概况。")}</div>`;
+
+  const matches = Array.isArray(d.match_comments) ? d.match_comments : [];
+  if (matches.length) {
+    html += `<div class="sr-section">对局点评</div>`;
+    for (const m of matches) {
+      const res = m.result || "未知";
+      html += `<div class="sr-game">`;
+      html += `<b>第 ${m.index != null ? m.index : "?"} 局</b> · ${esc(m.mode || "")} · `;
+      html += `<span class="sr-result-${_srResultClass(res)}">${esc(res)}</span> · 英雄：${esc(m.heroes || "")}<br>`;
+      html += `${esc(m.comment || "")}</div>`;
+    }
+  }
+
+  html += `<div class="sr-section">综合评价</div>`;
+  html += `<div class="sr-overall">${esc(d.overall_comment || "暂无综合评价。")}</div>`;
+
+  const mates = Array.isArray(d.teammate_comments) ? d.teammate_comments : [];
+  if (mates.length) {
+    html += `<div class="sr-section">队友点评</div>`;
+    for (const t of mates) {
+      const tcls = _srScoreClass(t.score);
+      html += `<div class="sr-mate-entry">`;
+      html += `<div class="sr-mate-head"><span class="sr-mate-name">${esc(t.name || "?")}</span>`;
+      html += ` <span class="sr-mate-games">共 ${t.games != null ? t.games : "?"} 局</span>`;
+      html += ` <span class="sr-iv ${tcls} sr-mate-score">${t.score != null ? t.score : "?"}</span></div>`;
+      html += `<p class="sr-mate-comment">${esc(t.comment || "暂无点评。")}</p></div>`;
+    }
+  }
+  return html;
+}
+
+// ── 复制当前提示词 ──
+function copyShiquPrompt() {
+  if (!shiquCopyCache) return;
+  const text = shiquCopyCache;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = document.getElementById("shiqu-side-copy");
+      if (btn) { const old = btn.textContent; btn.textContent = "已复制"; setTimeout(() => btn.textContent = old, 1200); }
+    }).catch(() => {});
+  }
 }
 
 function renderShiquPagination() {
@@ -481,6 +698,331 @@ function renderShiquPagination() {
   const nextBtn = document.getElementById("btn-shiqu-next");
   if (prevBtn) prevBtn.addEventListener("click", () => { if (shiquCurrentPage > 0) fetchShiqu(shiquCurrentPage - 1).then(renderShiqu); });
   if (nextBtn) nextBtn.addEventListener("click", () => { if (shiquCurrentPage < totalPages - 1) fetchShiqu(shiquCurrentPage + 1).then(renderShiqu); });
+}
+
+// ══════════ 开庭调用日志（复刻是区吗调用日志）══════════
+
+let courtCurrentPage = 0;        // 当前页码 (0-based)
+const COURT_PAGE_SIZE = 20;
+
+async function fetchCourt(page) {
+  if (page === undefined) page = courtCurrentPage;
+  try {
+    const params = { limit: COURT_PAGE_SIZE, offset: page * COURT_PAGE_SIZE };
+    const search = document.getElementById("court-search")?.value?.trim();
+    const success = document.getElementById("court-success-filter")?.value;
+    if (search) params.search = search;
+    if (success !== "") params.success = success;
+    console.log("[Monitor] fetchCourt:", params);
+    courtData = await bridge.apiGet("monitor/court/calls", params);
+    courtCurrentPage = page;
+    console.log("[Monitor] courtData:", courtData?.summary, "records:", courtData?.records?.length);
+  } catch (e) { console.error("court/calls:", e.message); }
+}
+
+function courtSearch() {
+  fetchCourt(0).then(renderCourt);
+}
+
+function courtReset() {
+  const el1 = document.getElementById("court-search");
+  const el2 = document.getElementById("court-success-filter");
+  if (el1) el1.value = "";
+  if (el2) el2.value = "";
+  fetchCourt(0).then(renderCourt);
+}
+
+function renderCourt() {
+  // 汇总卡片
+  const grid = document.getElementById("court-summary-grid");
+  const s = courtData.summary || {};
+  const avail = courtData.available !== false;
+  if (!avail) {
+    grid.innerHTML = `<div class="feature-card metric-card" style="grid-column:1/-1"><span class="metric-label">日志不可用</span><span class="metric-value" style="font-size:16px">shiqu_llm.sqlite3 未找到（后端未启用数据库写入？）</span></div>`;
+  } else {
+    const total = s.total ?? 0;
+    const success = s.success ?? 0;
+    const rate = total ? ((success / total) * 100).toFixed(1) : "0.0";
+    const avgMs = s.avg_duration_ms ? (s.avg_duration_ms / 1000).toFixed(1) + "s" : "--";
+    grid.innerHTML = `
+      <div class="feature-card metric-card">
+        <span class="metric-label">总调用次数</span>
+        <span class="metric-value">${total.toLocaleString()}</span>
+      </div>
+      <div class="feature-card metric-card">
+        <span class="metric-label">成功次数</span>
+        <span class="metric-value" style="color:${rate > 90 ? 'var(--c-success)' : 'var(--c-warning)'}">${success.toLocaleString()}（${rate}%）</span>
+      </div>
+      <div class="feature-card metric-card">
+        <span class="metric-label">平均耗时</span>
+        <span class="metric-value">${avgMs}</span>
+      </div>
+      <div class="feature-card metric-card">
+        <span class="metric-label">失败次数</span>
+        <span class="metric-value">${(s.failed ?? 0).toLocaleString()}</span>
+      </div>`;
+  }
+
+  // 表格
+  const tbody = document.getElementById("court-tbody");
+  const records = courtData.records || [];
+  courtRecordById.clear();
+  if (!records.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="shiqu-loading">暂无调用记录</td></tr>`;
+    closeCourtDetail();
+  } else {
+    tbody.innerHTML = records.map((r) => {
+      courtRecordById.set(r.id, r);
+      const ts = r.created_at ? new Date(r.created_at * 1000).toLocaleString() : "--";
+      const dur = r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "--";
+      const durCls = r.duration_ms > 120000 ? "shiqu-slow" : "";
+      const okBadge = r.ok
+        ? `<span class="badge badge-success">成功</span>`
+        : `<span class="badge badge-error">失败</span>`;
+      const callBadge = (r.call_count > 1) ? `<span style="font-size:10px;color:var(--c-warning);margin-left:4px">×${r.call_count}</span>` : "";
+      const idx = (r.match_index != null ? r.match_index : 0) + 1;
+      const mapName = esc(r.map_name || "--");
+      const gameMode = esc(r.game_mode || "--");
+
+      return `<tr class="shiqu-row" data-id="${r.id}">
+        <td class="shiqu-ts">${ts}</td>
+        <td class="shiqu-target" title="${esc(r.target_id||'')}">${esc((r.target_id||'--').length > 16 ? r.target_id.slice(0,16)+'…' : (r.target_id||'--'))}</td>
+        <td class="shiqu-target" title="${mapName}">${mapName}</td>
+        <td class="shiqu-target" title="${gameMode}">${gameMode}</td>
+        <td style="text-align:center;font-family:var(--ff-code);color:var(--c-body)">${idx}</td>
+        <td class="shiqu-dur ${durCls}">${dur}</td>
+        <td class="shiqu-call">
+          <button class="shiqu-call-count" data-id="${r.id}" title="点击查看本次提示词">${r.call_count ?? 1}</button>${callBadge}
+        </td>
+        <td style="white-space:nowrap">${okBadge}</td>
+      </tr>`;
+    }).join("");
+
+    // 绑定行点击 → 判决书详情（按需拉取单条大字段）
+    tbody.querySelectorAll(".shiqu-row").forEach(row => {
+      row.addEventListener("click", () => openCourtDetail(Number(row.dataset.id), "verdict"));
+    });
+    // 绑定调用次数按钮点击 → 提示词（阻止冒泡，避免同时触发行点击）
+    tbody.querySelectorAll(".shiqu-call-count").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openCourtDetail(Number(btn.dataset.id), "prompt");
+      });
+    });
+
+    // 重绘后恢复已选中行高亮（30s 轮询会重绘表格，避免高亮丢失）
+    if (courtSelectedIdx > 0) {
+      const sel = tbody.querySelector(`.shiqu-row[data-id="${courtSelectedIdx}"]`);
+      if (sel) sel.classList.add("selected");
+    }
+  }
+
+  // 分页
+  renderCourtPagination();
+}
+
+function closeCourtDetail() {
+  courtSelectedIdx = -1;
+  courtCurrentMode = "";
+  courtDetailReqToken++; // 取消可能在途的详情请求，避免关闭后内容被回填
+  document.querySelectorAll("#court-tbody .shiqu-row").forEach(r => r.classList.remove("selected"));
+  const body = document.getElementById("court-side-body");
+  if (body) body.innerHTML = `<p class="shiqu-side-placeholder">← 点击左侧表格行查看 <b>开庭判决书</b><br>点击「状态」列下的数字查看 <b>本次提示词</b></p>`;
+  const titleEl = document.getElementById("court-side-title");
+  if (titleEl) titleEl.textContent = "开庭判决书";
+  const modeEl = document.getElementById("court-side-mode");
+  if (modeEl) modeEl.textContent = "";
+  const copyBtn = document.getElementById("court-side-copy");
+  if (copyBtn) copyBtn.style.display = "none";
+}
+
+// ── 打开详情面板（按需拉取单条大字段，mode: "verdict" 显示判决书；"prompt" 显示提示词）──
+async function openCourtDetail(id, mode) {
+  courtSelectedIdx = id;
+  courtCurrentMode = mode;
+  const body = document.getElementById("court-side-body");
+  const titleEl = document.getElementById("court-side-title");
+  const modeEl = document.getElementById("court-side-mode");
+  const copyBtn = document.getElementById("court-side-copy");
+
+  // 高亮选中行
+  document.querySelectorAll("#court-tbody .shiqu-row").forEach(r =>
+    r.classList.toggle("selected", Number(r.dataset.id) === id)
+  );
+
+  // 轻量记录即可提供标题
+  const lean = courtRecordById.get(id);
+  if (titleEl) titleEl.textContent = "开庭 · " + esc((lean && lean.target_id) || "未知玩家");
+  if (modeEl) modeEl.textContent = mode === "prompt" ? "提示词" : "判决书";
+  if (copyBtn) copyBtn.style.display = "none";
+  if (body) body.innerHTML = `<p class="shiqu-side-placeholder">加载中…</p>`;
+
+  const myToken = ++courtDetailReqToken; // 标记本次请求，丢弃后到的过期响应
+  try {
+    const resp = await bridge.apiGet("monitor/court/detail", { id });
+    if (myToken !== courtDetailReqToken) return; // 已有更新的点击，丢弃本次结果
+    const rec = resp && resp.record;
+    if (!rec) {
+      if (body) body.innerHTML = `<p class="sr-empty">未找到该条记录（数据库可能已清理）。</p>`;
+      return;
+    }
+    if (titleEl) titleEl.textContent = "开庭 · " + esc(rec.target_id || "未知玩家");
+
+    if (mode === "prompt") {
+      courtCopyCache = rec.prompt || "";
+      if (copyBtn) copyBtn.style.display = "";
+      if (body) body.innerHTML = renderCourtPromptHTML(rec.prompt);
+    } else {
+      if (body) body.innerHTML = renderCourtVerdictHTML(rec);
+    }
+  } catch (e) {
+    if (body) body.innerHTML = `<p class="sr-error">加载失败：${esc(e.message || e)}</p>`;
+  }
+  const panel = document.getElementById("court-side-panel");
+  if (panel) panel.scrollTop = 0;
+}
+
+// ── 渲染：本次提示词 ──
+function renderCourtPromptHTML(prompt) {
+  if (!prompt) return `<p class="sr-empty">本次调用没有记录到提示词。</p>`;
+  return `<div class="sr-prompt-wrap"><pre class="sr-prompt">${esc(prompt)}</pre></div>`;
+}
+
+// ── 渲染：开庭判决书（纯文本，仿 court.py / render.py 排版）──
+function _courtInline(text) {
+  // **粗体** → 金色；其余转义后原样输出（esc 不影响 *，故 ** 得以保留）
+  return esc(text).replace(/\*\*(.+?)\*\*/g, '<b class="cv-b">$1</b>');
+}
+
+function renderCourtVerdictHTML(rec) {
+  if (!rec || typeof rec !== "object") return `<p class="sr-empty">无法显示判决书。</p>`;
+  const raw = rec.raw_response || "";
+  if (!raw.trim()) {
+    const diag = (!rec.ok)
+      ? "本次调用未成功（LLM 未返回有效判决书）。"
+      : "数据库中未保存有效的判决书内容。";
+    let html = `<p class="sr-empty">${esc(diag)}</p>`;
+    if (rec.prompt) html += `<div class="sr-section">本次提示词（供参考）</div><div class="sr-prompt-wrap"><pre class="sr-prompt">${esc(rec.prompt)}</pre></div>`;
+    return html;
+  }
+
+  // ── 解析 raw_response ──
+  let obj = null;
+  let isMultiField = false;
+  const s = raw.trim();
+  if (s.startsWith("{")) {
+    try { obj = JSON.parse(s); } catch (_) { obj = null; }
+    if (obj && typeof obj === "object" && obj.case_no && obj.location &&
+        obj.mvp && obj.defendant && obj.focus_verdict &&
+        Array.isArray(obj.team_verdicts) && obj.lane_analysis) {
+      isMultiField = true;
+    }
+  }
+
+  // 新版结构化 JSON
+  if (isMultiField) return _renderCourtStructuredHTML(obj);
+
+  // 旧版单字段 {"verdict":"..."} 或纯文本
+  const text = (obj && typeof obj.verdict === "string" && obj.verdict.trim()) ? obj.verdict : raw;
+  const idx = (rec.match_index ?? 0) + 1;
+  const subParts = [rec.target_id || "未知玩家"].concat(
+    rec.map_name ? [rec.map_name] : [],
+    rec.game_mode ? [`（${rec.game_mode}）`] : []
+  );
+  let html = `<div class="cv-head"><div class="cv-title">电竞法庭 · 第 ${idx} 局判决</div><div class="cv-sub">${esc(subParts.join('  ·  '))}</div></div>`;
+  for (const ln of text.split("\n")) {
+    const s = ln.trim();
+    if (!s) continue;
+    const lm = s.match(/^([-*+]\s+|\d+[.)]\s+)(.*)$/);
+    html += lm
+      ? `<div class="cv-list">${_courtInline(lm[2])}</div>`
+      : `<div class="cv-para">${_courtInline(s)}</div>`;
+  }
+  html += `<div class="cv-footer">* 功能仅限娱乐, 切勿因为ai瞎编影响心情</div>`;
+  return html;
+}
+
+function _renderCourtStructuredHTML(d) {
+  const mvp = d.mvp || {};
+  const defendant = d.defendant || {};
+  const focus = d.focus_verdict || {};
+  const lanes = d.lane_analysis || {};
+  const tvs = Array.isArray(d.team_verdicts) ? d.team_verdicts : [];
+  const scoreClsMap = { S:"sky", A:"boom", B:"ok", C:"mid", D:"bad" };
+  const scoreCls = scoreClsMap[focus.score] || "ok";
+
+  function _$e(s) { return esc(String(s ?? "")); }
+
+  let h = '<div class="cv-struct">';
+  h += '<div class="cvs-title">⚖️ 电竞法庭判决书</div>';
+  h += '<div class="cvs-meta">';
+  h += '<span class="cvs-case">📋 案件编号：第 ' + _$e(d.case_no) + ' 局</span>';
+  h += '<span class="cvs-location">🗺️ 案发地点：' + _$e(d.location) + '</span>';
+  h += '</div>';
+
+  // MVP
+  h += '<div class="cvs-section"><div class="cvs-mvp"><span class="cvs-section-icon">🏆</span><span class="cvs-section-label">MVP（最佳表现者）</span></div>';
+  h += '<div class="cvs-player">' + _$e(mvp.player) + '</div>';
+  h += '<div class="cvs-reason">' + _$e(mvp.reason) + '</div></div>';
+
+  // Defendant
+  h += '<div class="cvs-section"><div class="cvs-defendant"><span class="cvs-section-icon">👎</span><span class="cvs-section-label">最差表现者（被告）</span></div>';
+  h += '<div class="cvs-player">' + _$e(defendant.player) + '</div>';
+  h += '<div class="cvs-charges"><span class="cvs-charges-label">原罪清单</span>：' + _$e(defendant.charges) + '</div></div>';
+
+  // Focus verdict
+  h += '<div class="cvs-section"><div class="cvs-focus"><span class="cvs-section-icon">⚡</span><span class="cvs-section-label">焦点玩家判决</span></div>';
+  h += '<div class="cvs-player">' + _$e(focus.player) + ' <span class="cvs-score ' + scoreCls + '">' + _$e(focus.score) + '</span></div>';
+  h += '<div class="cvs-reason">' + _$e(focus.reason) + '</div></div>';
+
+  // Team verdicts
+  if (tvs.length) {
+    h += '<div class="cvs-section"><div class="cvs-team"><span class="cvs-section-icon">📊</span><span class="cvs-section-label">全队审判</span></div>';
+    h += '<table class="cvs-team-table">';
+    for (const tv of tvs) {
+      h += '<tr><td class="cvs-tp">' + _$e(tv.player) + '</td><td class="cvs-tv">' + _$e(tv.verdict) + '</td></tr>';
+    }
+    h += '</table></div>';
+  }
+
+  // Lane analysis
+  h += '<div class="cvs-section"><div class="cvs-lanes"><span class="cvs-section-icon">⚔️</span><span class="cvs-section-label">三路对位分析</span></div>';
+  h += '<div class="cvs-lane"><span class="cvs-lane-label">坦克位</span>' + _$e(lanes.tank) + '</div>';
+  h += '<div class="cvs-lane"><span class="cvs-lane-label">输出位</span>' + _$e(lanes.dps) + '</div>';
+  h += '<div class="cvs-lane"><span class="cvs-lane-label">辅助位</span>' + _$e(lanes.healer) + '</div></div>';
+
+  h += '<div class="cv-footer">* 功能仅限娱乐, 切勿因为ai瞎编影响心情</div>';
+  h += '</div>';
+  return h;
+}
+
+// ── 复制当前提示词 ──
+function copyCourtPrompt() {
+  if (!courtCopyCache) return;
+  const text = courtCopyCache;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = document.getElementById("court-side-copy");
+      if (btn) { const old = btn.textContent; btn.textContent = "已复制"; setTimeout(() => btn.textContent = old, 1200); }
+    }).catch(() => {});
+  }
+}
+
+function renderCourtPagination() {
+  const el = document.getElementById("court-pagination");
+  const total = courtData.total || 0;
+  const totalPages = Math.ceil(total / COURT_PAGE_SIZE);
+  if (totalPages <= 1) { el.innerHTML = ""; return; }
+
+  let html = `<span class="shiqu-page-info">共 ${total} 条，第 ${courtCurrentPage + 1}/${totalPages} 页</span>`;
+  html += `<button class="btn btn-compact" id="btn-court-prev" ${courtCurrentPage <= 0 ? 'disabled' : ''}>上一页</button>`;
+  html += `<button class="btn btn-compact" id="btn-court-next" ${courtCurrentPage >= totalPages - 1 ? 'disabled' : ''}>下一页</button>`;
+  el.innerHTML = html;
+
+  const prevBtn = document.getElementById("btn-court-prev");
+  const nextBtn = document.getElementById("btn-court-next");
+  if (prevBtn) prevBtn.addEventListener("click", () => { if (courtCurrentPage > 0) fetchCourt(courtCurrentPage - 1).then(renderCourt); });
+  if (nextBtn) nextBtn.addEventListener("click", () => { if (courtCurrentPage < totalPages - 1) fetchCourt(courtCurrentPage + 1).then(renderCourt); });
 }
 
 // ══════════ 页面切换 ══════════
@@ -529,6 +1071,7 @@ function renderAll() {
   renderBackendPerfList();
   renderUpstream();
   renderShiqu();
+  renderCourt();
   renderDeployAndRL();
   updateRangeSummary();
 }

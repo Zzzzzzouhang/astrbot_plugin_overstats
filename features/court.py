@@ -7,7 +7,11 @@ logger = logging.getLogger("astrbot")
 
 
 async def ow_court(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
-    """OW 开庭：AI 对单局数据进行电竞法庭风格分析（测试阶段，仅白名单/管理员可用）。"""
+    """OW 开庭：AI 对单局数据进行电竞法庭风格分析。
+
+    与是区吗共用白名单/分级 CD 机制（shiqu_cd_map），CD 独立计时；
+    同一用户同一时间 是区吗/开庭 最多一条在执行。普通用户受 normal_enabled 开关控制。
+    """
     if plugin.monitor:
         asyncio.ensure_future(plugin.monitor.record_command('ow开庭', True))
     CMD = '开庭'
