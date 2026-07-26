@@ -315,6 +315,24 @@
     "hint": "auto 模式下可选。AI 分析接口的代理地址（用于 OpenAI 官方和 Google OpenAI 兼容端点）。无需代理则留空。",
     "default": ""
   },
+  "ai_review_limit_enabled": {
+    "description": "【单局详细】AI 锐评每日限次开关",
+    "type": "bool",
+    "hint": "开启后，每个普通用户每天最多使用 N 次 AI 锐评。管理员与白名单用户不受限制；超出上限后当日后续「单局详细」仅出图、不做 AI 评价。",
+    "default": true
+  },
+  "ai_review_daily_limit": {
+    "description": "【单局详细】AI 锐评每日上限次数",
+    "type": "int",
+    "hint": "每个普通用户每天最多触发 AI 锐评的次数，默认 3。仅在 ai_review_limit_enabled 开启时生效。",
+    "default": 3
+  },
+  "ai_review_reset_hour": {
+    "description": "【单局详细】AI 锐评每日重置时刻",
+    "type": "int",
+    "hint": "每日计数在本地时间该整点重置（0-23），默认 4（凌晨 4:00），与「是区吗」功能保持一致。",
+    "default": 4
+  },
   "use_stream_response": {
     "description": "【AUTO】流式响应",
     "type": "bool",

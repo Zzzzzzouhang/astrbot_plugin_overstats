@@ -597,6 +597,88 @@ class OverstatsPlugin(Star):
             return str(event.get_sender_id())
 
     @staticmethod
+    def _get_today_reset_ts(reset_hour: int = 4) -> int:
+        """返回最近一次某整点（本地时间）的 Unix 时间戳，用于每日计数重置。
+
+        参考「是区吗」功能的每日重置逻辑：重置时刻可配置（默认 4 点）。
+        若当前时间早于今日该整点，则返回昨日该整点（即当前所处计日周期起点）。
+        """
+        reset_hour = max(0, min(23, int(reset_hour)))
+        now = time.time()
+        local = time.localtime(now)
+        reset_ts = time.mktime((local.tm_year, local.tm_mon, local.tm_mday, reset_hour, 0, 0, local.tm_wday, local.tm_yday, local.tm_isdst))
+        if now < reset_ts:
+            reset_ts -= 86400
+        return int(reset_ts)
+
+    async def _ai_review_limit_check(self, event: AstrMessageEvent, want_analyze: bool) -> tuple[bool, int, bool, int]:
+        """单局详细 AI 锐评每日限次检查（参考「是区吗」每日重置与分级豁免逻辑）。
+
+        返回 (allow_analyze, used_count, blocked, limit):
+          - allow_analyze: 本次是否应执行 AI 锐评
+          - used_count:    今日已用次数（-1 表示豁免 / 不限制）
+          - blocked:       是否因超过每日上限而被强制关闭
+          - limit:         当日上限（豁免时为 -1）
+
+        规则：
+          - AstrBot 管理员 / 白名单用户不受限；
+          - ai_review_limit_enabled 关闭或上限 <=0 时不限制；
+          - 每日计数存于 KV（键 ow_ai_review_daily:<用户>，值 {day, count}），
+            在 ai_review_reset_hour 指定的本地整点重置（默认 4 点）；
+          - 用户主动关闭锐评（锐评关）不计入次数。
+        """
+        # 管理员 / 白名单 不限制
+        if self._is_astrbot_admin(event) or self._is_whitelisted(event):
+            return (want_analyze, -1, False, -1)
+        if not bool(self.config.get('ai_review_limit_enabled', True)):
+            return (want_analyze, -1, False, -1)
+        # 安全的整型配置读取：仅缺失/空时回退默认值；0 是合法值
+        # （daily_limit=0 视为不限，reset_hour=0 视为凌晨 0 点），不能用 `or` 覆盖。
+        raw_limit = self.config.get('ai_review_daily_limit', 3)
+        try:
+            limit = max(0, int(raw_limit))
+        except (TypeError, ValueError):
+            limit = 3
+        if limit <= 0:
+            return (want_analyze, -1, False, -1)
+        raw_reset = self.config.get('ai_review_reset_hour', 4)
+        try:
+            reset_hour = max(0, min(23, int(raw_reset)))
+        except (TypeError, ValueError):
+            reset_hour = 4
+        today_reset = self._get_today_reset_ts(reset_hour)
+        user_key = self._user_key(event)
+        kv_key = f'ow_ai_review_daily:{user_key}'
+        data = await self.get_kv_data(kv_key, None)
+        # KV 可能返回 dict 或 JSON 字符串，做兼容解析，避免静默失效
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = None
+        day = 0
+        count = 0
+        if isinstance(data, dict):
+            day = int(data.get('day', 0) or 0)
+            count = int(data.get('count', 0) or 0)
+        if day != today_reset:
+            # 跨过重置时刻，开启新的计日周期
+            day = today_reset
+            count = 0
+        if not want_analyze:
+            # 用户主动关闭（锐评关），不计入次数
+            return (False, count, False, limit)
+        if count >= limit:
+            # 已达上限，强制关闭 AI 评价（调用 API 时不再请求锐评）
+            return (False, count, True, limit)
+        count += 1
+        try:
+            await self.put_kv_data(kv_key, {'day': day, 'count': count})
+        except Exception:
+            pass
+        return (True, count, False, limit)
+
+    @staticmethod
     def _violation_ban_key(user_key: str, command: str) -> str:
         """生成封禁 JSON key：用户|指令名。"""
         return f'{user_key}|{command}'

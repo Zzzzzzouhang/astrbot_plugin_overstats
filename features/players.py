@@ -93,15 +93,22 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
     if not target_id:
         yield plugin._plain_error_result(event, '❌ 请输入战网ID，如：单局详细 Player#12345 1 \n或先使用 /绑定 战网ID，示例：/绑定 Player#12345')
         return
+    # AI 锐评每日限次（参考「是区吗」每日重置 + 管理员/白名单豁免逻辑）
+    want_analyze = kw.get('analyze', True)
+    allow_analyze, used_count, ai_review_blocked, ai_review_limit = await plugin._ai_review_limit_check(event, want_analyze)
+    analyze = allow_analyze
+
     base_prompt = f'⏳ 正在拉取 {target_id} 第 {index + 1} 局的<qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />多图详细战绩，可用参数：战网id 序号 查询别人。'
-    if kw.get('analyze') is False:
+    if ai_review_blocked:
+        base_prompt += f'（今日 AI 锐评次数已用完（{used_count}/{ai_review_limit}），本次仅出图不评价）'
+    elif kw.get('analyze') is False:
         base_prompt += '（本次已跳过 AI 锐评，出图更快）'
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, base_prompt)
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
         return
-    payload = {'bnet_id': target_id, 'index': str(index), 'limit': '20', 'include_fight': True, 'include_previous_season': True, 'show_all_heroes': kw.get('show_all_heroes', True), 'analyze': kw.get('analyze', True)}
+    payload = {'bnet_id': target_id, 'index': str(index), 'limit': '20', 'include_fight': True, 'include_previous_season': True, 'show_all_heroes': kw.get('show_all_heroes', True), 'analyze': analyze}
     url = f'{plugin.base_url}/dashen-match/detail/replies'
     success = False
     err_code = ''
