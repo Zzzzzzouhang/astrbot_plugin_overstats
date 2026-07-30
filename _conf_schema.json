@@ -96,9 +96,9 @@
     "default": "https://gh-proxy.com/"
   },
   "sqlite_db_path": {
-    "description": "SQLite 数据库路径（开庭分段参考 & 性能监控用）",
+    "description": "SQLite 数据库路径（是区吗/开庭日志 & 性能监控用）",
     "type": "string",
-    "hint": "留空则不启用。填写 Overstats 后端 match_stats.sqlite3 的完整路径（通常为 Overstats/src/db/match_stats.sqlite3），开庭时将读取本地数据库中的分段英雄统计数据。同时，同级目录下的 request_metrics.sqlite3 将被自动用于监控面板的后端性能展示。",
+    "hint": "留空则不启用。填写 Overstats 后端 match_stats.sqlite3 的完整路径（通常为 Overstats/src/db/match_stats.sqlite3）。「是区吗」与「开庭」将读取该路径同目录下的 shiqu_llm.sqlite3，用于调用日志与判决书查询；同级目录下的 request_metrics.sqlite3 将被自动用于监控面板的后端性能展示。",
     "obvious_hint": true,
     "default": ""
   },
@@ -321,17 +321,17 @@
     "hint": "开启后，每个普通用户每天最多使用 N 次 AI 锐评。管理员与白名单用户不受限制；超出上限后当日后续「单局详细」仅出图、不做 AI 评价。",
     "default": true
   },
-  "ai_review_daily_limit": {
-    "description": "【单局详细】AI 锐评每日上限次数",
-    "type": "int",
-    "hint": "每个普通用户每天最多触发 AI 锐评的次数，默认 3。仅在 ai_review_limit_enabled 开启时生效。",
-    "default": 3
-  },
   "ai_review_reset_hour": {
     "description": "【单局详细】AI 锐评每日重置时刻",
     "type": "int",
     "hint": "每日计数在本地时间该整点重置（0-23），默认 4（凌晨 4:00），与「是区吗」功能保持一致。",
     "default": 4
+  },
+  "ai_review_daily_limit": {
+    "description": "【单局详细】AI 锐评每日上限次数",
+    "type": "int",
+    "hint": "每个普通用户每天最多触发 AI 锐评的次数，默认 3。仅在 ai_review_limit_enabled 开启时生效。",
+    "default": 3
   },
   "use_stream_response": {
     "description": "【AUTO】流式响应",
