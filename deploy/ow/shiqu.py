@@ -222,7 +222,8 @@ class ShiquManager:
             if not target_id:
                 yield event.plain_result(f"❌ 请提供 战网id，或先使用 /绑定 绑定。\n用法：{_SHIQU_BTN} &lt;battle_tag&gt;")
                 return
-            await self._set_last_target(event, target_id)
+            # 注意：last_target 不在此处提前写入，避免用未验证/后端无记录的新 ID
+            # 覆盖掉可用的历史 target；改为在 _do_query 查询成功后再写入。
 
             # 分级 CD
             cd_ok, cd_remain = await self._check_cooldown(event)
@@ -277,7 +278,11 @@ class ShiquManager:
                 await self._set_pending(event)
                 yield event.plain_result(f'👋 以下是上次的结果，如要开启新查询，请在 **5 分钟内**再次发送 {_SHIQU_BTN}。')
             else:
-                yield event.plain_result(f"❌ 暂无可用的最近结果，请直接发送 {_SHIQU_BTN} 开启新查询。")
+                # 取不到上次结果（后端无该 target 历史记录 / 从未成功查询过 / 取图失败）：
+                # 设置 pending 并引导用户在 5 分钟内再发一次，下次即因 is_pending=True 直接开启新查询，
+                # 避免在此处原地反复输出提示而不推进状态机导致的死锁。
+                await self._set_pending(event)
+                yield event.plain_result(f'ℹ️ 暂无可用的最近结果。请在 **5 分钟内**再次发送 {_SHIQU_BTN} 开启新查询。')
         finally:
             if _timeout_task is not None and not _timeout_task.done():
                 _timeout_task.cancel()
@@ -302,7 +307,7 @@ class ShiquManager:
             msg = ""
             if isinstance(error_data, dict):
                 msg = str(error_data.get("message") or error_data.get("error") or "")
-            yield event.plain_result(f"❌ {target_id} 是区吗查询失败：{msg or '后端未返回图片'}。")
+            yield event.plain_result(f"❌ {target_id} 是区吗查询失败：{msg or '后端未返回图片'}。请重试 {_SHIQU_BTN}")
             # 失败兜底：重置冷却为 0，使下次发送因 cd_raw==0 直接查询，跳过 pending 二次确认（对齐原版错误恢复）。
             await self._reset_cooldown(event)
             await self._set_image_sent(event, False)
@@ -310,7 +315,8 @@ class ShiquManager:
         async for r in self._plugin._send_image_result(event, img_bytes, "是区吗", ""):
             yield r
 
-        # 成功：写 CD 与首日标记
+        # 成功：写入本次 target（供「结果」类指令与普通路径复用）、CD 与首日标记
+        await self._set_last_target(event, target_id)
         await self._set_cooldown(event)
         await self._set_image_sent(event, True)
         key = f"{_SHIQU_LAST_QUERY_TS_KV_PREFIX}:{uid}"
