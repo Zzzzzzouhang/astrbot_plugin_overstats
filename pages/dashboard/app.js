@@ -1449,7 +1449,7 @@ function renderDeployAndRL() {
 
   document.getElementById("rate-limit-details").innerHTML = [
     ["指令限流", rlConf.cmd_enabled ? "开启" : "关闭"],
-    ["最大并发", rlConf.cmd_max || 3],
+    ["单用户并发上限", rlConf.cmd_per_user_max ?? 3],
     ["指令拒绝 (累计)", cmdRL.total || 0],
     ["指令拒绝 (今日)", cmdRL.today || 0],
     ["LLM 限流", rlConf.llm_enabled ? "开启" : "关闭"],

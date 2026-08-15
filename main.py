@@ -9,7 +9,6 @@ import json
 import time
 import inspect
 import urllib.parse
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
 from astrbot.api.all import *
@@ -23,6 +22,12 @@ try:
 except ImportError:
     # 兜底：插件作为顶层模块加载时相对导入可能失败
     from deploy import DeployManager  # type: ignore[no-redef]
+
+# 按用户粒度指令并发限制器（内聚实现）
+try:
+    from .deploy.ops.concurrency_limiter import UserConcurrencyLimiter
+except ImportError:
+    from deploy.ops.concurrency_limiter import UserConcurrencyLimiter  # type: ignore[no-redef]
 
 # OW 开庭模块（独立封装，避免主文件臃肿）
 try:
@@ -85,7 +90,8 @@ class OverstatsPlugin(Star):
     # ===== 类级常量（从原 deploy/plugin_modules/plugin_core.py 恢复）=====
     _GROUP_CONFIG_KV_KEY = "group_feature_config"
     _MAINTENANCE_KV_KEY = "maintenance_state"
-    _RATE_LIMIT_REJECT_MSG = "⏳ 同时执行的指令过多，请等待当前指令返回结果后再重试"
+    _RATE_LIMIT_USER_REJECT_MSG = '⏳ 你已有指令正在执行，请等待其返回结果后再发起新的指令'
+    _CMD_SLOT_AUTO_RELEASE_SECONDS = 300  # 指令限流槽位超时自动释放时间（秒），防止卡死/中断导致槽位泄漏
     _VIOLATION_BAN_SECONDS = 43200  # 12 小时
     _VIOLATION_BAN_FILE = "violation_bans.json"
     _VIOLATION_BAN_MSG = "⛔ 【极少数情况】您之前【{command}】查询返回的图片包含违规内容（来自qq官方接口返回提示，可能：违规id，等），该指令已被自动禁用{remain}。请勿再试，如有疑问请联系管理员：2338127903。"
@@ -115,8 +121,9 @@ class OverstatsPlugin(Star):
         super().__init__(context)
         self.config = config
         self.file_lock = asyncio.Lock()
-        self._cmd_concurrent_lock = asyncio.Lock()
-        self._cmd_concurrent_count = 0
+        self._cmd_limiter = UserConcurrencyLimiter(
+            per_user_max=3, timeout_seconds=self._CMD_SLOT_AUTO_RELEASE_SECONDS
+        )
         self._load_rate_limit_config()
         self._semaphore_reset_task = asyncio.create_task(self._daily_semaphore_reset_loop())
         self.daily_group_prompt_suffix = '[今日已提示，群内后续指令不再提示将直接返回结果]'
@@ -271,9 +278,8 @@ class OverstatsPlugin(Star):
                     next4 += timedelta(days=1)
                 wait_sec = max(1, (next4 - now).total_seconds())
                 await asyncio.sleep(wait_sec)
-                async with self._cmd_concurrent_lock:
-                    self._cmd_concurrent_count = 0
-                logger.info(f'[Overstats] 每日 4 点已重置指令限流计数器（max={self._rate_limit_max}）')
+                await self._cmd_limiter.clear()
+                logger.info('[Overstats] 每日 4 点已重置指令限流计数器')
         except asyncio.CancelledError:
             logger.info('指令限流每日重置任务已停止')
         except Exception as e:
@@ -527,45 +533,106 @@ class OverstatsPlugin(Star):
         return False
 
     def _load_rate_limit_config(self):
-        """读取指令并发限流 + LLM 频率限制配置。"""
+        """读取指令并发限流配置（支持热生效：配置内容变化时自动重载）。
+
+        cmd_rate_limit 为 JSON 字符串，字段：
+          enabled:      总开关。严格布尔解析，`"false"/"0"/"off"/空` 一律视为关闭，
+                        避免 `bool("false") == True` 导致限流被意外开启。
+          per_user_max: 同一用户并发上限（默认 3；0 或负数表示不限制）。
+          （历史字段 max_concurrent 已废弃：现仅按用户粒度限流，不再有全局上限。）
+        """
         raw = str(self.config.get('cmd_rate_limit', '{}') or '{}').strip()
+        if getattr(self, '_rate_limit_cfg_raw', None) == raw:
+            return
+        self._rate_limit_cfg_raw = raw
         try:
             cfg = json.loads(raw) if raw else {}
+            if not isinstance(cfg, dict):
+                cfg = {}
         except Exception:
             cfg = {}
-        self._rate_limit_enabled = bool(cfg.get('enabled', False))
-        self._rate_limit_max = max(1, int(cfg.get('max_concurrent', 3) or 3))
+        self._rate_limit_enabled = self._strict_bool(cfg.get('enabled'), False)
+        try:
+            per_user = int(cfg.get('per_user_max', 3))
+        except (TypeError, ValueError):
+            per_user = 3
+        self._rate_limit_per_user = max(0, per_user)
+        if getattr(self, '_cmd_limiter', None) is not None:
+            self._cmd_limiter.update_config(self._rate_limit_per_user, self._CMD_SLOT_AUTO_RELEASE_SECONDS)
+        logger.info(
+            f'[Overstats] 指令限流配置生效: enabled={self._rate_limit_enabled} '
+            f'per_user_max={self._rate_limit_per_user}'
+        )
+
+    @staticmethod
+    def _strict_bool(value, default: bool = False) -> bool:
+        """严格布尔解析：bool 原样返回；数字按非零判断；字符串仅白名单视为 True。"""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        s = str(value).strip().lower()
+        if s in ('1', 'true', 'yes', 'on', '开', '开启'):
+            return True
+        if s in ('0', 'false', 'no', 'off', '关', '关闭', ''):
+            return False
+        return default
 
     def _is_privileged(self, event: AstrMessageEvent) -> bool:
         """白名单群/用户 或 AstrBot 管理员不受限流控制。限流关闭时所有人视为特权。"""
+        self._load_rate_limit_config()  # 热生效：面板修改配置后无需重启
         return not self._rate_limit_enabled or self._is_whitelisted(event) or self._is_astrbot_admin(event)
 
-    async def _try_acquire_cmd_slot(self) -> bool:
-        """非阻塞尝试获取指令并发槽位（异步锁保护原子性）。返回 True=获取成功。"""
-        async with self._cmd_concurrent_lock:
-            if self._cmd_concurrent_count >= self._rate_limit_max:
-                return False
-            self._cmd_concurrent_count += 1
-            return True
-
-    def _release_cmd_slot(self) -> None:
-        """释放指令并发槽位（防止每日重置后 count 变为负值）。"""
-        if self._cmd_concurrent_count > 0:
-            self._cmd_concurrent_count -= 1
-
-    @asynccontextmanager
-    async def _rate_limit_slot(self, event: AstrMessageEvent):
-        """非特权用户指令并发限流。槽位不足时 yield None 供调用方识别后立即拒绝；否则 yield True。"""
-        if self._is_privileged(event):
-            yield True
-            return
-        if not await self._try_acquire_cmd_slot():
-            yield None
-            return
+    @staticmethod
+    def _cmd_user_key(event: AstrMessageEvent | None) -> str | None:
+        """从事件提取限流用户键；event 为空或取 ID 失败时返回 None（不限制、不计数）。"""
+        if event is None:
+            return None
         try:
-            yield True
-        finally:
-            self._release_cmd_slot()
+            return str(event.get_sender_id())
+        except Exception:
+            return None
+
+    async def _try_acquire_cmd_slot(self, event: AstrMessageEvent | None = None) -> bool:
+        """非阻塞尝试获取该用户的指令并发槽位（按用户粒度）。
+
+        返回 True=获取成功；False=该用户并发已满。
+        限流实现见 UserConcurrencyLimiter（含超时惰性清理）。
+        """
+        self._load_rate_limit_config()
+        return await self._cmd_limiter.acquire(self._cmd_user_key(event))
+
+    async def _release_cmd_slot(self, event: AstrMessageEvent | None = None) -> None:
+        """释放该用户的指令并发槽位。"""
+        await self._cmd_limiter.release(self._cmd_user_key(event))
+
+    async def _run_with_cmd_slot(self, event: AstrMessageEvent, coro_factory):
+        """业务指令并发限流包装器：在 main.py handler 层统一获取/释放槽位。
+
+        - 仅"需要访问后端"的业务指令使用本包装；绑定/帮助/管理/测试类指令不经过限流。
+        - 特权用户（白名单/管理员/限流关闭）直接执行，不占用槽位。
+        - 仅按用户粒度限流：同一用户同时最多 per_user_max 条（默认 3），无全局上限。
+        - 槽位覆盖整个生成器生命周期，try/finally 保证任何中断（含 astrbot 取消）都会释放。
+        - coro_factory：无参可调用，返回 async generator。
+        """
+        if not self._is_privileged(event):
+            if not await self._try_acquire_cmd_slot(event):
+                yield event.plain_result(self._RATE_LIMIT_USER_REJECT_MSG)
+                try:
+                    uid = str(event.get_sender_id())
+                except Exception:
+                    uid = ''
+                if self.monitor:
+                    asyncio.ensure_future(self.monitor.record_rate_limit('cmd', uid))
+                return
+            try:
+                async for r in coro_factory():
+                    yield r
+            finally:
+                await self._release_cmd_slot(event)
+        else:
+            async for r in coro_factory():
+                yield r
 
     def _violation_ban_path(self) -> Path:
         return self.plugin_data_dir / self._VIOLATION_BAN_FILE
@@ -781,7 +848,8 @@ class OverstatsPlugin(Star):
 
             当 should_stop=True 时（维护模式），调用方应 yield 文本后 return，不再执行业务逻辑。
             AstrBot 管理员不受维护模式限制，可正常使用数据查询指令。
-            非特权用户在此获取并发限流槽位（最多3条），由 _finalize_business_status_prompt 统一释放。
+            注意：指令并发限流槽位已上移至 main.py handler 层（_run_with_cmd_slot）统一管理，
+            本方法不再获取/释放槽位，仅负责维护模式与每日首次提示。
             """
         await self._ensure_maintenance_loaded()
         if self._maintenance_state and self._maintenance_state.get('enabled'):
@@ -790,10 +858,6 @@ class OverstatsPlugin(Star):
             else:
                 return (self._maintenance_state.get('content', '系统维护中'), None, True)
         need_release = False
-        if not self._is_privileged(event):
-            if not await self._try_acquire_cmd_slot():
-                return (self._RATE_LIMIT_REJECT_MSG, None, True)
-            need_release = True
         if not self._is_group_message(event):
             return (base_text, (None, need_release), False)
         await self._ensure_group_config_loaded()
@@ -822,19 +886,17 @@ class OverstatsPlugin(Star):
         return (prompt_text, prompt_token, False)
 
     async def _finalize_business_status_prompt(self, reservation_user_id, success: bool, cmd_name: str='', error_code: str=''):
-        """释放每日提示预留和限流槽位，并记录指令统计。
+        """释放每日提示预留并记录指令统计。
 
-            reservation_user_id 可以是 str|None 或 (str|None, bool)。
+            reservation_user_id 可以是 str|None 或 (str|None, bool)（兼容旧调用方，忽略 bool）。
             cmd_name 可选，传入后将自动记录到监控采集器。
+            注意：限流槽位释放已上移至 handler 层（_run_with_cmd_slot），此处不再处理。
             """
         daily_user_id: str | None = None
-        need_release = False
         if isinstance(reservation_user_id, tuple):
-            daily_user_id, need_release = reservation_user_id
+            daily_user_id = reservation_user_id[0]
         else:
             daily_user_id = reservation_user_id
-        if need_release:
-            self._release_cmd_slot()
         if cmd_name and self.monitor:
             asyncio.ensure_future(self.monitor.record_command(cmd_name, success, error_code=error_code))
         if not daily_user_id:
@@ -933,12 +995,40 @@ class OverstatsPlugin(Star):
             text = re.sub('<qqbot-cmd-enter\\s+text="([^"]+)"\\s*/>', strip_replacer_enter, text)
             return text
 
-    async def _fetch_image(self, endpoint: str, payload: dict=None, timeout: int=600) -> tuple[bytes | None, dict | None, str]:
+    @staticmethod
+    def _is_retryable_backend_error(status: int, error_data) -> bool:
+        """判断后端返回的错误是否属于可自动重试的瞬时错误。
+
+        判定规则：
+        - 软业务错误（bnet_not_found / summary_empty）不重试，直接按业务逻辑处理；
+        - 上游限流（429 / too many requests）不重试，有专门提示；
+        - 5xx（含 internal_error 包装的 ConnectTimeout 等）视为瞬时错误，自动重试；
+        - 其他状态但 message/details 含超时/连接类关键词时也兜底重试。
+        """
+        if not isinstance(error_data, dict):
+            return False
+        if error_data.get('error') in ('bnet_not_found', 'summary_empty'):
+            return False
+        if status == 429 or 'too many requests' in str(error_data.get('message', '')).lower():
+            return False
+        if status >= 500:
+            return True
+        text = f"{error_data.get('details', '')} {error_data.get('message', '')}".lower()
+        _kw = ('connecttimeout', 'readtimeout', 'writetimeout', 'timeouterror', 'timed out', 'timeout',
+               'connectionreset', 'connectionrefused', 'remotedisconnected', 'econnreset', 'econnrefused')
+        return any(k in text for k in _kw)
+
+    async def _fetch_image(self, endpoint: str, payload: dict=None, timeout: int=600, retry: bool=True) -> tuple[bytes | None, dict | None, str]:
+        """请求后端图片接口。
+
+        retry=True（默认）：遇到 5xx/internal_error 等瞬时错误 5 秒后自动重试 1 次（共 2 次尝试）；
+        retry=False：只尝试 1 次，失败直接返回（是区吗/开庭等 AI 生成类功能使用，避免重复高成本生成）。
+        """
         url = f'{self.base_url}{endpoint}'
         payload = payload or {}
         async with self.overstats_semaphore:
             async with self._overstats_inner_semaphore:
-                for attempt in (1, 2):
+                for attempt in ((1, 2) if retry else (1,)):  # 最多 2 次尝试（1 次自动重试），间隔 5 秒
                     start_ts = time.time()
                     try:
                         session = await self._get_http_session()
@@ -952,38 +1042,38 @@ class OverstatsPlugin(Star):
                             else:
                                 try:
                                     error_data = await resp.json()
-                                    _soft_errors = {'bnet_not_found', 'summary_empty'}
-                                    _is_soft = isinstance(error_data, dict) and error_data.get('error') in _soft_errors
-                                    _is_timeout = resp.status == 500 and isinstance(error_data, dict) and ('ConnectTimeout' in str(error_data))
-                                    if _is_timeout and attempt == 1:
-                                        if self.monitor:
-                                            elapsed = int((time.time() - start_ts) * 1000)
-                                            asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
-                                        logger.warning(f'Overstats API ConnectTimeout，1秒后重试: {endpoint}')
-                                        await asyncio.sleep(1)
-                                        continue
-                                    if self.monitor:
-                                        elapsed = int((time.time() - start_ts) * 1000)
-                                        asyncio.ensure_future(self.monitor.record_api(endpoint, _is_soft, elapsed))
-                                    logger.error(f'Overstats API 错误: {resp.status} - {error_data}')
-                                    if isinstance(error_data, dict):
-                                        if error_data.get('error') == 'internal_error':
-                                            orig_msg = error_data.get('message', '')
-                                            error_data['message'] = f'{orig_msg}，网络波动，请重试'
-                                        if resp.status == 429 or 'too many requests' in str(error_data.get('message', '')).lower():
-                                            orig_msg = error_data.get('message', '')
-                                            error_data['message'] = f'{orig_msg}。使用人数过多，请稍后再试或尝试自部署Overstats或astrbot_plugin_overstats'
-                                    return (None, error_data, error_data.get('error', '') if isinstance(error_data, dict) else '')
-                                except:
+                                except Exception:
                                     if self.monitor:
                                         elapsed = int((time.time() - start_ts) * 1000)
                                         asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
                                     logger.error(f'Overstats API 返回了非 JSON 错误: {resp.status}')
                                     return (None, {'error': 'non_json_error', 'message': 'API返回非JSON格式错误'}, 'non_json_error')
+                                _soft_errors = {'bnet_not_found', 'summary_empty'}
+                                _is_soft = isinstance(error_data, dict) and error_data.get('error') in _soft_errors
+                                _retryable = retry and self._is_retryable_backend_error(resp.status, error_data)
+                                if _retryable and attempt < 2:
+                                    if self.monitor:
+                                        elapsed = int((time.time() - start_ts) * 1000)
+                                        asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
+                                    logger.warning(f'Overstats API 瞬时错误({resp.status})，5秒后自动重试（第2/2次）: {endpoint}')
+                                    await asyncio.sleep(5)
+                                    continue
+                                if self.monitor:
+                                    elapsed = int((time.time() - start_ts) * 1000)
+                                    asyncio.ensure_future(self.monitor.record_api(endpoint, _is_soft, elapsed))
+                                logger.error(f'Overstats API 错误: {resp.status} - {error_data}')
+                                if isinstance(error_data, dict):
+                                    if error_data.get('error') == 'internal_error':
+                                        orig_msg = error_data.get('message', '')
+                                        error_data['message'] = f'{orig_msg}，网络波动，请重试'
+                                    if resp.status == 429 or 'too many requests' in str(error_data.get('message', '')).lower():
+                                        orig_msg = error_data.get('message', '')
+                                        error_data['message'] = f'{orig_msg}。使用人数过多，请稍后再试或尝试自部署Overstats或astrbot_plugin_overstats'
+                                return (None, error_data, error_data.get('error', '') if isinstance(error_data, dict) else '')
                     except Exception as e:
-                        if attempt == 1:
-                            logger.warning(f'网络请求异常，1秒后重试: {e}')
-                            await asyncio.sleep(1)
+                        if retry and attempt < 2:
+                            logger.warning(f'网络请求异常，5秒后自动重试（第2/2次）: {e}')
+                            await asyncio.sleep(5)
                             continue
                         if self.monitor:
                             elapsed = int((time.time() - start_ts) * 1000)
@@ -1586,169 +1676,169 @@ class OverstatsPlugin(Star):
     @filter.command('今日总结', alias={'今日', '今日数据'})
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = ''):
         """生成过去 24 小时内的对局大数据总结卡片。"""
-        async for r in features_summary.dashen_today(self, event, bnet_id):
+        async for r in self._run_with_cmd_slot(event, lambda: features_summary.dashen_today(self, event, bnet_id)):
             yield r
 
     @filter.command('昨日总结', alias={'昨日', '昨日数据', '昨天数据'})
     async def dashen_yesterday(self, event: AstrMessageEvent, bnet_id: str = '', _skip_status_prompt: bool = False):
         """统计并生成昨日战绩数据卡片。"""
-        async for r in features_summary.dashen_yesterday(self, event, bnet_id, _skip_status_prompt):
+        async for r in self._run_with_cmd_slot(event, lambda: features_summary.dashen_yesterday(self, event, bnet_id, _skip_status_prompt)):
             yield r
 
     @filter.command('周度总结', alias={'本周总结', '本周数据', '本周'})
     async def dashen_week(self, event: AstrMessageEvent, bnet_id: str = ''):
         """统计本周战绩大数据总结，耗时较长（约 30-60 秒）。"""
-        async for r in features_summary.dashen_week(self, event, bnet_id):
+        async for r in self._run_with_cmd_slot(event, lambda: features_summary.dashen_week(self, event, bnet_id)):
             yield r
 
     @filter.command('大神数据', alias={'详情卡片', '战绩查询', '数据'})
     async def dashen_profile(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
         """查看玩家详情卡片（支持 快速/竞技 模式）。"""
-        async for r in features_players.dashen_profile(self, event, arg1, arg2):
+        async for r in self._run_with_cmd_slot(event, lambda: features_players.dashen_profile(self, event, arg1, arg2)):
             yield r
 
     @filter.command('大神对局', alias={'最近对局', '战绩', '对局'})
     async def dashen_match(self, event: AstrMessageEvent, bnet_id: str = ''):
         """拉取最近 20 局的对局列表。"""
-        async for r in features_players.dashen_match(self, event, bnet_id):
+        async for r in self._run_with_cmd_slot(event, lambda: features_players.dashen_match(self, event, bnet_id)):
             yield r
 
     @filter.command('单局详细', alias={'单局', '单局详情'})
     async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = '', arg2: str = '', arg3: str = ''):
         """查看指定序号的单局多图详细战绩（可加 锐评关/全员关 控制开关）。"""
-        async for r in features_players.dashen_match_detail(self, event, arg1, arg2, arg3):
+        async for r in self._run_with_cmd_slot(event, lambda: features_players.dashen_match_detail(self, event, arg1, arg2, arg3)):
             yield r
 
     @filter.command('历史段位', alias={'历届段位'})
     async def dashen_rank_history(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
         """追溯玩家的历史天梯段位记录（可选赛季范围）。"""
-        async for r in features_players.dashen_rank_history(self, event, arg1, arg2):
+        async for r in self._run_with_cmd_slot(event, lambda: features_players.dashen_rank_history(self, event, arg1, arg2)):
             yield r
 
     @filter.command('同玩查询', alias={'开黑胜率'})
     async def dashen_sameplay(self, event: AstrMessageEvent, p1: str = '', p2: str = ''):
         """深度分析两位玩家一同游玩开黑时的战绩与胜率。"""
-        async for r in features_players.dashen_sameplay(self, event, p1, p2):
+        async for r in self._run_with_cmd_slot(event, lambda: features_players.dashen_sameplay(self, event, p1, p2)):
             yield r
 
     @filter.command('快速强度', alias={'快速强度指数'})
     async def quick_strength(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
         """评估玩家快速模式下的强度指数（可选对局数 3-12）。"""
-        async for r in features_charts.quick_strength(self, event, arg1, arg2):
+        async for r in self._run_with_cmd_slot(event, lambda: features_charts.quick_strength(self, event, arg1, arg2)):
             yield r
 
     @filter.command('竞技强度', alias={'竞技强度指数'})
     async def competitive_strength(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
         """评估玩家竞技天梯模式下的强度指数（可选对局数 3-12）。"""
-        async for r in features_charts.competitive_strength(self, event, arg1, arg2):
+        async for r in self._run_with_cmd_slot(event, lambda: features_charts.competitive_strength(self, event, arg1, arg2)):
             yield r
 
     @filter.command('快速英雄云图', alias={'快速云图'})
     async def quick_hero_treemap(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
         """获取快速模式英雄使用率矩形树图（可选赛季）。"""
-        async for r in features_charts.quick_hero_treemap(self, event, arg1, arg2):
+        async for r in self._run_with_cmd_slot(event, lambda: features_charts.quick_hero_treemap(self, event, arg1, arg2)):
             yield r
 
     @filter.command('竞技英雄云图', alias={'竞技云图'})
     async def competitive_hero_treemap(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
         """获取竞技模式英雄使用率矩形树图（可选赛季）。"""
-        async for r in features_charts.competitive_hero_treemap(self, event, arg1, arg2):
+        async for r in self._run_with_cmd_slot(event, lambda: features_charts.competitive_hero_treemap(self, event, arg1, arg2)):
             yield r
 
     @filter.command('威能')
     async def ow_hero_perk(self, event: AstrMessageEvent, hero_name: str):
         """提取指定英雄的核心威能、机制数据图。"""
-        async for r in features_charts.ow_hero_perk(self, event, hero_name):
+        async for r in self._run_with_cmd_slot(event, lambda: features_charts.ow_hero_perk(self, event, hero_name)):
             yield r
 
     @filter.command('ow英雄')
     async def ow_hero_pick(self, event: AstrMessageEvent, arg1: str = '', arg2: str = '', arg3: str = ''):
         """读取指定英雄在当前天梯的 Pick 率历史走势图（可选模式/段位）。"""
-        async for r in features_charts.ow_hero_pick(self, event, arg1, arg2, arg3):
+        async for r in self._run_with_cmd_slot(event, lambda: features_charts.ow_hero_pick(self, event, arg1, arg2, arg3)):
             yield r
 
     @filter.command('省榜', alias={'排行'})
     async def ow_rank_leaderboard(self, event: AstrMessageEvent, province: str, role: str):
         """获取指定地区的大神天梯省榜（位置：tank / dps / healer / open）。"""
-        async for r in features_info.ow_rank_leaderboard(self, event, province, role):
+        async for r in self._run_with_cmd_slot(event, lambda: features_info.ow_rank_leaderboard(self, event, province, role)):
             yield r
 
     @filter.command('绝活榜', alias={'英雄省榜'})
     async def ow_hero_leaderboard(self, event: AstrMessageEvent, province: str, hero: str, arg3: str = ''):
         """获取指定地区特定英雄的大神专精绝活榜（可选开放队列模式）。"""
-        async for r in features_info.ow_hero_leaderboard(self, event, province, hero, arg3):
+        async for r in self._run_with_cmd_slot(event, lambda: features_info.ow_hero_leaderboard(self, event, province, hero, arg3)):
             yield r
 
     @filter.command('商店', alias={'ow商店'})
     async def ow_shop(self, event: AstrMessageEvent):
         """拉取今日精选商店在售皮肤商品。"""
-        async for r in features_info.ow_shop(self, event):
+        async for r in self._run_with_cmd_slot(event, lambda: features_info.ow_shop(self, event)):
             yield r
 
     @filter.command('ow赛事', alias={'赛事'})
     async def ow_esports(self, event: AstrMessageEvent):
         """获取实时职业赛事对阵及赛程信息。"""
-        async for r in features_info.ow_esports(self, event):
+        async for r in self._run_with_cmd_slot(event, lambda: features_info.ow_esports(self, event)):
             yield r
 
     @filter.command('获取段位分布')
     async def get_rank_distribution(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
         """统计天梯全服大盘全英雄数据排行与天梯环境分布（可选模式/段位）。"""
-        async for r in features_charts.get_rank_distribution(self, event, arg1, arg2):
+        async for r in self._run_with_cmd_slot(event, lambda: features_charts.get_rank_distribution(self, event, arg1, arg2)):
             yield r
 
     @filter.command('ow活动', alias={'活动'})
     async def ow_activities(self, event: AstrMessageEvent):
         """拉取当前版本限时节日或赛季大活动公告卡片。"""
-        async for r in features_info.ow_activities(self, event):
+        async for r in self._run_with_cmd_slot(event, lambda: features_info.ow_activities(self, event)):
             yield r
 
     @filter.command('banpick', alias={'全英雄排行'})
     async def ban_pick_stats(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
         """获取本周天梯英雄大盘的选禁用排行（可选模式/段位）。"""
-        async for r in features_info.ban_pick_stats(self, event, arg1, arg2):
+        async for r in self._run_with_cmd_slot(event, lambda: features_info.ban_pick_stats(self, event, arg1, arg2)):
             yield r
 
     @filter.command('mappick')
     async def map_pick_stats(self, event: AstrMessageEvent):
         """从最新补丁中检索当前赛季地图池与轮换出场情况。"""
-        async for r in features_info.map_pick_stats(self, event):
+        async for r in self._run_with_cmd_slot(event, lambda: features_info.map_pick_stats(self, event)):
             yield r
 
     @filter.command('皮肤搜索')
     async def skin_search(self, event: AstrMessageEvent, keyword: str = ''):
         """检索包含指定关键词的精选上架皮肤商品卡片。"""
-        async for r in features_info.skin_search(self, event, keyword):
+        async for r in self._run_with_cmd_slot(event, lambda: features_info.skin_search(self, event, keyword)):
             yield r
 
     @filter.command('ow更新', alias={'版本更新'})
     async def ow_patch_notes(self, event: AstrMessageEvent, kind: str = 'latest'):
         """拉取外服更新日志卡片（参数：latest / small / big）。"""
-        async for r in features_info.ow_patch_notes(self, event, kind):
+        async for r in self._run_with_cmd_slot(event, lambda: features_info.ow_patch_notes(self, event, kind)):
             yield r
 
     @filter.command('ow开庭', alias={'开庭'})
     async def ow_court(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
         """OW 开庭：AI 对单局数据进行电竞法庭风格分析（测试阶段，仅白名单/管理员可用）。"""
-        async for r in features_court.ow_court(self, event, arg1, arg2):
+        async for r in self._run_with_cmd_slot(event, lambda: features_court.ow_court(self, event, arg1, arg2)):
             yield r
 
     @filter.command('ow是区吗', alias={'是区吗'})
     async def ow_shiqu(self, event: AstrMessageEvent, arg1: str = '', arg2: str = '', arg3: str = ''):
         """OW 是区吗：展示上次判定结果。5 分钟内再次发送确认后开启新查询（分级 CD）。可加局数 1~25。"""
-        async for r in features_court.ow_shiqu(self, event, arg1, arg2, arg3):
+        async for r in self._run_with_cmd_slot(event, lambda: features_court.ow_shiqu(self, event, arg1, arg2, arg3)):
             yield r
 
     @filter.command('ow是区吗结果', alias={'是区吗结果'})
     async def ow_shiqu_result(self, event: AstrMessageEvent):
         """OW 是区吗结果：返回上次生成的判定书图片。"""
-        async for r in features_court.ow_shiqu_result(self, event):
+        async for r in self._run_with_cmd_slot(event, lambda: features_court.ow_shiqu_result(self, event)):
             yield r
 
     @filter.command('ow开庭结果', alias={'开庭结果'})
     async def ow_court_result(self, event: AstrMessageEvent):
         """OW 开庭结果：返回上次开庭审理的判决书图片。"""
-        async for r in features_court.ow_court_result(self, event):
+        async for r in self._run_with_cmd_slot(event, lambda: features_court.ow_court_result(self, event)):
             yield r
 
     @filter.command('owAI检测', alias={'AI检测'})
@@ -1976,7 +2066,7 @@ class OverstatsPlugin(Star):
         data['deploy'] = {'mode': dm.mode, 'state': status.state if status else 'unknown', 'process_alive': status.process_alive if status else False, 'backend_port': status.backend_port if status else 0, 'pid': status.process_pid if status else None, 'git_commit': status.git_commit if status else 'unknown', 'last_deploy_time': status.last_deploy_time if status else 0, 'last_error': status.last_error if status else ''} if status else {'mode': dm.mode, 'state': 'unknown'}
         rl_stats = await self.monitor.get_rate_limit_stats()
         data['rate_limit'] = rl_stats
-        data['rate_limit_config'] = {'cmd_enabled': getattr(self, '_rate_limit_enabled', False), 'cmd_max': getattr(self, '_rate_limit_max', 3)}
+        data['rate_limit_config'] = {'cmd_enabled': getattr(self, '_rate_limit_enabled', False), 'cmd_per_user_max': getattr(self, '_rate_limit_per_user', 3)}
         return json_response(data)
 
     async def _api_monitor_commands(self):
@@ -2076,7 +2166,7 @@ class OverstatsPlugin(Star):
         if not self.monitor:
             return json_response({'error': '监控未初始化'})
         stats = await self.monitor.get_rate_limit_stats()
-        return json_response({'stats': stats, 'config': {'cmd_enabled': getattr(self, '_rate_limit_enabled', False), 'cmd_max': getattr(self, '_rate_limit_max', 3)}})
+        return json_response({'stats': stats, 'config': {'cmd_enabled': getattr(self, '_rate_limit_enabled', False), 'cmd_per_user_max': getattr(self, '_rate_limit_per_user', 3)}})
 
     async def _api_monitor_clear(self):
         if not self.monitor:

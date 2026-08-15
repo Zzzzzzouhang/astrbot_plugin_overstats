@@ -114,66 +114,81 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
     err_code = ''
     try:
         session = await plugin._get_http_session()
-        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=600)) as resp:
-            if resp.status != 200:
+        resp_data = None
+        # 最多 2 次尝试：后端瞬时错误（500/internal_error 超时等）5 秒后自动重试一次
+        for attempt in (1, 2):
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=600)) as resp:
+                if resp.status == 200:
+                    resp_data = await resp.json()
+                    break
                 try:
                     error_data = await resp.json()
+                except Exception:
+                    error_data = None
+                if error_data is not None and attempt == 1 and plugin._is_retryable_backend_error(resp.status, error_data):
+                    logger.warning(f'获取单局详细瞬时错误 HTTP {resp.status}，5秒后自动重试 | bnet={target_id} index={index}')
+                    await asyncio.sleep(5)
+                    continue
+                if error_data is not None:
                     err_msg = error_data.get('message', '未知后端 service 错误')
                     logger.error(f'获取单局详细失败 HTTP {resp.status}: {err_msg} | bnet={target_id} index={index}')
                     yield plugin._plain_error_result(event, f'❌ 获取单局详细失败：{err_msg}')
-                except Exception:
+                else:
                     logger.error(f'获取单局详细失败 HTTP {resp.status}: 无法解析错误响应 | bnet={target_id} index={index}')
                     yield plugin._plain_error_result(event, f'❌ 后端接口响应异常，状态码: {resp.status}')
                 return
-            data = await resp.json()
-            raw_img_list = data.get('replies', [])
-            if not raw_img_list:
-                logger.error(f'获取单局详细: replies 为空 | bnet={target_id} index={index}')
-                yield plugin._plain_error_result(event, '❌ 未能生成该单局的详细图片链接')
-                return
-            collected_images: list[bytes] = []
-            for u in raw_img_list:
-                img_str = ''
-                if isinstance(u, dict):
-                    if u.get('type') == 'image':
-                        img_str = str(u.get('base64', '')).strip()
-                    if not img_str:
-                        for key in ['url', 'image', 'src', 'path', 'file']:
-                            if u.get(key):
-                                img_str = str(u.get(key)).strip()
-                                break
-                else:
-                    img_str = str(u).strip()
+        if resp_data is None:
+            logger.error(f'获取单局详细: 重试耗尽 | bnet={target_id} index={index}')
+            yield plugin._plain_error_result(event, '❌ 获取单局详细失败：后端重试耗尽，请稍后重试')
+            return
+        raw_img_list = resp_data.get('replies', [])
+        if not raw_img_list:
+            logger.error(f'获取单局详细: replies 为空 | bnet={target_id} index={index}')
+            yield plugin._plain_error_result(event, '❌ 未能生成该单局的详细图片链接')
+            return
+        collected_images: list[bytes] = []
+        for u in raw_img_list:
+            img_str = ''
+            if isinstance(u, dict):
+                if u.get('type') == 'image':
+                    img_str = str(u.get('base64', '')).strip()
                 if not img_str:
-                    continue
-                img_data = None
-                try:
-                    if img_str.startswith('base64://'):
-                        img_data = base64.b64decode(img_str.replace('base64://', ''))
-                    elif img_str.startswith('data:image') and 'base64,' in img_str:
-                        img_data = base64.b64decode(img_str.split('base64,')[1])
-                    elif len(img_str) > 100 and (not img_str.startswith('http')) and (not img_str.startswith('/')):
-                        padding = len(img_str) % 4
-                        if padding:
-                            img_str += '=' * (4 - padding)
-                        try:
-                            img_data = base64.b64decode(img_str)
-                        except Exception:
-                            pass
-                    if not img_data:
-                        full_img_url = img_str if img_str.startswith('http') else f"{plugin.base_url.rstrip('/').removesuffix('/api/v2')}{(img_str if img_str.startswith('/') else '/' + img_str)}"
-                        async with session.get(full_img_url, timeout=aiohttp.ClientTimeout(total=30), ssl=False) as img_resp:
-                            if img_resp.status == 200:
-                                img_data = await img_resp.read()
-                except Exception as e:
-                    logger.error(f'处理图片失败：{e}')
-                    continue
-                if img_data:
-                    collected_images.append(img_data)
-            if collected_images:
-                success = True
-                async for r in plugin._send_multiple_images_result(event, collected_images, CMD):
-                    yield r
+                    for key in ['url', 'image', 'src', 'path', 'file']:
+                        if u.get(key):
+                            img_str = str(u.get(key)).strip()
+                            break
+            else:
+                img_str = str(u).strip()
+            if not img_str:
+                continue
+            img_data = None
+            try:
+                if img_str.startswith('base64://'):
+                    img_data = base64.b64decode(img_str.replace('base64://', ''))
+                elif img_str.startswith('data:image') and 'base64,' in img_str:
+                    img_data = base64.b64decode(img_str.split('base64,')[1])
+                elif len(img_str) > 100 and (not img_str.startswith('http')) and (not img_str.startswith('/')):
+                    padding = len(img_str) % 4
+                    if padding:
+                        img_str += '=' * (4 - padding)
+                    try:
+                        img_data = base64.b64decode(img_str)
+                    except Exception:
+                        pass
+                if not img_data:
+                    full_img_url = img_str if img_str.startswith('http') else f"{plugin.base_url.rstrip('/').removesuffix('/api/v2')}{(img_str if img_str.startswith('/') else '/' + img_str)}"
+                    async with session.get(full_img_url, timeout=aiohttp.ClientTimeout(total=30), ssl=False) as img_resp:
+                        if img_resp.status == 200:
+                            img_data = await img_resp.read()
+            except Exception as e:
+                logger.error(f'处理图片失败：{e}')
+                continue
+            if img_data:
+                collected_images.append(img_data)
+        if collected_images:
+            success = True
+            async for r in plugin._send_multiple_images_result(event, collected_images, CMD):
+                yield r
     except Exception as e:
         logger.error(f'处理单局详细图片异常：{e}')
         yield plugin._plain_error_result(event, '❌ 处理图片请求时发生 system 错误')

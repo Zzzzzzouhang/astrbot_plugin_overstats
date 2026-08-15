@@ -143,6 +143,12 @@ class CourtManager:
         index = index - 1  # 前端 1-based → 后端 0-based
         return bnet_id, index, None
 
+    def _record_cmd(self, cmd_name: str, success: bool, error_code: str = ''):
+        """记录指令真实执行结果到监控采集器（成功/失败均计入，修复成功率恒 100% 问题）。"""
+        monitor = getattr(self._plugin, 'monitor', None)
+        if monitor:
+            asyncio.ensure_future(monitor.record_command(cmd_name, success, error_code=error_code))
+
     # ── 主流程 ────────────────────────────────────────────────
 
     async def run_court(self, event, arg1: str = "", arg2: str = ""):
@@ -208,18 +214,21 @@ class CourtManager:
             )
 
             # 6. 调后端图片接口取图并发送（违规时由 _send_image_result 自动封禁 12h）
+            # 开庭为 AI 生成类功能：失败不重试，避免重复高成本生成，直接提示用户重发。
             payload = {"bnet_id": target_id, "index": index, "use_db": False}
             img_bytes, error_data, _err_code = await self._plugin._fetch_image(
-                _COURT_IMAGE_ENDPOINT, payload, timeout=900
+                _COURT_IMAGE_ENDPOINT, payload, timeout=900, retry=False
             )
             if not img_bytes:
                 msg = ""
                 if isinstance(error_data, dict):
                     msg = str(error_data.get("message") or error_data.get("error") or "")
                 yield event.plain_result(f"❌ {target_id} 第 {index + 1} 局开庭失败：{msg or '后端未返回图片'}。")
+                self._record_cmd('ow开庭', False, error_code=_err_code)
                 return
             async for r in self._plugin._send_image_result(event, img_bytes, "开庭", ""):
                 yield r
+            self._record_cmd('ow开庭', True)
 
             await self._set_cooldown(event)
             logger.info(f"[开庭] done total={time.time() - t_start:.1f}s")
@@ -237,13 +246,15 @@ class CourtManager:
             )
             return
         img_bytes, error_data, _err_code = await self._plugin._fetch_image(
-            _COURT_IMAGE_ENDPOINT, {"bnet_id": target_id, "use_db": True}, timeout=900
+            _COURT_IMAGE_ENDPOINT, {"bnet_id": target_id, "use_db": True}, timeout=900, retry=False
         )
         if not img_bytes:
             msg = ""
             if isinstance(error_data, dict):
                 msg = str(error_data.get("message") or error_data.get("error") or "")
             yield event.plain_result(f"❌ 暂无 {target_id} 的最近判决书：{msg or '数据库记录缺失'}。")
+            self._record_cmd('ow开庭结果', False, error_code=_err_code)
             return
         async for r in self._plugin._send_image_result(event, img_bytes, "开庭", ""):
             yield r
+        self._record_cmd('ow开庭结果', True)

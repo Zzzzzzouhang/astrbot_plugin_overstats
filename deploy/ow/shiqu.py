@@ -288,6 +288,12 @@ class ShiquManager:
                 _timeout_task.cancel()
             self._plugin._ow_executing.discard(uid)
 
+    def _record_cmd(self, cmd_name: str, success: bool, error_code: str = ''):
+        """记录指令真实执行结果到监控采集器（成功/失败均计入，修复成功率恒 100% 问题）。"""
+        monitor = getattr(self._plugin, 'monitor', None)
+        if monitor:
+            asyncio.ensure_future(monitor.record_command(cmd_name, success, error_code=error_code))
+
     async def _do_query(self, event, uid: str, target_id: str, match_count: int = 0):
 
         """执行实际的新查询：调用后端接口取图并发送，成功后写 CD 与首日标记。"""
@@ -300,8 +306,9 @@ class ShiquManager:
             payload["match_count"] = match_count
 
         # 单次请求后端图片接口（违规时由 _send_image_result 自动封禁 12h）
+        # 是区吗为 AI 生成类功能：失败不重试，避免重复高成本生成，直接提示用户重发。
         img_bytes, error_data, _err_code = await self._plugin._fetch_image(
-            _SHIQU_IMAGE_ENDPOINT, payload, timeout=630
+            _SHIQU_IMAGE_ENDPOINT, payload, timeout=630, retry=False
         )
         if not img_bytes:
             msg = ""
@@ -311,9 +318,11 @@ class ShiquManager:
             # 失败兜底：重置冷却为 0，使下次发送因 cd_raw==0 直接查询，跳过 pending 二次确认（对齐原版错误恢复）。
             await self._reset_cooldown(event)
             await self._set_image_sent(event, False)
+            self._record_cmd('ow是区吗', False, error_code=_err_code)
             return
         async for r in self._plugin._send_image_result(event, img_bytes, "是区吗", ""):
             yield r
+        self._record_cmd('ow是区吗', True)
 
         # 成功：写入本次 target（供「结果」类指令与普通路径复用）、CD 与首日标记
         await self._set_last_target(event, target_id)
@@ -334,16 +343,18 @@ class ShiquManager:
             yield event.plain_result(f"❌ 没有找到上次的判定书结果，请先用 {_SHIQU_BTN} 生成一份。")
             return
         img_bytes, error_data, _err_code = await self._plugin._fetch_image(
-            _SHIQU_IMAGE_ENDPOINT, {"bnet_id": target_id, "use_db": True}, timeout=900
+            _SHIQU_IMAGE_ENDPOINT, {"bnet_id": target_id, "use_db": True}, timeout=900, retry=False
         )
         if not img_bytes:
             msg = ""
             if isinstance(error_data, dict):
                 msg = str(error_data.get("message") or error_data.get("error") or "")
             yield event.plain_result(f"❌ 暂无 {target_id} 的最近判定书：{msg or '数据库记录缺失'}。")
+            self._record_cmd('ow是区吗结果', False, error_code=_err_code)
             return
         async for r in self._plugin._send_image_result(event, img_bytes, "是区吗", ""):
             yield r
+        self._record_cmd('ow是区吗结果', True)
 
     # ── 连通性检测（指向后端 /healthz）──
 

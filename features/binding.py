@@ -21,6 +21,8 @@ async def dashen_bind(plugin, event: AstrMessageEvent, bnet_id: str):
         return
     old_bind_id = await plugin._get_user_bind_id(user_id)
     await plugin._set_user_bind_id(user_id, new_bind_id)
+    if plugin.monitor:
+        asyncio.ensure_future(plugin.monitor.record_command(CMD, True))
     if not old_bind_id:
         yield event.plain_result(f'✅ 绑定成功！关联战网账号【{new_bind_id}】')
     else:

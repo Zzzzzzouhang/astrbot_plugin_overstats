@@ -65,10 +65,10 @@
     "default": []
   },
   "cmd_rate_limit": {
-    "description": "指令并发限流",
+    "description": "指令并发限流（仅需访问后端的业务指令计入）",
     "type": "text",
-    "hint": "非白名单/管理员的用户同时执行的指令上限。JSON 格式：{\"enabled\":开true关false,\"max_concurrent\":上限数}。默认 {\"enabled\":false,\"max_concurrent\":3}。",
-    "default": "{\"enabled\":false,\"max_concurrent\":3}"
+    "hint": "非白名单/管理员的用户指令并发限制，按用户粒度。JSON 格式：{\"enabled\":开true关false,\"per_user_max\":单用户并发上限}。默认 {\"enabled\":false,\"per_user_max\":3}。per_user_max=0 表示不限制。修改后自动生效，无需重启。",
+    "default": "{\"enabled\":false,\"per_user_max\":3}"
   },
   "github_proxy_enabled": {
     "description": "是否启用 GitHub 加速",
@@ -180,8 +180,8 @@
   "dashen_current_season": {
     "description": "【AUTO】当前赛季",
     "type": "int",
-    "hint": "auto 模式下生效。大神当前赛季编号，默认 23。新赛季更新时需修改。",
-    "default": 23
+    "hint": "auto 模式下生效。大神当前赛季编号，默认 24。新赛季更新时需修改。",
+    "default": 24
   },
   "dashen_history_start_season": {
     "description": "【AUTO】历史起始赛季",
@@ -192,8 +192,8 @@
   "ow_hero_leaderboard_cn_season": {
     "description": "【AUTO】国服英雄榜单赛季",
     "type": "int",
-    "hint": "auto 模式下生效。国服英雄排行榜的赛季编号，默认 3。",
-    "default": 3
+    "hint": "auto 模式下生效。国服英雄排行榜的赛季编号，默认 4。",
+    "default": 4
   },
   "dashen_account_max_requests_per_second": {
     "description": "【AUTO】单账号每秒最大请求数",
