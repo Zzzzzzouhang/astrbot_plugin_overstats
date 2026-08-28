@@ -754,6 +754,47 @@ button { cursor: pointer; font-family: var(--ff-body); border: none; outline: no
 /* selected row highlight */
 .shiqu-row.selected { background: var(--c-primary-soft) !important; }
 
+/* 失败行浅色高亮，便于快速定位问题记录 */
+.shiqu-row.shiqu-row-fail { background: var(--c-error-soft, rgba(255,77,79,0.06)); }
+.shiqu-row.shiqu-row-fail:hover { background: var(--c-error-soft-strong, rgba(255,77,79,0.12)); }
+
+/* 响应列：失败 / 未解析成功 直接展示 raw_response 原文 */
+.shiqu-resp { text-align: left; max-width: 360px; }
+.shiqu-parse-ok {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--c-success, #2e9e5b);
+  font-weight: 500;
+}
+.shiqu-raw { margin-top: 4px; }
+.shiqu-raw-toggle {
+  font-size: 11px;
+  color: var(--c-error, #ff4d4f);
+  background: none;
+  border: 1px solid var(--c-hairline);
+  border-radius: var(--r-sm);
+  padding: 2px 8px;
+  cursor: pointer;
+  font-family: var(--ff-code);
+}
+.shiqu-raw-toggle:hover { border-color: var(--c-error, #ff4d4f); }
+.shiqu-raw-box {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--c-surface-dark, #1d1f24);
+  color: var(--c-on-dark, #e6e8ee);
+  border: 1px solid var(--c-hairline);
+  border-radius: var(--r-sm);
+  font-family: var(--ff-code);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  text-align: left;
+}
+
 /* ═══════════════ Responsive ═══════════════ */
 @media (max-width: 1024px) {
   .metrics-grid { grid-template-columns: repeat(2, 1fr); }

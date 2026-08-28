@@ -463,16 +463,42 @@ function renderShiqu() {
         : `<span class="badge badge-error">失败</span>`;
       const callBadge = (r.call_count > 1) ? `<span style="font-size:10px;color:var(--c-warning);margin-left:4px">×${r.call_count}</span>` : "";
 
-      return `<tr class="shiqu-row" data-id="${r.id}">
+      // 响应列：失败 / 未解析成功 的记录直接展示 raw_response 原文；
+      // 成功记录展示「解析成功」提示，点击行仍可查看 LLM 分析详情。
+      let respCell;
+      if (r.raw_response) {
+        const raw = r.raw_response;
+        const rawEsc = esc(raw);
+        respCell = `<div class="shiqu-raw">
+          <button class="shiqu-raw-toggle" data-id="${r.id}" title="点击展开/收起原文">原始响应 ▾</button>
+          <pre class="shiqu-raw-box" data-id="${r.id}" style="display:none">${rawEsc}</pre>
+        </div>`;
+      } else {
+        respCell = `<span class="shiqu-parse-ok">解析成功</span>`;
+      }
+
+      return `<tr class="shiqu-row${r.ok ? "" : " shiqu-row-fail"}" data-id="${r.id}">
         <td class="shiqu-ts">${ts}</td>
         <td class="shiqu-target" title="${esc(r.target_id||'')}">${esc((r.target_id||'--').length > 16 ? r.target_id.slice(0,16)+'…' : (r.target_id||'--'))}</td>
         <td class="shiqu-dur ${durCls}">${dur}</td>
         <td class="shiqu-call">
           <button class="shiqu-call-count" data-id="${r.id}" title="点击查看本次提示词">${r.call_count ?? 1}</button>${callBadge}
         </td>
-        <td style="white-space:nowrap">${okBadge}</td>
+        <td class="shiqu-resp">${okBadge}${respCell}</td>
       </tr>`;
     }).join("");
+
+    // 绑定原始响应展开/收起（阻止冒泡，避免触发行点击跳详情）
+    tbody.querySelectorAll(".shiqu-raw-toggle").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const pre = tbody.querySelector(`.shiqu-raw-box[data-id="${btn.dataset.id}"]`);
+        if (!pre) return;
+        const show = pre.style.display === "none";
+        pre.style.display = show ? "" : "none";
+        btn.textContent = show ? "原始响应 ▴" : "原始响应 ▾";
+      });
+    });
 
     // 绑定行点击 → LLM 分析详情（按需拉取单条大字段）
     tbody.querySelectorAll(".shiqu-row").forEach(row => {

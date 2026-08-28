@@ -94,23 +94,38 @@ class ShiquSqliteReader:
             avg_dur = float(srow[2] or 0)
 
             rows = cur.execute(
-                f"SELECT id, target_id, ok, duration_ms, call_count, created_at "
+                f"SELECT id, target_id, ok, raw_response, duration_ms, call_count, created_at "
                 f"FROM {_TABLE}{where_sql} "
                 f"ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
                 params + [int(limit), int(offset)],
             ).fetchall()
 
-            records = [
-                {
+            def _parse_ok(raw: str) -> bool:
+                """raw_response 能否解析为有效 JSON（决定「是否解析成功」）。"""
+                if not raw:
+                    return False
+                try:
+                    json.loads(raw)
+                    return True
+                except Exception:
+                    return False
+
+            records = []
+            for r in rows:
+                ok = bool(r[2])
+                raw = r[3] or ""
+                # 仅对失败 / 未解析成功的记录附带 raw_response 原文，
+                # 避免成功记录的大字段常驻内存与重复传输。
+                raw_for_list = raw if (not ok or not _parse_ok(raw)) else ""
+                records.append({
                     "id": r[0],
                     "target_id": r[1],
-                    "ok": bool(r[2]),
-                    "duration_ms": r[3],
-                    "call_count": r[4],
-                    "created_at": r[5],
-                }
-                for r in rows
-            ]
+                    "ok": ok,
+                    "raw_response": raw_for_list,
+                    "duration_ms": r[4],
+                    "call_count": r[5],
+                    "created_at": r[6],
+                })
 
             summary = {
                 "total": total_n,
