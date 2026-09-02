@@ -74,7 +74,7 @@ except ImportError:  # 插件作为顶层模块加载时
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.6.5")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.7.5")
 class OverstatsPlugin(Star):
     """Overstats 全指令插件。
 
