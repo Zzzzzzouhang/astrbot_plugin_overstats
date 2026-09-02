@@ -314,7 +314,11 @@ class ShiquManager:
             msg = ""
             if isinstance(error_data, dict):
                 msg = str(error_data.get("message") or error_data.get("error") or "")
-            yield event.plain_result(f"❌ {target_id} 是区吗查询失败：{msg or '后端未返回图片'}。请重试 {_SHIQU_BTN}")
+            if 'Could not resolve customerToken' in msg:
+                # ID 解析失败：复用插件统一文案（含"受大神接口维护影响"提示），避免透传英文技术错误
+                yield self._plugin._plain_error_result(event, self._plugin._id_resolve_err(f'{target_id} 是区吗查询失败'))
+            else:
+                yield event.plain_result(f"❌ {target_id} 是区吗查询失败：{msg or '后端未返回图片'}。请重试 {_SHIQU_BTN}")
             # 失败兜底：重置冷却为 0，使下次发送因 cd_raw==0 直接查询，跳过 pending 二次确认（对齐原版错误恢复）。
             await self._reset_cooldown(event)
             await self._set_image_sent(event, False)

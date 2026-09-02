@@ -132,7 +132,7 @@ class OverstatsPlugin(Star):
         self.daily_prompt_pending_users: set[str] = set()
         # 跨功能并发守卫：同一用户同一时间 是区吗/开庭 最多一条在执行（两管理器共用）
         self._ow_executing: set[str] = set()
-        self.id_resolve_error_hint = '未查询到id或者id错误，id严格区分大小写'
+        self.id_resolve_error_hint = '未查询到id或者id错误，id严格区分大小写\n（受大神接口维护影响，部分id不可用）'
         self._save_image_locally = bool(self.config.get('save_image_locally', True))
         try:
             plugin_name = getattr(self, 'name', 'overstats_full')
