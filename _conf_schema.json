@@ -67,8 +67,8 @@
   "cmd_rate_limit": {
     "description": "指令并发限流（仅需访问后端的业务指令计入）",
     "type": "text",
-    "hint": "非白名单/管理员的用户指令并发限制，按用户粒度。JSON 格式：{\"enabled\":开true关false,\"per_user_max\":单用户并发上限}。默认 {\"enabled\":false,\"per_user_max\":3}。per_user_max=0 表示不限制。修改后自动生效，无需重启。",
-    "default": "{\"enabled\":false,\"per_user_max\":3}"
+    "hint": "全局指令并发优先级队列（真实队列）。JSON 格式：{\"enabled\":开true关false,\"per_user_max\":单普通用户并发上限,\"global_max\":全局同时执行上限}。默认 {\"enabled\":false,\"per_user_max\":3,\"global_max\":8}。per_user_max=0 表示不限制；global_max 为系统级并发容量（保护后端），所有用户（含特权）均受此全局容量约束，但白名单群/人/AstrBot 管理员会插队优先。修改后自动生效，无需重启。",
+    "default": "{\"enabled\":false,\"per_user_max\":3,\"global_max\":8}"
   },
   "github_proxy_enabled": {
     "description": "是否启用 GitHub 加速",

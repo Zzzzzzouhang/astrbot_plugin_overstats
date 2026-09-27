@@ -23,11 +23,17 @@ except ImportError:
     # 兜底：插件作为顶层模块加载时相对导入可能失败
     from deploy import DeployManager  # type: ignore[no-redef]
 
-# 按用户粒度指令并发限制器（内聚实现）
+# 按用户粒度指令并发限制器（内聚实现，已弃用，仅保留导入以兼容旧测试）
 try:
     from .deploy.ops.concurrency_limiter import UserConcurrencyLimiter
 except ImportError:
     from deploy.ops.concurrency_limiter import UserConcurrencyLimiter  # type: ignore[no-redef]
+
+# 全局指令并发优先级队列（真实队列：全局容量 + 特权插队）
+try:
+    from .deploy.ops.priority_queue import GlobalPriorityCommandQueue, SlotRejected
+except ImportError:
+    from deploy.ops.priority_queue import GlobalPriorityCommandQueue, SlotRejected  # type: ignore[no-redef]
 
 # OW 开庭模块（独立封装，避免主文件臃肿）
 try:
@@ -74,7 +80,7 @@ except ImportError:  # 插件作为顶层模块加载时
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.7.6")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.7.7")
 class OverstatsPlugin(Star):
     """Overstats 全指令插件。
 
@@ -121,8 +127,11 @@ class OverstatsPlugin(Star):
         super().__init__(context)
         self.config = config
         self.file_lock = asyncio.Lock()
-        self._cmd_limiter = UserConcurrencyLimiter(
-            per_user_max=3, timeout_seconds=self._CMD_SLOT_AUTO_RELEASE_SECONDS
+        self._cmd_limiter = GlobalPriorityCommandQueue(
+            capacity=8,
+            per_user_max=3,
+            timeout_seconds=self._CMD_SLOT_AUTO_RELEASE_SECONDS,
+            queue_wait_timeout=600,
         )
         self._load_rate_limit_config()
         self._semaphore_reset_task = asyncio.create_task(self._daily_semaphore_reset_loop())
@@ -538,8 +547,9 @@ class OverstatsPlugin(Star):
         cmd_rate_limit 为 JSON 字符串，字段：
           enabled:      总开关。严格布尔解析，`"false"/"0"/"off"/空` 一律视为关闭，
                         避免 `bool("false") == True` 导致限流被意外开启。
-          per_user_max: 同一用户并发上限（默认 3；0 或负数表示不限制）。
-          （历史字段 max_concurrent 已废弃：现仅按用户粒度限流，不再有全局上限。）
+          per_user_max: 同一普通用户并发上限（默认 3；0 或负数表示不限制）。
+          global_max:   全局并发容量，同时执行的指令条数上限（默认 8）；
+                        特权（白名单群/人/管理员）不受 per_user_max 约束，但仍受此全局容量约束并插队优先。
         """
         raw = str(self.config.get('cmd_rate_limit', '{}') or '{}').strip()
         if getattr(self, '_rate_limit_cfg_raw', None) == raw:
@@ -557,11 +567,20 @@ class OverstatsPlugin(Star):
         except (TypeError, ValueError):
             per_user = 3
         self._rate_limit_per_user = max(0, per_user)
+        try:
+            global_max = int(cfg.get('global_max', 8))
+        except (TypeError, ValueError):
+            global_max = 8
+        self._rate_limit_global_max = max(1, global_max)
         if getattr(self, '_cmd_limiter', None) is not None:
-            self._cmd_limiter.update_config(self._rate_limit_per_user, self._CMD_SLOT_AUTO_RELEASE_SECONDS)
+            self._cmd_limiter.update_config(
+                self._rate_limit_per_user,
+                self._CMD_SLOT_AUTO_RELEASE_SECONDS,
+                capacity=self._rate_limit_global_max,
+            )
         logger.info(
             f'[Overstats] 指令限流配置生效: enabled={self._rate_limit_enabled} '
-            f'per_user_max={self._rate_limit_per_user}'
+            f'per_user_max={self._rate_limit_per_user} global_max={self._rate_limit_global_max}'
         )
 
     @staticmethod
@@ -593,46 +612,46 @@ class OverstatsPlugin(Star):
         except Exception:
             return None
 
-    async def _try_acquire_cmd_slot(self, event: AstrMessageEvent | None = None) -> bool:
-        """非阻塞尝试获取该用户的指令并发槽位（按用户粒度）。
+    async def _try_acquire_cmd_slot(self, event: AstrMessageEvent | None = None, *, privileged: bool = False) -> None:
+        """获取全局指令并发槽位（真实队列）。
 
-        返回 True=获取成功；False=该用户并发已满。
-        限流实现见 UserConcurrencyLimiter（含超时惰性清理）。
+        成功返回；被拒绝抛 SlotRejected（个人并发已满 / 排队超时）。
+        特权（白名单/管理员/限流关闭）插队优先。
         """
         self._load_rate_limit_config()
-        return await self._cmd_limiter.acquire(self._cmd_user_key(event))
+        await self._cmd_limiter.acquire(self._cmd_user_key(event), privileged=privileged)
 
     async def _release_cmd_slot(self, event: AstrMessageEvent | None = None) -> None:
         """释放该用户的指令并发槽位。"""
         await self._cmd_limiter.release(self._cmd_user_key(event))
 
     async def _run_with_cmd_slot(self, event: AstrMessageEvent, coro_factory):
-        """业务指令并发限流包装器：在 main.py handler 层统一获取/释放槽位。
+        """业务指令并发限流包装器：在 main.py handler 层统一获取/释放全局槽位。
 
         - 仅"需要访问后端"的业务指令使用本包装；绑定/帮助/管理/测试类指令不经过限流。
-        - 特权用户（白名单/管理员/限流关闭）直接执行，不占用槽位。
-        - 仅按用户粒度限流：同一用户同时最多 per_user_max 条（默认 3），无全局上限。
+        - 所有用户均进入全局真实队列（全局容量 global_max）；
+          特权（白名单群/人/管理员，或限流关闭）插队优先，普通用户排队队尾并额外受 per_user_max 约束。
+        - 仅「个人并发已满」立即返回拒绝文案；队列等待不拒绝，只 await 直至获得槽位。
         - 槽位覆盖整个生成器生命周期，try/finally 保证任何中断（含 astrbot 取消）都会释放。
         - coro_factory：无参可调用，返回 async generator。
         """
-        if not self._is_privileged(event):
-            if not await self._try_acquire_cmd_slot(event):
-                yield event.plain_result(self._RATE_LIMIT_USER_REJECT_MSG)
-                try:
-                    uid = str(event.get_sender_id())
-                except Exception:
-                    uid = ''
-                if self.monitor:
-                    asyncio.ensure_future(self.monitor.record_rate_limit('cmd', uid))
-                return
+        privileged = self._is_privileged(event)
+        try:
+            await self._try_acquire_cmd_slot(event, privileged=privileged)
+        except SlotRejected:
+            yield event.plain_result(self._RATE_LIMIT_USER_REJECT_MSG)
             try:
-                async for r in coro_factory():
-                    yield r
-            finally:
-                await self._release_cmd_slot(event)
-        else:
+                uid = str(event.get_sender_id())
+            except Exception:
+                uid = ''
+            if self.monitor:
+                asyncio.ensure_future(self.monitor.record_rate_limit('cmd', uid))
+            return
+        try:
             async for r in coro_factory():
                 yield r
+        finally:
+            await self._release_cmd_slot(event)
 
     def _violation_ban_path(self) -> Path:
         return self.plugin_data_dir / self._VIOLATION_BAN_FILE

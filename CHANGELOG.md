@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.7.7 (2026-09-27)
+
+### ✨ 新增
+- **全局指令并发优先级队列（真实队列）**：新增 `deploy/ops/priority_queue.py` 的 `GlobalPriorityCommandQueue`，替代原纯按用户粒度的 `UserConcurrencyLimiter`。在「全局指令并发槽位」层实现真实 FIFO 队列，白名单群/个人、AstrBot 管理员插入队首优先出队，普通用户排队队尾；全局容量 `global_max`（默认 8）为系统级并发上限，保护后端，所有用户（含特权）均受此约束，特权仅豁免 `per_user_max` 个人上限。
+  - `cmd_rate_limit` 配置新增 `global_max` 字段（默认 8），与 `per_user_max` 一并热生效
+  - 仅「个人并发已满」立即返回拒绝文案；队列等待不拒绝，仅 await 至获得槽位
+  - 新增 `stats()`（capacity/global_running/waiting/特权等待数/privileged_jumped_total 等）供监控；保留 `clear()`/`expire_all()` 兜底
+  - 配套 `tests/test_priority_queue.py` 覆盖：全局容量、特权插队、特权绕过 per_user、个人满立即拒绝、等待超时、release 补位、clear、stats
+
 ## v2.7.6 (2026-09-20)
 
 ### 🐛 修复
