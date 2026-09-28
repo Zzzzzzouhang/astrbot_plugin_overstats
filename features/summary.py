@@ -99,7 +99,9 @@ async def dashen_week(plugin, event: AstrMessageEvent, bnet_id: str = ''):
     success = False
     err_code = ''
     try:
-        img_bytes, error_data, err_code = await plugin._fetch_image('/dashen-summary/week/image', {'bnet_id': target_id}, timeout=900)
+        # 周度总结单条指令会打一次后端；用专属信号量将其后端并发限制在 2（最多 2 条周度总结同时跑）
+        async with plugin._weekly_summary_semaphore:
+            img_bytes, error_data, err_code = await plugin._fetch_image('/dashen-summary/week/image', {'bnet_id': target_id}, timeout=900)
         if img_bytes:
             success = True
             async for r in plugin._send_image_result(event, img_bytes, '周度总结'):

@@ -8,6 +8,7 @@ import base64
 import json
 import time
 import inspect
+import threading
 import urllib.parse
 from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
@@ -80,7 +81,7 @@ except ImportError:  # 插件作为顶层模块加载时
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.7.7")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.7.8")
 class OverstatsPlugin(Star):
     """Overstats 全指令插件。
 
@@ -122,6 +123,13 @@ class OverstatsPlugin(Star):
         "锐评关": {"analyze": False},
         "全员关": {"show_all_heroes": False},
     }
+
+    # 群聊回复超时预警与图片缓存（QQ 回复消息 msg_id 5 分钟过期防护）
+    _REPLY_MSG_ID_TTL = 300                       # QQ 回复消息 msg_id 过期时间（秒）
+    _TIMEOUT_WARN_BEFORE = 290                    # 4分50秒：仍未返回则主动预警
+    _IMAGE_CACHE_TTL = 86400                       # 生成图片本地缓存保留时长（24 小时）
+    _CONGESTION_WAITING_THRESHOLD = 3              # 排队人数达到此值视为拥堵
+    _IMAGE_CACHE_INDEX_FILE = "image_cache_index.json"
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -167,8 +175,11 @@ class OverstatsPlugin(Star):
         self.daily_prompt_state = self._load_daily_prompt_state()
         self.daily_prompt_reset_task = asyncio.create_task(self._daily_prompt_reset_loop())
         self._http_session: aiohttp.ClientSession | None = None
-        self.overstats_semaphore = asyncio.Semaphore(5)
-        self._overstats_inner_semaphore = asyncio.Semaphore(2)
+        # 后端并发上限与指令全局队列容量保持一致（capacity=8），两层嵌套取 min，故均设为 8
+        self.overstats_semaphore = asyncio.Semaphore(self._cmd_limiter._capacity)
+        self._overstats_inner_semaphore = asyncio.Semaphore(self._cmd_limiter._capacity)
+        # 周度总结专属后端并发上限（单条指令会打一次后端，故等价于同时最多 2 条周度总结在跑）
+        self._weekly_summary_semaphore = asyncio.Semaphore(2)
         if self._save_image_locally:
             self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop())
         else:
@@ -180,6 +191,9 @@ class OverstatsPlugin(Star):
         self._bot_nickname_cache: str | None = None
         self._full_adapt_map: dict | None = None
         self._admin_cmd_set: set[str] = {'多图测试', '单图测试', 'ow开庭', '开庭', 'ow是区吗', '是区吗', 'ow是区吗结果', '是区吗结果', 'ow开庭结果', '开庭结果', 'owAI检测', 'AI检测', '维护', 'ow违禁封禁', 'ow违禁解封', 'ow连接测试', 'ow部署', 'ow部署状态', 'ow更新后端', 'ow停止后端', 'ow重启后端', 'ow部署日志', 'ow后端日志', 'ow卸载后端', 'ow卸载后端执行确认', 'ow卸载后端执行仅代码', 'ow卸载后端执行仅venv', 'ow卸载后端执行强制', '群设置', '全量适配开', '全量适配开完全匹配', '全量适配关', '管理'}
+        # 图片缓存索引（本地保留 24 小时，供群聊回复超时后 @机器人 取回）
+        self._image_cache_index_path = self.plugin_data_dir / self._IMAGE_CACHE_INDEX_FILE
+        self._cache_lock = threading.Lock()
         self.court_manager = CourtManager(self)
         self.shiqu_manager = ShiquManager(self)
         self._register_monitor_apis()
@@ -578,6 +592,11 @@ class OverstatsPlugin(Star):
                 self._CMD_SLOT_AUTO_RELEASE_SECONDS,
                 capacity=self._rate_limit_global_max,
             )
+            # 后端并发信号量与全局队列容量保持一致：配置热更新时同步重建，
+            # 使「改 capacity 即同时收住指令并发与后端并发」在热重载下也成立。
+            if hasattr(self, 'overstats_semaphore'):
+                self.overstats_semaphore = asyncio.Semaphore(self._rate_limit_global_max)
+                self._overstats_inner_semaphore = asyncio.Semaphore(self._rate_limit_global_max)
         logger.info(
             f'[Overstats] 指令限流配置生效: enabled={self._rate_limit_enabled} '
             f'per_user_max={self._rate_limit_per_user} global_max={self._rate_limit_global_max}'
@@ -636,9 +655,18 @@ class OverstatsPlugin(Star):
         - coro_factory：无参可调用，返回 async generator。
         """
         privileged = self._is_privileged(event)
+        done_event = asyncio.Event()
+        # 群聊 + 本地缓存：注册回复超时主动预警（QQ 回复 msg_id 5 分钟过期）
+        if self._save_image_locally and self._is_qq_group_message(event):
+            cmd_text = (getattr(event, 'message_str', '') or '').strip()[:60]
+            bnet_id = self._extract_bnet_id(event)
+            asyncio.ensure_future(
+                self._maybe_warn_reply_timeout(event, done_event, cmd_text, bnet_id)
+            )
         try:
             await self._try_acquire_cmd_slot(event, privileged=privileged)
         except SlotRejected:
+            done_event.set()
             yield event.plain_result(self._RATE_LIMIT_USER_REJECT_MSG)
             try:
                 uid = str(event.get_sender_id())
@@ -652,6 +680,150 @@ class OverstatsPlugin(Star):
                 yield r
         finally:
             await self._release_cmd_slot(event)
+            done_event.set()
+
+    # ── 群聊回复超时预警与图片缓存 ─────────────────────────────
+    def _extract_bnet_id(self, event: AstrMessageEvent) -> str:
+        """从用户消息文本中提取战网 ID（Name#12345 形式）。"""
+        try:
+            msg = event.message_str or ''
+        except Exception:
+            return ''
+        m = re.search(r'[A-Za-z0-9_\-]{2,16}#\d{4,8}', msg)
+        return m.group(0) if m else ''
+
+    async def _maybe_warn_reply_timeout(self, event: AstrMessageEvent, done_event: asyncio.Event, command_text: str, bnet_id: str) -> None:
+        """4分50秒仍未返回时，向群内主动发送预警（不依赖已临近过期的回复 msg_id）。"""
+        try:
+            await asyncio.wait_for(done_event.wait(), timeout=self._TIMEOUT_WARN_BEFORE)
+            return  # 已正常返回，无需预警
+        except asyncio.TimeoutError:
+            pass
+        if done_event.is_set():
+            return
+        try:
+            if not self._is_qq_group_message(event):
+                return
+            umo = getattr(event, 'unified_msg_origin', None)
+            if not umo:
+                return
+            try:
+                user_id = str(event.get_sender_id())
+            except Exception:
+                user_id = ''
+            waiting = 0
+            try:
+                waiting = self._cmd_limiter.stats().get('waiting', 0)
+            except Exception:
+                pass
+            congested = waiting >= self._CONGESTION_WAITING_THRESHOLD
+            if bnet_id:
+                head = f'⏳ {bnet_id} 的「{command_text or "指令"}」仍在生成中，'
+            else:
+                head = f'⏳ 你发送的「{command_text or "指令"}」仍在生成中，'
+            lines = [head, 'QQ 回复消息的 msg_id 将在 5 分钟后过期，当前已接近超时，可能无法正常回复。']
+            if congested:
+                lines.append(f'当前排队用户较多（约 {waiting} 人），回复即将超时，请稍后 @机器人 获取图片。')
+            else:
+                lines.append('若稍后未收到图片，请 @机器人 发送「获取图片」取回（图片保留 24 小时）。')
+            text = '\n'.join(lines)
+            chain = MessageChain([Comp.At(qq=user_id), Comp.Plain(text)])
+            await self.context.send_message(umo, chain)
+        except Exception as e:
+            logger.error(f'回复超时预警发送失败: {e}')
+
+    def _record_image_cache_sync(self, user_key: str, path: str, command: str = '') -> None:
+        """记录用户最近生成的图片到本地缓存索引（保留 24 小时，最多保留 5 张）。"""
+        try:
+            with self._cache_lock:
+                index: dict = {}
+                if self._image_cache_index_path.exists():
+                    try:
+                        index = json.loads(self._image_cache_index_path.read_text(encoding='utf-8'))
+                    except Exception:
+                        index = {}
+                entries = index.get(user_key, [])
+                entries.append({'path': str(path), 'command': command, 'ts': time.time()})
+                now = time.time()
+                entries = [e for e in entries if now - e.get('ts', 0) <= self._IMAGE_CACHE_TTL]
+                entries = entries[-5:]
+                index[user_key] = entries
+                tmp = self._image_cache_index_path.with_name(self._image_cache_index_path.name + '.tmp')
+                tmp.write_text(json.dumps(index, ensure_ascii=False), encoding='utf-8')
+                tmp.replace(self._image_cache_index_path)
+        except Exception as e:
+            logger.warning(f'记录图片缓存失败: {e}')
+
+    @staticmethod
+    def _cache_entry_alive(entry: dict, now: float, ttl: float) -> bool:
+        """判断缓存索引条目是否有效：path 非空且文件存在、且在保留期内。"""
+        p = entry.get('path')
+        if not p:
+            return False
+        try:
+            return (now - entry.get('ts', 0) <= ttl) and Path(p).exists()
+        except Exception:
+            return False
+
+    def _get_user_latest_image(self, user_key: str) -> dict | None:
+        """取回用户最近一次生成的、仍在 24 小时保留期内且文件存在的图片记录。"""
+        try:
+            if not self._image_cache_index_path.exists():
+                return None
+            index = json.loads(self._image_cache_index_path.read_text(encoding='utf-8'))
+            entries = index.get(user_key, [])
+            now = time.time()
+            entries = [e for e in entries if self._cache_entry_alive(e, now, self._IMAGE_CACHE_TTL)]
+            return entries[-1] if entries else None
+        except Exception:
+            return None
+
+    def _prune_user_cache(self, user_key: str) -> None:
+        """清理某用户过期的图片缓存索引条目。"""
+        try:
+            with self._cache_lock:
+                if not self._image_cache_index_path.exists():
+                    return
+                index = json.loads(self._image_cache_index_path.read_text(encoding='utf-8'))
+                entries = index.get(user_key, [])
+                now = time.time()
+                entries = [e for e in entries if self._cache_entry_alive(e, now, self._IMAGE_CACHE_TTL)]
+                if entries:
+                    index[user_key] = entries
+                else:
+                    index.pop(user_key, None)
+                tmp = self._image_cache_index_path.with_name(self._image_cache_index_path.name + '.tmp')
+                tmp.write_text(json.dumps(index, ensure_ascii=False), encoding='utf-8')
+                tmp.replace(self._image_cache_index_path)
+        except Exception:
+            pass
+
+    def _prune_image_cache_index_sync(self, now_ts: float | None = None) -> None:
+        """清理全局图片缓存索引中过期或文件已缺失的条目（每日定时调用）。"""
+        try:
+            if not self._image_cache_index_path.exists():
+                return
+            if now_ts is None:
+                now_ts = time.time()
+            with self._cache_lock:
+                index = json.loads(self._image_cache_index_path.read_text(encoding='utf-8'))
+                changed = False
+                for uk in list(index.keys()):
+                    entries = index.get(uk, [])
+                    new_entries = [e for e in entries if self._cache_entry_alive(e, now_ts, self._IMAGE_CACHE_TTL)]
+                    if new_entries:
+                        if len(new_entries) != len(entries):
+                            index[uk] = new_entries
+                            changed = True
+                    else:
+                        index.pop(uk, None)
+                        changed = True
+                if changed:
+                    tmp = self._image_cache_index_path.with_name(self._image_cache_index_path.name + '.tmp')
+                    tmp.write_text(json.dumps(index, ensure_ascii=False), encoding='utf-8')
+                    tmp.replace(self._image_cache_index_path)
+        except Exception:
+            pass
 
     def _violation_ban_path(self) -> Path:
         return self.plugin_data_dir / self._VIOLATION_BAN_FILE
@@ -1102,28 +1274,39 @@ class OverstatsPlugin(Star):
                 return (None, {'error': 'retry_exhausted', 'message': '重试耗尽'}, 'retry_exhausted')
 
     async def _periodic_cleanup_loop(self):
-        """定时清理临时图片目录中超过 7 天的文件（每天执行一次）"""
+        """每日凌晨 4 点清理临时图片目录，保留最近 24 小时内的文件，并清理过期缓存索引"""
         try:
             while True:
-                await asyncio.sleep(86400)
+                now = datetime.now()
+                next4 = now.replace(hour=4, minute=0, second=0, microsecond=0)
+                if now >= next4:
+                    next4 += timedelta(days=1)
+                wait_sec = max(1, (next4 - now).total_seconds())
+                await asyncio.sleep(wait_sec)
                 try:
-                    now = time.time()
+                    now_ts = time.time()
                     count = 0
-                    for f in self.temp_image_dir.iterdir():
-                        if f.is_file() and now - f.stat().st_mtime > 7 * 86400:
+                    kept = 0
+                    if self.temp_image_dir and self.temp_image_dir.exists():
+                        for f in self.temp_image_dir.iterdir():
+                            if not f.is_file():
+                                continue
                             try:
-                                f.unlink()
-                                count += 1
+                                if now_ts - f.stat().st_mtime > self._IMAGE_CACHE_TTL:
+                                    f.unlink()
+                                    count += 1
+                                else:
+                                    kept += 1
                             except Exception:
                                 pass
-                    if count:
-                        logger.info(f'已清理 {count} 个过期临时图片文件')
+                    self._prune_image_cache_index_sync(now_ts)
+                    logger.info(f'[Overstats] 每日 4 点已清理 {count} 个临时图片文件，保留近 24 小时内 {kept} 个')
                 except Exception as e:
                     logger.error(f'临时文件清理异常: {e}')
         except asyncio.CancelledError:
             pass
 
-    def _build_image_chain(self, event: AstrMessageEvent, img_bytes: bytes, fallback_text: str=''):
+    def _build_image_chain(self, event: AstrMessageEvent, img_bytes: bytes, fallback_text: str='', command: str=''):
         """构建图片消息链（同步，不含违规检测）。"""
         if not img_bytes:
             return self._plain_error_result(event, fallback_text or '❌ 图片生成失败')
@@ -1133,6 +1316,7 @@ class OverstatsPlugin(Star):
                 img_hash = abs(hash(img_bytes))
                 img_path = self.temp_image_dir / f'{img_hash}.png'
                 img_path.write_bytes(img_bytes)
+                self._record_image_cache_sync(self._user_key(event), str(img_path), command)
                 image_comp = Comp.Image.fromFileSystem(str(img_path))
             else:
                 image_comp = Comp.Image.fromBytes(img_bytes)
@@ -1144,7 +1328,7 @@ class OverstatsPlugin(Star):
 
     async def _send_image_result(self, event: AstrMessageEvent, img_bytes: bytes, command: str, fallback_text: str=''):
         """发送单张图片，自动捕获违规异常并封禁该指令。"""
-        result = self._build_image_chain(event, img_bytes, fallback_text)
+        result = self._build_image_chain(event, img_bytes, fallback_text, command)
         try:
             yield result
         except Exception as exc:
@@ -1168,6 +1352,7 @@ class OverstatsPlugin(Star):
                 if self._save_image_locally:
                     img_path = self.temp_image_dir / f'{abs(hash(img_bytes))}_{time.time_ns()}.png'
                     img_path.write_bytes(img_bytes)
+                    self._record_image_cache_sync(self._user_key(event), str(img_path), command)
                     chain.append(Comp.Image.fromFileSystem(str(img_path)))
                 else:
                     chain.append(Comp.Image.fromBytes(img_bytes))
@@ -1691,6 +1876,28 @@ class OverstatsPlugin(Star):
 
         yield event.plain_result(self._format_markdown_by_platform(event, help_text))
 
+
+    @filter.command('获取图片', alias={'取图', 'ow取图', 'ow获取图片'})
+    async def get_cached_image(self, event: AstrMessageEvent):
+        """取回最近一次生成的图片（图片本地保留 24 小时，群聊回复超时未收到时使用）。"""
+        user_key = self._user_key(event)
+        entry = self._get_user_latest_image(user_key)
+        if not entry:
+            yield event.plain_result('🖼️ 暂无可获取的图片（图片仅在本地保留 24 小时，超时后自动清理）。')
+            return
+        path = Path(entry.get('path', ''))
+        if not path.exists():
+            self._prune_user_cache(user_key)
+            yield event.plain_result('🖼️ 图片已过期或不存在（本地仅保留 24 小时）。')
+            return
+        try:
+            img_bytes = path.read_bytes()
+        except Exception as e:
+            logger.error(f'读取缓存图片失败: {e}')
+            yield event.plain_result('🖼️ 读取缓存图片失败。')
+            return
+        async for r in self._send_image_result(event, img_bytes, entry.get('command') or '获取图片'):
+            yield r
 
     @filter.command('今日总结', alias={'今日', '今日数据'})
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = ''):
