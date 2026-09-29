@@ -693,7 +693,7 @@ class OverstatsPlugin(Star):
         return m.group(0) if m else ''
 
     async def _maybe_warn_reply_timeout(self, event: AstrMessageEvent, done_event: asyncio.Event, command_text: str, bnet_id: str) -> None:
-        """4分50秒仍未返回时，向群内主动发送预警（不依赖已临近过期的回复 msg_id）。"""
+        """4分50秒仍未返回时，以「被动回复」方式向群内发送超时预警（回复原消息，规避主动消息权限）。"""
         try:
             await asyncio.wait_for(done_event.wait(), timeout=self._TIMEOUT_WARN_BEFORE)
             return  # 已正常返回，无需预警
@@ -703,9 +703,6 @@ class OverstatsPlugin(Star):
             return
         try:
             if not self._is_qq_group_message(event):
-                return
-            umo = getattr(event, 'unified_msg_origin', None)
-            if not umo:
                 return
             try:
                 user_id = str(event.get_sender_id())
@@ -728,7 +725,10 @@ class OverstatsPlugin(Star):
                 lines.append('若稍后未收到图片，请 @机器人 发送「获取图片」取回（图片保留 24 小时）。')
             text = '\n'.join(lines)
             chain = MessageChain([Comp.At(qq=user_id), Comp.Plain(text)])
-            await self.context.send_message(umo, chain)
+            # 改用「被动回复」：event.send 会以原消息 msg_id 作为回复目标，
+            # 规避群内主动消息所需的 admin 权限（v4.28.2 报错「主动消息失败, 无权限」）。
+            # 4:50 时原 msg_id 仍在 5 分钟交互窗口内，被动回复不受主动消息权限限制。
+            await event.send(chain)
         except Exception as e:
             logger.error(f'回复超时预警发送失败: {e}')
 
