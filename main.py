@@ -1212,14 +1212,14 @@ class OverstatsPlugin(Star):
     async def _fetch_image(self, endpoint: str, payload: dict=None, timeout: int=600, retry: bool=True) -> tuple[bytes | None, dict | None, str]:
         """请求后端图片接口。
 
-        retry=True（默认）：遇到 5xx/internal_error 等瞬时错误 5 秒后自动重试 1 次（共 2 次尝试）；
+        retry=True（默认）：遇到 5xx/internal_error 等瞬时错误 10 秒后自动重试 1 次（共 2 次尝试）；
         retry=False：只尝试 1 次，失败直接返回（是区吗/开庭等 AI 生成类功能使用，避免重复高成本生成）。
         """
         url = f'{self.base_url}{endpoint}'
         payload = payload or {}
         async with self.overstats_semaphore:
             async with self._overstats_inner_semaphore:
-                for attempt in ((1, 2) if retry else (1,)):  # 最多 2 次尝试（1 次自动重试），间隔 5 秒
+                for attempt in ((1, 2) if retry else (1,)):  # 最多 2 次尝试（1 次自动重试），间隔 10 秒
                     start_ts = time.time()
                     try:
                         session = await self._get_http_session()
@@ -1246,8 +1246,8 @@ class OverstatsPlugin(Star):
                                     if self.monitor:
                                         elapsed = int((time.time() - start_ts) * 1000)
                                         asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
-                                    logger.warning(f'Overstats API 瞬时错误({resp.status})，5秒后自动重试（第2/2次）: {endpoint}')
-                                    await asyncio.sleep(5)
+                                    logger.warning(f'Overstats API 瞬时错误({resp.status})，10秒后自动重试（第2/2次）: {endpoint}')
+                                    await asyncio.sleep(10)
                                     continue
                                 if self.monitor:
                                     elapsed = int((time.time() - start_ts) * 1000)
@@ -1263,8 +1263,8 @@ class OverstatsPlugin(Star):
                                 return (None, error_data, error_data.get('error', '') if isinstance(error_data, dict) else '')
                     except Exception as e:
                         if retry and attempt < 2:
-                            logger.warning(f'网络请求异常，5秒后自动重试（第2/2次）: {e}')
-                            await asyncio.sleep(5)
+                            logger.warning(f'网络请求异常，10秒后自动重试（第2/2次）: {e}')
+                            await asyncio.sleep(10)
                             continue
                         if self.monitor:
                             elapsed = int((time.time() - start_ts) * 1000)

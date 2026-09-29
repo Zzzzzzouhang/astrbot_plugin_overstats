@@ -115,7 +115,7 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
     try:
         session = await plugin._get_http_session()
         resp_data = None
-        # 最多 2 次尝试：后端瞬时错误（500/internal_error 超时等）5 秒后自动重试一次
+        # 最多 2 次尝试：后端瞬时错误（500/internal_error 超时等）10 秒后自动重试一次
         for attempt in (1, 2):
             async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=600)) as resp:
                 if resp.status == 200:
@@ -126,8 +126,8 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
                 except Exception:
                     error_data = None
                 if error_data is not None and attempt == 1 and plugin._is_retryable_backend_error(resp.status, error_data):
-                    logger.warning(f'获取单局详细瞬时错误 HTTP {resp.status}，5秒后自动重试 | bnet={target_id} index={index}')
-                    await asyncio.sleep(5)
+                    logger.warning(f'获取单局详细瞬时错误 HTTP {resp.status}，10秒后自动重试 | bnet={target_id} index={index}')
+                    await asyncio.sleep(10)
                     continue
                 if error_data is not None:
                     err_msg = error_data.get('message', '未知后端 service 错误')

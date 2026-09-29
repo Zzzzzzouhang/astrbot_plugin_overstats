@@ -13,6 +13,7 @@
 ### 🔧 优化
 - **后端并发与全局队列容量对齐**：`_fetch_image` 的两层信号量（外层/内层）由 5/2 统一改为引用 `_cmd_limiter._capacity`（=8），后端最大并发请求数从 2 提升到 8，与指令全局排队容量保持一致；调整后只改队列 `capacity` 即可同时收住指令并发与后端并发。
 - **周度总结专属后端并发限制**：新增 `self._weekly_summary_semaphore = asyncio.Semaphore(2)`，`dashen_week` 的后端请求包裹其中，使周度总结最多 2 条同时打后端（与其余指令的全局 8 并发互不干扰）。
+- **后端瞬时错误重试间隔 5s → 10s**：`_fetch_image`（含 500/internal_error 等可重试错误与网络异常两条重试路径）与 `features/players.py` 单局详细拉取的自动重试等待由 5 秒延长至 10 秒，降低后端瞬时抖动期内的重复打压力。
 
 ### 🐛 修复
 - **后端信号量随队列容量热同步**：此前 `_load_rate_limit_config` 热更新 `global_max` 时只改了指令队列容量，后端信号量仍停留在初始化值，导致「改 capacity 即同时收住后端并发」在热重载下不成立。现于配置生效处同步重建 `overstats_semaphore`/`_overstats_inner_semaphore`，使两者始终等于 `global_max`（重启或热改均生效）。
