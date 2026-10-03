@@ -19,6 +19,7 @@
 - **后端信号量随队列容量热同步**：此前 `_load_rate_limit_config` 热更新 `global_max` 时只改了指令队列容量，后端信号量仍停留在初始化值，导致「改 capacity 即同时收住后端并发」在热重载下不成立。现于配置生效处同步重建 `overstats_semaphore`/`_overstats_inner_semaphore`，使两者始终等于 `global_max`（重启或热改均生效）。
 - **图片缓存索引空路径隐患**：`_get_user_latest_image`/`_prune_user_cache`/`_prune_image_cache_index_sync` 原用 `Path(e.get('path','')).exists()` 判存在，当条目 `path` 缺失或为空字符串时 `Path('')` 解析为当前目录而恒为真，畸形条目既无法被清理、又会被当作「最新」导致取图失败。新增 `_cache_entry_alive` 统一校验「path 非空且文件存在且未超 24h 保留期」。
 - **群聊超时预警「主动消息失败, 无权限」**：原预警通过 `context.send_message` 走「主动消息」通道，群内需机器人具备主动发送权限（如 QQ 官方机器人需群 admin 授权），否则抛 `主动消息失败, 无权限`。改为调用 `event.send(chain)` 以原消息 `msg_id` 作回复目标的「被动回复」发送：4 分 50 秒时原 `msg_id` 仍在 5 分钟交互窗口内，被动回复不受主动消息权限限制，QQ 官方/OneBot 均可用。
+- **超时预警后台任务潜在内存泄漏**：`_maybe_warn_reply_timeout` 经 `asyncio.ensure_future` 创建且捕获整个 `event`，其 `await event.send(chain)` 此前无超时保护；若平台发送阻塞，该后台任务（及持有的 `event`）会被事件循环长期持有，长期累积造成内存增长。现已用 `asyncio.wait_for(event.send(...), timeout=15)` 包裹，发送超时即结束任务、释放引用。
 
 ## v2.7.7 (2026-09-27)
 

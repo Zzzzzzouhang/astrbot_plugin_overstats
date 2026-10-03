@@ -728,7 +728,8 @@ class OverstatsPlugin(Star):
             # 改用「被动回复」：event.send 会以原消息 msg_id 作为回复目标，
             # 规避群内主动消息所需的 admin 权限（v4.28.2 报错「主动消息失败, 无权限」）。
             # 4:50 时原 msg_id 仍在 5 分钟交互窗口内，被动回复不受主动消息权限限制。
-            await event.send(chain)
+            # 包一层超时：避免平台发送阻塞导致本后台任务（及捕获的 event）被事件循环长期持有 → 内存泄漏。
+            await asyncio.wait_for(event.send(chain), timeout=15)
         except Exception as e:
             logger.error(f'回复超时预警发送失败: {e}')
 
