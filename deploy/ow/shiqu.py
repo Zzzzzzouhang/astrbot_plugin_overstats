@@ -200,7 +200,7 @@ class ShiquManager:
         if not self._is_admin(event) and not self._plugin._is_whitelisted(event):
             cd_map = self._get_config_map()
             if not cd_map.get("normal_enabled", False):
-                yield event.plain_result("🔒 是区吗功能暂未对普通用户开放。")
+                yield event.plain_result("🔒 受接口维护影响，为保证其他服务舒畅，是区吗功能暂时禁用。")
                 return
         self._plugin._ow_executing.add(uid)
         # 自动超时释放锁（_OW_EXECUTING_TIMEOUT 秒后），避免后端卡死导致锁永远不释放
