@@ -674,6 +674,12 @@ class OverstatsPlugin(Star):
         if self._save_image_locally and self._is_qq_group_message(event):
             cmd_text = (getattr(event, 'message_str', '') or '').strip()[:60]
             bnet_id = self._extract_bnet_id(event)
+            if not bnet_id:
+                # 指令未带战网 ID（如「ow是区吗」）时，回退到该用户的绑定 ID
+                try:
+                    bnet_id = (await self._get_user_bind_id(str(event.get_sender_id()))) or ''
+                except Exception:
+                    bnet_id = ''
             asyncio.ensure_future(
                 self._maybe_warn_reply_timeout(event, done_event, cmd_text, bnet_id)
             )
@@ -738,16 +744,22 @@ class OverstatsPlugin(Star):
             except Exception:
                 pass
             congested = waiting >= self._CONGESTION_WAITING_THRESHOLD
+            # 指令与「获取图片」均转为 QQ 官方机器人可点击指令标签（非官方平台自动降级为纯文本）
+            raw_cmd = (command_text or '').strip()
+            cmd_label = raw_cmd.split()[0] if raw_cmd.split() else '指令'
+            cmd_tag = f'<qqbot-cmd-input text="{cmd_label} " show="{cmd_label}" reference="false" />'
+            get_tag = '<qqbot-cmd-input text="获取图片 " show="获取图片" reference="false" />'
             if bnet_id:
-                head = f'⏳ {bnet_id} 的「{command_text or "指令"}」仍在生成中，'
+                head = f'⏳ {bnet_id} 发送的「{cmd_tag}」仍在生成中，'
             else:
-                head = f'⏳ 你发送的「{command_text or "指令"}」仍在生成中，'
-            lines = [head, 'QQ 回复消息的 msg_id 将在 5 分钟后过期，当前已接近超时，可能无法正常回复。']
+                head = f'⏳ 你发送的「{cmd_tag}」仍在生成中，'
+            # 第一行与「msg_id 过期」说明合并为同一行，中间不换行
+            first = head + '群消息回复即将过期（5分钟），可能无法正常回复。'
             if congested:
-                lines.append(f'当前排队用户较多（约 {waiting} 人），回复即将超时，请稍后 @机器人 获取图片。')
+                tail = f'当前排队用户较多（约 {waiting} 人），回复即将超时，请稍后 @机器人 点 {get_tag}。'
             else:
-                lines.append('若稍后未收到图片，请 @机器人 发送「获取图片」取回（图片保留 24 小时）。')
-            text = '\n'.join(lines)
+                tail = f'若稍后未收到图片，请 @机器人 发送 {get_tag} 取回（图片保留 24 小时）。'
+            text = self._format_markdown_by_platform(event, '\n'.join([first, tail]))
             chain = MessageChain([Comp.At(qq=user_id), Comp.Plain(text)])
             # 改用「被动回复」：event.send 会以原消息 msg_id 作为回复目标，
             # 规避群内主动消息所需的 admin 权限（v4.28.2 报错「主动消息失败, 无权限」）。
@@ -1996,11 +2008,15 @@ class OverstatsPlugin(Star):
         user_key = self._user_key(event)
         entries = self._get_user_all_images(user_key)
         if not entries:
-            yield event.plain_result('🖼️ 暂无可获取的图片（图片仅在本地保留 24 小时，超时后自动清理）。')
+            text = """🖼️ **获取图片**
+• 暂无可获取的图片
+💡 图片仅在本地保留 24 小时，超时后自动清理"""
+            yield event.plain_result(self._format_markdown_by_platform(event, text))
             return
-        yield event.plain_result(
-            f'🖼️ 正在为你补发 {len(entries)} 张图片（来自此前因回复超时未送达的指令，本地保留 24 小时）：'
-        )
+        text = f"""🖼️ **正在补发 {len(entries)} 张图片**
+• 来自此前因回复超时未送达的指令
+💡 本地保留 24 小时"""
+        yield event.plain_result(self._format_markdown_by_platform(event, text))
         sent = 0
         for entry in entries:
             path = Path(entry.get('path', ''))
@@ -2016,7 +2032,10 @@ class OverstatsPlugin(Star):
             sent += 1
         if sent == 0:
             self._prune_user_cache(user_key)
-            yield event.plain_result('🖼️ 缓存图片均已过期或读取失败（本地仅保留 24 小时）。')
+            text = """🖼️ **获取图片**
+• 缓存图片均已过期或读取失败
+💡 图片仅在本地保留 24 小时"""
+            yield event.plain_result(self._format_markdown_by_platform(event, text))
 
     @filter.command('今日总结', alias={'今日', '今日数据'})
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = ''):

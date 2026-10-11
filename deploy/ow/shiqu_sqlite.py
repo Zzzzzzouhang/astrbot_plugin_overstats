@@ -10,6 +10,7 @@
 call_count / created_at（移除原 JSONL 中的 verdict / score / openid）。
 """
 
+import json
 import logging
 import sqlite3
 from pathlib import Path

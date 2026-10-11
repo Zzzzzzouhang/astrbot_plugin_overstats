@@ -576,11 +576,9 @@ async function openShiquDetail(id, mode) {
       if (copyBtn) copyBtn.style.display = "";
       if (body) body.innerHTML = renderShiquPromptHTML(rec.prompt);
     } else {
-      let parsed = null;
-      if (rec.raw_response) {
-        try { parsed = typeof rec.raw_response === "string" ? JSON.parse(rec.raw_response) : rec.raw_response; }
-        catch (e) { parsed = null; }
-      }
+      // raw_response 为后端 LLM 原始文本：短键 + 可能被截断/拼接，
+      // 故用与后端同口径的健壮解析 + 短键→长键归一化后再渲染。
+      const parsed = _shiquNormalizeKeys(_shiquParseRaw(rec.raw_response));
       if (parsed) {
         if (body) body.innerHTML = renderShiquAnalysisHTML(parsed);
       } else {
@@ -645,6 +643,138 @@ const _SR_SCORE_VERDICT = [
 function _srVerdictFromScore(score) {
   for (const r of _SR_SCORE_VERDICT) if (score >= r.min) return r;
   return _SR_SCORE_VERDICT[_SR_SCORE_VERDICT.length - 1];
+}
+
+// ── LLM 原始响应解析（与后端 dashen_shiqu.service 口径对齐）──
+// 后端 strict schema 输出的是短键 JSON（顶层 sc/sum/mc/ov/tm/id，
+// 对局项 h/c/r，好友项 n/ts/c/g），且可能因 max_tokens 触顶被截断或
+// 一次吐出多个拼接对象。此处做与后端 _extract_json_object 同等的健壮恢复，
+// 避免直接在 JSON.parse 上失败导致详情面板显示「未保存有效内容」。
+
+/** 从首个 '{' 扫描出第一个括号配平的完整对象；解决多对象拼接。未闭合返回 null。 */
+function _shiquFindBalancedObject(text) {
+  const t = (text || "").trim();
+  const start = t.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < t.length; i++) {
+    const ch = t[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+    } else {
+      if (ch === '"') inStr = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}") { depth--; if (depth === 0) return t.slice(start, i + 1); }
+    }
+  }
+  return null;
+}
+
+/** 修复被截断的 JSON：补闭合字符串、丢弃末尾空对象、清理尾随 ','/':'、补齐 '}'/']'。 */
+function _shiquRecoverTruncated(text) {
+  let t = (text || "").trim();
+  const start = t.indexOf("{");
+  if (start < 0) return null;
+  t = t.slice(start);
+  const stack = [];
+  let inStr = false, esc = false;
+  for (const ch of t) {
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{" || ch === "[") stack.push(ch);
+    else if (ch === "}") { if (stack.length && stack[stack.length - 1] === "{") stack.pop(); }
+    else if (ch === "]") { if (stack.length && stack[stack.length - 1] === "[") stack.pop(); }
+  }
+  if (inStr) t += '"';
+  let stripped = t.replace(/\s+$/, "");
+  if (stripped.endsWith("{")) {
+    const prev = stripped.slice(0, -1).replace(/\s+$/, "");
+    if (prev && (prev.endsWith(",") || prev.endsWith("["))) {
+      t = prev;
+      if (stack.length && stack[stack.length - 1] === "{") stack.pop();
+    }
+  }
+  t = t.replace(/\s+$/, "");
+  if (t.endsWith(",")) t = t.slice(0, -1).replace(/\s+$/, "");
+  if (t.endsWith(":")) t += " null";
+  const closeMap = { "{": "}", "[": "]" };
+  while (stack.length) t += closeMap[stack.pop()];
+  return t;
+}
+
+/** 健壮解析 raw_response 文本 → 对象（失败返回 null）。 */
+function _shiquParseRaw(text) {
+  if (text && typeof text === "object") return text;
+  let s = String(text || "").trim();
+  if (s.startsWith("```")) s = s.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
+  const attempts = [s];
+  const first = _shiquFindBalancedObject(s);
+  if (first) attempts.push(first);
+  const rec = _shiquRecoverTruncated(s);
+  if (rec) attempts.push(rec);
+  for (const a of attempts) {
+    if (!a) continue;
+    try {
+      const o = JSON.parse(a);
+      if (o && typeof o === "object" && !Array.isArray(o)) return o;
+    } catch (e) { /* 继续尝试下一个候选 */ }
+  }
+  return null;
+}
+
+/** 短键 → 渲染所需长键；对旧长键记录保持原样（幂等）。
+ *  sc→score sum→summary ov→overall_comment mc→match_comments(h/c/r) tm→teammate_comments(n/ts/c/g)。 */
+function _shiquNormalizeKeys(o) {
+  if (!o || typeof o !== "object") return null;
+  const pick = (obj, keys) => {
+    for (const k of keys) if (obj[k] !== undefined && obj[k] !== null) return obj[k];
+    return undefined;
+  };
+  const _num = (v, dflt) => (v === undefined || v === null || v === "") ? dflt : (isFinite(Number(v)) ? Number(v) : dflt);
+
+  const mcRaw = pick(o, ["mc", "match_comments"]);
+  const tmRaw = pick(o, ["tm", "teammate_comments"]);
+
+  const match_comments = Array.isArray(mcRaw)
+    ? mcRaw.filter((m) => m && typeof m === "object").map((m, i) => {
+        const hero = m.h || m.hero || "";
+        const comment = m.c || m.comment || "";
+        return {
+          index: (m.index != null) ? m.index : i + 1,
+          result: m.r || m.result || "未知",
+          hero,
+          heroes: m.heroes || hero,
+          mode: m.mode || "",
+          comment,
+        };
+      }).filter((m) => m.comment || m.hero)   // 丢弃截断恢复产生的空占位项（对齐后端守卫）
+    : [];
+
+  const teammate_comments = Array.isArray(tmRaw)
+    ? tmRaw.filter((t) => t && typeof t === "object").map((t) => ({
+        name: t.n || t.name || "",
+        score: _num((t.ts != null) ? t.ts : t.score, 0),
+        games: (t.g != null) ? t.g : t.games,
+        comment: t.c || t.comment || "",
+      })).filter((t) => t.name)                // 同上：无 name 的空队友项不入渲染
+    : [];
+
+  return {
+    target_id: pick(o, ["id", "target_id"]) || "",
+    score: _num(pick(o, ["sc", "score"]), 0),
+    verdict: pick(o, ["verdict"]),
+    summary: pick(o, ["sum", "summary"]) || "",
+    overall_comment: pick(o, ["ov", "overall_comment"]) || "",
+    match_comments,
+    teammate_comments,
+  };
 }
 
 function renderShiquAnalysisHTML(d) {
