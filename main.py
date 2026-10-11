@@ -1518,6 +1518,13 @@ class OverstatsPlugin(Star):
         if not t:
             return False, []
         cmd_map = self._ensure_full_cmd_map()
+        # 关键：文本本身就是某个已注册指令名/别称时（如「今日总结」），禁止走无空格派发。
+        # 否则会被更短的别称抢占（「今日」+ 后缀「总结」），把指令名后半截当作战网ID参数，
+        # 导致已绑定用户也被提示"请输入战网ID"——「今日总结/昨日总结/本周总结/单局详细/
+        # ow是区吗结果」等"长指令名以短别称为前缀"的指令会全部失效。
+        # 此处返回 False，交由原生 @filter.command 或分词派发处理（参数为空 → 正常回落绑定账号）。
+        if t in cmd_map:
+            return False, []
         for cmd in sorted(cmd_map.keys(), key=len, reverse=True):
             if cmd in self._ADMIN_CMD_NAMES:
                 continue
@@ -1638,9 +1645,10 @@ class OverstatsPlugin(Star):
             nickname = self._get_bot_nickname(event)
             if nickname and clean_id.lower().startswith(nickname.lower()):
                 clean_id = clean_id[len(nickname):]
-            if '#' not in clean_id and '＃' not in clean_id:
-                return None
-            return clean_id
+            if '#' in clean_id or '＃' in clean_id:
+                return clean_id
+            # 传入了非法战网ID（如派发误伤把指令名后半截串成参数）时，不当作"显式指定别人"，
+            # 回落到发送者的绑定账号，避免已绑定用户收到"请输入战网ID"。
         user_id = event.get_sender_id()
         bind_id = await self._get_user_bind_id(user_id)
         return bind_id
