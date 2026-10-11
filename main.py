@@ -136,10 +136,11 @@ class OverstatsPlugin(Star):
         self.config = config
         self.file_lock = asyncio.Lock()
         self._cmd_limiter = GlobalPriorityCommandQueue(
-            capacity=8,
+            capacity=5,
             per_user_max=3,
             timeout_seconds=self._CMD_SLOT_AUTO_RELEASE_SECONDS,
             queue_wait_timeout=600,
+            heavy_deprio_threshold=5,
         )
         self._load_rate_limit_config()
         self._semaphore_reset_task = asyncio.create_task(self._daily_semaphore_reset_loop())
@@ -175,11 +176,16 @@ class OverstatsPlugin(Star):
         self.daily_prompt_state = self._load_daily_prompt_state()
         self.daily_prompt_reset_task = asyncio.create_task(self._daily_prompt_reset_loop())
         self._http_session: aiohttp.ClientSession | None = None
-        # 后端并发上限与指令全局队列容量保持一致（capacity=8），两层嵌套取 min，故均设为 8
+        # 后端并发上限与指令全局队列容量保持一致（capacity=5），两层嵌套取 min，故均设为 5
         self.overstats_semaphore = asyncio.Semaphore(self._cmd_limiter._capacity)
         self._overstats_inner_semaphore = asyncio.Semaphore(self._cmd_limiter._capacity)
         # 周度总结专属后端并发上限（单条指令会打一次后端，故等价于同时最多 2 条周度总结在跑）
         self._weekly_summary_semaphore = asyncio.Semaphore(2)
+        # 是区吗后端并发上限：全局同时最多 2 条「是区吗」查询在打后端图片接口
+        # （单条是区吗 = 一次 HTTP 请求，但后端内部放大成数百次 LLM 子请求，必须收住）。
+        self._shiqu_backend_semaphore = asyncio.Semaphore(2)
+        # 是区吗拥堵提示阈值：全局队列等待数 > 此值时，向「是区吗」发送者追加拥堵提示
+        self._shiqu_congestion_threshold = 10
         if self._save_image_locally:
             self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop())
         else:
@@ -190,6 +196,7 @@ class OverstatsPlugin(Star):
         self.full_adapt_config: dict | None = None
         self._bot_nickname_cache: str | None = None
         self._full_adapt_map: dict | None = None
+        self._full_cmd_map: dict | None = None
         self._admin_cmd_set: set[str] = {'多图测试', '单图测试', 'ow开庭', '开庭', 'ow是区吗', '是区吗', 'ow是区吗结果', '是区吗结果', 'ow开庭结果', '开庭结果', 'owAI检测', 'AI检测', '维护', 'ow违禁封禁', 'ow违禁解封', 'ow连接测试', 'ow部署', 'ow部署状态', 'ow更新后端', 'ow停止后端', 'ow重启后端', 'ow部署日志', 'ow后端日志', 'ow卸载后端', 'ow卸载后端执行确认', 'ow卸载后端执行仅代码', 'ow卸载后端执行仅venv', 'ow卸载后端执行强制', '群设置', '全量适配开', '全量适配开完全匹配', '全量适配关', '管理'}
         # 图片缓存索引（本地保留 24 小时，供群聊回复超时后 @机器人 取回）
         self._image_cache_index_path = self.plugin_data_dir / self._IMAGE_CACHE_INDEX_FILE
@@ -562,7 +569,7 @@ class OverstatsPlugin(Star):
           enabled:      总开关。严格布尔解析，`"false"/"0"/"off"/空` 一律视为关闭，
                         避免 `bool("false") == True` 导致限流被意外开启。
           per_user_max: 同一普通用户并发上限（默认 3；0 或负数表示不限制）。
-          global_max:   全局并发容量，同时执行的指令条数上限（默认 8）；
+          global_max:   全局并发容量，同时执行的指令条数上限（默认 5）；
                         特权（白名单群/人/管理员）不受 per_user_max 约束，但仍受此全局容量约束并插队优先。
         """
         raw = str(self.config.get('cmd_rate_limit', '{}') or '{}').strip()
@@ -582,9 +589,9 @@ class OverstatsPlugin(Star):
             per_user = 3
         self._rate_limit_per_user = max(0, per_user)
         try:
-            global_max = int(cfg.get('global_max', 8))
+            global_max = int(cfg.get('global_max', 5))
         except (TypeError, ValueError):
-            global_max = 8
+            global_max = 5
         self._rate_limit_global_max = max(1, global_max)
         if getattr(self, '_cmd_limiter', None) is not None:
             self._cmd_limiter.update_config(
@@ -631,27 +638,34 @@ class OverstatsPlugin(Star):
         except Exception:
             return None
 
-    async def _try_acquire_cmd_slot(self, event: AstrMessageEvent | None = None, *, privileged: bool = False) -> None:
+    async def _try_acquire_cmd_slot(self, event: AstrMessageEvent | None = None, *, privileged: bool = False, heavy: bool = False) -> None:
         """获取全局指令并发槽位（真实队列）。
 
         成功返回；被拒绝抛 SlotRejected（个人并发已满 / 排队超时）。
         特权（白名单/管理员/限流关闭）插队优先。
+        heavy：重指令标记（是区吗/开庭），拥堵时降权优先放行轻指令。
         """
         self._load_rate_limit_config()
-        await self._cmd_limiter.acquire(self._cmd_user_key(event), privileged=privileged)
+        await self._cmd_limiter.acquire(self._cmd_user_key(event), privileged=privileged, heavy=heavy)
 
     async def _release_cmd_slot(self, event: AstrMessageEvent | None = None) -> None:
         """释放该用户的指令并发槽位。"""
         await self._cmd_limiter.release(self._cmd_user_key(event))
 
-    async def _run_with_cmd_slot(self, event: AstrMessageEvent, coro_factory):
+    async def _run_with_cmd_slot(self, event: AstrMessageEvent, coro_factory, *, heavy: bool = False, congestion_hint: bool = False):
         """业务指令并发限流包装器：在 main.py handler 层统一获取/释放全局槽位。
 
-        - 仅"需要访问后端"的业务指令使用本包装；绑定/帮助/管理/测试类指令不经过限流。
+        - 仅"需要访问后端且触发 LLM 生成"的业务指令使用本包装；绑定/帮助/管理/测试类指令、
+          结果读取类（ow是区吗结果/ow开庭结果，use_db=True 快速读取，不触发 LLM 扇出）以及
+          「获取图片」（读本地缓存）均不经过限流。
         - 所有用户均进入全局真实队列（全局容量 global_max）；
           特权（白名单群/人/管理员，或限流关闭）插队优先，普通用户排队队尾并额外受 per_user_max 约束。
         - 仅「个人并发已满」立即返回拒绝文案；队列等待不拒绝，只 await 直至获得槽位。
         - 槽位覆盖整个生成器生命周期，try/finally 保证任何中断（含 astrbot 取消）都会释放。
+        - heavy：重指令标记（是区吗/开庭），拥堵时降权优先放行轻指令。
+        - congestion_hint：拥堵提示标记（仅 是区吗 使用）。当全局队列等待数 >
+          self._shiqu_congestion_threshold 时，在获取槽位【之前】先向发送者追加一条
+          "同时人多/会优先处理其他指令/可能等待过长" 的提示，避免用户干等。
         - coro_factory：无参可调用，返回 async generator。
         """
         privileged = self._is_privileged(event)
@@ -663,8 +677,18 @@ class OverstatsPlugin(Star):
             asyncio.ensure_future(
                 self._maybe_warn_reply_timeout(event, done_event, cmd_text, bnet_id)
             )
+        # 是区吗拥堵提示：队列积压过多时，先告知用户可能长时间等待（在排队等待之前发出）
+        if congestion_hint and getattr(self, '_cmd_limiter', None) is not None:
+            try:
+                _waiting = int(self._cmd_limiter.stats().get("waiting", 0))
+            except Exception:
+                _waiting = 0
+            if _waiting > getattr(self, '_shiqu_congestion_threshold', 10):
+                yield event.plain_result(
+                    "⚠️ 当前同时使用的人过多，「是区吗」会优先处理其他指令，你可能需等待较长时间，请耐心等待或稍后再试。"
+                )
         try:
-            await self._try_acquire_cmd_slot(event, privileged=privileged)
+            await self._try_acquire_cmd_slot(event, privileged=privileged, heavy=heavy)
         except SlotRejected:
             done_event.set()
             yield event.plain_result(self._RATE_LIMIT_USER_REJECT_MSG)
@@ -766,18 +790,22 @@ class OverstatsPlugin(Star):
         except Exception:
             return False
 
-    def _get_user_latest_image(self, user_key: str) -> dict | None:
-        """取回用户最近一次生成的、仍在 24 小时保留期内且文件存在的图片记录。"""
+    def _get_user_all_images(self, user_key: str) -> list:
+        """取回用户全部仍在 24 小时保留期内且文件存在的图片记录（按生成时间升序）。
+
+        用于「获取图片」补发：群聊回复超时未送达的图片，可能来自多条不同指令，
+        需一次性全部取回（最多受缓存上限约束，默认 5 张）。
+        """
         try:
             if not self._image_cache_index_path.exists():
-                return None
+                return []
             index = json.loads(self._image_cache_index_path.read_text(encoding='utf-8'))
             entries = index.get(user_key, [])
             now = time.time()
             entries = [e for e in entries if self._cache_entry_alive(e, now, self._IMAGE_CACHE_TTL)]
-            return entries[-1] if entries else None
+            return entries
         except Exception:
-            return None
+            return []
 
     def _prune_user_cache(self, user_key: str) -> None:
         """清理某用户过期的图片缓存索引条目。"""
@@ -1389,6 +1417,126 @@ class OverstatsPlugin(Star):
         self._full_adapt_map = m
         return m
 
+    # 需要管理员权限的指令：无空格自动派发会绕过 @filter.permission_type 权限过滤，
+    # 故仅收录进完整映射用于「防止误绑定」判断，不参与无空格自动派发。
+    _ADMIN_CMD_NAMES = {
+        '维护', 'ow违禁封禁', 'ow违禁解封', 'ow连接测试', 'ow部署', 'ow部署状态',
+        'ow更新后端', 'ow停止后端', 'ow重启后端', 'ow部署日志', 'ow后端日志',
+        'ow卸载后端', 'ow卸载后端执行确认', 'ow卸载后端执行仅代码',
+        'ow卸载后端执行仅venv', 'ow卸载后端执行强制',
+    }
+
+    def _ensure_full_cmd_map(self) -> dict:
+        """完整指令名(含别称) -> 处理方法 映射，覆盖业务与 AI/管理类指令。
+
+        用于「指令与参数之间不加空格」时也能正确识别（避免被误判为绑定战网账号）。
+        管理类(ADMIN)指令不进入自动无空格派发，仅用于防止误绑定。
+        """
+        if self._full_cmd_map is not None:
+            return self._full_cmd_map
+        m = dict(self._ensure_full_adapt_map())
+        extra = [
+            (['多图测试'], self.multi_image_test),
+            (['单图测试'], self.single_image_test),
+            (['ow开庭', '开庭'], self.ow_court),
+            (['ow是区吗', '是区吗'], self.ow_shiqu),
+            (['ow是区吗结果', '是区吗结果'], self.ow_shiqu_result),
+            (['ow开庭结果', '开庭结果'], self.ow_court_result),
+            (['owAI检测', 'AI检测'], self.ow_ai_test),
+            (['群设置'], self.group_config_cmd),
+            (['全量适配开'], self.full_adapt_enable),
+            (['全量适配开完全匹配'], self.full_adapt_enable_direct),
+            (['全量适配关'], self.full_adapt_disable),
+            (['管理'], self.admin_menu),
+            # 以下为 ADMIN 权限指令：仅收录用于防止误绑定，不自动派发
+            (['维护'], self.maintenance_cmd),
+            (['ow违禁封禁'], self.violation_ban_cmd),
+            (['ow违禁解封'], self.violation_unban_cmd),
+            (['ow连接测试'], self.connection_test_cmd),
+            (['ow部署'], self.ow_deploy_cmd),
+            (['ow部署状态'], self.ow_deploy_status_cmd),
+            (['ow更新后端'], self.ow_update_backend_cmd),
+            (['ow停止后端'], self.ow_stop_backend_cmd),
+            (['ow重启后端'], self.ow_restart_backend_cmd),
+            (['ow部署日志'], self.ow_deploy_logs_cmd),
+            (['ow后端日志'], self.ow_backend_logs_cmd),
+            (['ow卸载后端'], self.ow_uninstall_backend_cmd),
+            (['ow卸载后端执行确认'], self.ow_uninstall_backend_confirm),
+            (['ow卸载后端执行仅代码'], self.ow_uninstall_backend_code_only),
+            (['ow卸载后端执行仅venv'], self.ow_uninstall_backend_venv_only),
+            (['ow卸载后端执行强制'], self.ow_uninstall_backend_force),
+        ]
+        for names, method in extra:
+            for n in names:
+                m[n] = method
+        self._full_cmd_map = m
+        return m
+
+    def _starts_with_known_command(self, text: str) -> bool:
+        """判断文本(已去除前导斜杠)是否以某个已注册指令名开头，用于避免把指令误判为战网ID绑定。"""
+        t = text.strip()
+        if t.startswith('/'):
+            t = t[1:].strip()
+        if not t:
+            return False
+        for cmd in sorted(self._ensure_full_cmd_map().keys(), key=len, reverse=True):
+            if t == cmd:
+                return True
+            if len(t) > len(cmd) and t.startswith(cmd) and not t[len(cmd)].isspace():
+                return True
+        return False
+
+    @staticmethod
+    def _get_cmd_param_names(method) -> list:
+        try:
+            return [p.name for p in inspect.signature(method).parameters.values()
+                    if p.name not in ('self', 'event')]
+        except Exception:
+            return []
+
+    async def _try_dispatch_no_space(self, event: AstrMessageEvent, text: str):
+        """无空格指令派发：当消息形如「指令名+参数(无空格)」时，正确识别为对应指令并派发。
+
+        返回 (已派发: bool, 结果列表: list)。
+        ADMIN 权限指令不参与自动派发（防止绕过权限），交由原生 /指令 空格形式处理。
+        """
+        t = text.strip()
+        if t.startswith('/'):
+            t = t[1:].strip()
+        if not t:
+            return False, []
+        cmd_map = self._ensure_full_cmd_map()
+        for cmd in sorted(cmd_map.keys(), key=len, reverse=True):
+            if cmd in self._ADMIN_CMD_NAMES:
+                continue
+            if len(t) > len(cmd) and t.startswith(cmd):
+                nxt = t[len(cmd)]
+                if nxt.isspace():
+                    # 正常带空格参数（原生/分词派发已覆盖，这里兜底）
+                    rest = t[len(cmd):].strip()
+                    method = cmd_map[cmd]
+                    params = self._get_cmd_param_names(method)
+                    parts = rest.split()
+                    args = parts[:len(params)] + [''] * (len(params) - min(len(parts), len(params)))
+                else:
+                    # 无空格拼接：剩余部分作为第一个参数
+                    rest = t[len(cmd):]
+                    method = cmd_map[cmd]
+                    params = self._get_cmd_param_names(method)
+                    if not params:
+                        continue
+                    args = [rest] + [''] * (len(params) - 1)
+                try:
+                    results = []
+                    async for r in method(event, *args[:len(params)]):
+                        results.append(r)
+                    event.stop_event()
+                    return True, results
+                except Exception as e:
+                    logger.debug(f'无空格指令派发失败（{cmd}）: {e}')
+                    return True, []
+        return False, []
+
     def _get_quick_guide(self, event: AstrMessageEvent, unmatched_cmd: str | None = None) -> str:
         """根据平台返回快速指南，可附带未匹配指令提示"""
         header = ""
@@ -1579,43 +1727,23 @@ class OverstatsPlugin(Star):
                     yield result
                 event.stop_event()
                 return
-        adapt_map = self._ensure_full_adapt_map()
-        for cmd_name in sorted(adapt_map.keys(), key=len, reverse=True):
-            if cmd_name in ('大神绑定', '绑定'):
-                continue
-            method = adapt_map[cmd_name]
-            for prefix in (f'/{cmd_name}', cmd_name):
-                if not msg.startswith(prefix) or len(msg) <= len(prefix):
-                    continue
-                rest = msg[len(prefix):]
-                bnet_m = re.match('^([^#＃\\s]+[#＃]\\d+)$', rest)
-                if not bnet_m:
-                    continue
-                bnet_id = bnet_m.group(1)
-                try:
-                    params = [p for p in inspect.signature(method).parameters.values() if p.name not in ('self', 'event')]
-                except Exception:
-                    params = []
-                if not params:
-                    continue
-                args = [bnet_id] + [''] * (len(params) - 1)
-                try:
-                    async for r in method(event, *args[:len(params)]):
-                        yield r
-                    event.stop_event()
-                    return
-                except Exception as e:
-                    logger.debug(f'无空格指令派发失败（{cmd_name}）: {e}')
-                    return
+        # 无空格指令派发：指令名与参数未用空格分隔时也能正确识别（如 /ow是区吗OXO#52252）
+        dispatched, results = await self._try_dispatch_no_space(event, msg)
+        if dispatched:
+            for r in results:
+                yield r
+            return
         if not msg.startswith('/'):
             # 带斜杠的命令形式（/绑定）由框架原生 command 派发处理；此处仅兜底无斜杠的“直接粘贴战网ID”等场景，避免重复响应
-            bind_match = re.match('^(?:/?(?:大神)?绑定\\s+)?(?:/?(?:大神)?绑定)?\\s*([^#＃\\s]+[#＃]\\d+)$', msg)
-            if bind_match:
-                clean_bnet_id = bind_match.group(1)
-                async for result in self.dashen_bind(event, bnet_id=clean_bnet_id):
-                    yield result
-                event.stop_event()
-                return
+            # 关键：若整条消息以某个已注册指令名开头，绝不当作战网ID绑定，避免误绑定
+            if not self._starts_with_known_command(msg):
+                bind_match = re.match('^(?:/?(?:大神)?绑定\\s+)?(?:/?(?:大神)?绑定)?\\s*([^#＃\\s]+[#＃]\\d+)$', msg)
+                if bind_match:
+                    clean_bnet_id = bind_match.group(1)
+                    async for result in self.dashen_bind(event, bnet_id=clean_bnet_id):
+                        yield result
+                    event.stop_event()
+                    return
         if hasattr(event, 'is_at_or_wake_command') and event.is_at_or_wake_command and self.config.get('unmatched_cmd_guide_enabled', False):
             if not is_group or self._is_real_at_bot(event):
                 cmd_first_token = msg.split()[0].lstrip('/')
@@ -1709,42 +1837,22 @@ class OverstatsPlugin(Star):
                 yield r
             event.stop_event()
             return
-        adapt_map = self._ensure_full_adapt_map()
-        for cmd_name in sorted(adapt_map.keys(), key=len, reverse=True):
-            if cmd_name in ('大神绑定', '绑定'):
-                continue
-            method = adapt_map[cmd_name]
-            for prefix in (cmd_name,):
-                if not cmd_text.startswith(prefix) or len(cmd_text) <= len(prefix):
-                    continue
-                rest = cmd_text[len(prefix):]
-                bnet_m = re.match('^([^#＃\\s]+[#＃]\\d+)$', rest)
-                if not bnet_m:
-                    continue
-                bnet_id = bnet_m.group(1)
-                try:
-                    params = [p for p in inspect.signature(method).parameters.values() if p.name not in ('self', 'event')]
-                except Exception:
-                    params = []
-                if not params:
-                    continue
-                args = [bnet_id] + [''] * (len(params) - 1)
-                try:
-                    async for r in method(event, *args[:len(params)]):
+        # 无空格指令派发：指令名与参数未用空格分隔时也能正确识别（如 /ow是区吗OXO#52252）
+        dispatched, results = await self._try_dispatch_no_space(event, cmd_text)
+        if dispatched:
+            for r in results:
+                yield r
+            return
+        if not cmd_text.startswith('/'):
+            # 带斜杠的命令形式（/绑定）由框架原生 command 派发处理；此处仅兜底无斜杠场景，避免重复响应
+            # 关键：若整条消息以某个已注册指令名开头，绝不当作战网ID绑定，避免误绑定
+            if not self._starts_with_known_command(cmd_text):
+                bind_m = re.match('^(?:/?(?:大神)?绑定\\s+)?(?:/?(?:大神)?绑定)?\\s*([^#＃\\s]+[#＃]\\d+)$', cmd_text)
+                if bind_m:
+                    async for r in self.dashen_bind(event, bnet_id=bind_m.group(1)):
                         yield r
                     event.stop_event()
                     return
-                except Exception as e:
-                    logger.debug(f'全量适配无空格派发失败（{cmd_name}）: {e}')
-                    return
-        if not cmd_text.startswith('/'):
-            # 带斜杠的命令形式（/绑定）由框架原生 command 派发处理；此处仅兜底无斜杠场景，避免重复响应
-            bind_m = re.match('^(?:/?(?:大神)?绑定\\s+)?(?:/?(?:大神)?绑定)?\\s*([^#＃\\s]+[#＃]\\d+)$', cmd_text)
-            if bind_m:
-                async for r in self.dashen_bind(event, bnet_id=bind_m.group(1)):
-                    yield r
-                event.stop_event()
-                return
         tokens = cmd_text.split()
         cmd = tokens[0].lstrip('/')
         rest = tokens[1:]
@@ -1880,25 +1988,35 @@ class OverstatsPlugin(Star):
 
     @filter.command('获取图片', alias={'取图', 'ow取图', 'ow获取图片'})
     async def get_cached_image(self, event: AstrMessageEvent):
-        """取回最近一次生成的图片（图片本地保留 24 小时，群聊回复超时未收到时使用）。"""
+        """补发本地缓存中全部未过期图片（图片本地保留 24 小时，群聊回复超时未收到时使用）。
+
+        群聊回复 msg_id 过期会导致图片投递失败，但图片已在本地生成并缓存；用户稍后 @机器人
+        发送「获取图片」可一次性取回此前因超时未送达的全部图片（可能来自多条不同指令）。
+        """
         user_key = self._user_key(event)
-        entry = self._get_user_latest_image(user_key)
-        if not entry:
+        entries = self._get_user_all_images(user_key)
+        if not entries:
             yield event.plain_result('🖼️ 暂无可获取的图片（图片仅在本地保留 24 小时，超时后自动清理）。')
             return
-        path = Path(entry.get('path', ''))
-        if not path.exists():
+        yield event.plain_result(
+            f'🖼️ 正在为你补发 {len(entries)} 张图片（来自此前因回复超时未送达的指令，本地保留 24 小时）：'
+        )
+        sent = 0
+        for entry in entries:
+            path = Path(entry.get('path', ''))
+            if not path.exists():
+                continue
+            try:
+                img_bytes = path.read_bytes()
+            except Exception as e:
+                logger.error(f'读取缓存图片失败: {e}')
+                continue
+            async for r in self._send_image_result(event, img_bytes, entry.get('command') or '获取图片'):
+                yield r
+            sent += 1
+        if sent == 0:
             self._prune_user_cache(user_key)
-            yield event.plain_result('🖼️ 图片已过期或不存在（本地仅保留 24 小时）。')
-            return
-        try:
-            img_bytes = path.read_bytes()
-        except Exception as e:
-            logger.error(f'读取缓存图片失败: {e}')
-            yield event.plain_result('🖼️ 读取缓存图片失败。')
-            return
-        async for r in self._send_image_result(event, img_bytes, entry.get('command') or '获取图片'):
-            yield r
+            yield event.plain_result('🖼️ 缓存图片均已过期或读取失败（本地仅保留 24 小时）。')
 
     @filter.command('今日总结', alias={'今日', '今日数据'})
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = ''):
@@ -2047,25 +2165,33 @@ class OverstatsPlugin(Star):
     @filter.command('ow开庭', alias={'开庭'})
     async def ow_court(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
         """OW 开庭：AI 对单局数据进行电竞法庭风格分析（测试阶段，仅白名单/管理员可用）。"""
-        async for r in self._run_with_cmd_slot(event, lambda: features_court.ow_court(self, event, arg1, arg2)):
+        async for r in self._run_with_cmd_slot(event, lambda: features_court.ow_court(self, event, arg1, arg2), heavy=True):
             yield r
 
     @filter.command('ow是区吗', alias={'是区吗'})
     async def ow_shiqu(self, event: AstrMessageEvent, arg1: str = '', arg2: str = '', arg3: str = ''):
         """OW 是区吗：展示上次判定结果。5 分钟内再次发送确认后开启新查询（分级 CD）。可加局数 1~25。"""
-        async for r in self._run_with_cmd_slot(event, lambda: features_court.ow_shiqu(self, event, arg1, arg2, arg3)):
+        async for r in self._run_with_cmd_slot(event, lambda: features_court.ow_shiqu(self, event, arg1, arg2, arg3), heavy=True, congestion_hint=True):
             yield r
 
     @filter.command('ow是区吗结果', alias={'是区吗结果'})
     async def ow_shiqu_result(self, event: AstrMessageEvent):
-        """OW 是区吗结果：返回上次生成的判定书图片。"""
-        async for r in self._run_with_cmd_slot(event, lambda: features_court.ow_shiqu_result(self, event)):
+        """OW 是区吗结果：返回上次生成的判定书图片。
+
+        不走全局队列（属 use_db=True 快速读取，不触发 LLM 扇出），与「获取图片」一致——
+        不受队列容量限制、拥堵时也不降权。
+        """
+        async for r in features_court.ow_shiqu_result(self, event):
             yield r
 
     @filter.command('ow开庭结果', alias={'开庭结果'})
     async def ow_court_result(self, event: AstrMessageEvent):
-        """OW 开庭结果：返回上次开庭审理的判决书图片。"""
-        async for r in self._run_with_cmd_slot(event, lambda: features_court.ow_court_result(self, event)):
+        """OW 开庭结果：返回上次开庭审理的判决书图片。
+
+        不走全局队列（属 use_db=True 快速读取，不触发 LLM 扇出），与「获取图片」一致——
+        不受队列容量限制、拥堵时也不降权。
+        """
+        async for r in features_court.ow_court_result(self, event):
             yield r
 
     @filter.command('owAI检测', alias={'AI检测'})

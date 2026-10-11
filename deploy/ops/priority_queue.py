@@ -5,9 +5,13 @@
 - 等待中的请求按「特权优先、同优先级 FIFO」排序出队；
 - 特权（白名单群/人/AstrBot 管理员）插队到队首，普通用户排队队尾；
 - 特权仅受全局容量约束（不占 per_user 上限），普通用户额外受 per_user_max 约束；
-- 等待超过 `queue_wait_timeout` 秒视为拒绝（SlotRejected）。
+- 等待超过 `queue_wait_timeout` 秒视为拒绝（SlotRejected）；
+- 拥堵降权（`heavy_deprio_threshold`）：当等待中指令数 > 阈值时，重指令
+  （如 是区吗/开庭，调用方传 heavy=True）被降权，优先放行轻指令，避免重指令
+  在拥堵时挤占全局槽位、拖垮所有用户。
 
-特权判定由调用方（main.py `_is_privileged`）传入，本类只负责排队与准入。
+特权判定由调用方（main.py `_is_privileged`）传入，重指令判定由调用方
+（main.py `_run_with_cmd_slot` 的 heavy 参数）传入，本类只负责排队与准入。
 """
 
 import asyncio
@@ -20,16 +24,18 @@ class SlotRejected(Exception):
     """指令被拒绝：个人并发已满（per_user_full）或排队等待超时（queue_timeout）。"""
 
 
-_Waiter = Tuple[asyncio.Future, Optional[str]]
+# (future, user_key, heavy) —— heavy=True 表示重指令（是区吗/开庭等），拥堵时降权
+_Waiter = Tuple[asyncio.Future, Optional[str], bool]
 
 
 class GlobalPriorityCommandQueue:
     def __init__(
         self,
-        capacity: int = 8,
+        capacity: int = 5,
         per_user_max: int = 3,
         timeout_seconds: int = 300,
         queue_wait_timeout: int = 600,
+        heavy_deprio_threshold: int = 5,
     ):
         self._capacity = max(1, capacity)
         self._per_user_max = max(0, per_user_max)
@@ -37,10 +43,12 @@ class GlobalPriorityCommandQueue:
         self._timeout_seconds = max(0, timeout_seconds)
         # 排队等待上限（防永久挂起）
         self._queue_wait_timeout = max(1, queue_wait_timeout)
+        # 拥堵降权阈值：等待指令数 > 此值时，重指令降权（优先放行轻指令）
+        self._heavy_deprio_threshold = max(0, heavy_deprio_threshold)
         self._lock = asyncio.Lock()
         self._running = 0
         self._per_user: Dict[str, int] = {}
-        # 等待队列：特权队首、普通队尾；每条记录 (future, user_key)
+        # 等待队列：特权队首、普通队尾；每条记录 (future, user_key, heavy)
         self._priv_wait: Deque[_Waiter] = deque()
         self._norm_wait: Deque[_Waiter] = deque()
         # 运行槽位起始时间（monotonic），按 user_key 记录（同用户多槽仅记最近一次，兜底用）
@@ -79,57 +87,97 @@ class GlobalPriorityCommandQueue:
 
     def _remove_waiter(self, fut: asyncio.Future) -> None:
         for dq in (self._priv_wait, self._norm_wait):
-            for i, (f, _) in enumerate(dq):
+            for i, (f, _, _) in enumerate(dq):
                 if f is fut:
                     del dq[i]
                     return
 
+    def _norm_has_admittable(self) -> bool:
+        """锁内：普通队列中是否存在（未取消且个人未达上限的）可放行者。
+
+        用于避免「全员个人已达上限」时无限轮转；此时应直接放行队首等待自身释放。
+        """
+        for f, user_key, _ in self._norm_wait:
+            if f.done():
+                continue
+            if self._per_user.get(user_key or "", 0) < self._per_user_max:
+                return True
+        return False
+
     def _admit_next_locked(self) -> None:
-        """锁内：从等待队列补位，特权队优先；普通补位仍受 per_user 约束。"""
+        """锁内：从等待队列补位。
+
+        - 非拥堵（waiting <= 阈值）：特权优先、普通 FIFO（原行为）；
+        - 拥堵（waiting > 阈值）：特权优先于普通，同特权层级内重指令（heavy=True）降权、
+          轻指令优先：轻特权 > 重特权 > 轻普通 > 重普通。
+        普通队列仍受 per_user_max 约束（达上限且仍有可放行者则轮转队尾）。
+        """
         while self._running < self._capacity:
-            # 1) 优先特权队
-            if self._priv_wait:
-                fut, user_key = self._priv_wait[0]
-                if fut.done():  # 已取消/超时移除
-                    self._priv_wait.popleft()
-                    continue
-                self._priv_wait.popleft()
-                self._running += 1
-                self._bump_per_user(user_key)
-                self._running_since[self._key(user_key)] = time.monotonic()
-                self._priv_jumped_total += 1
-                if not fut.done():
-                    fut.set_result(True)
-                continue
-            # 2) 其次普通队
-            if self._norm_wait:
-                fut, user_key = self._norm_wait[0]
-                if fut.done():
-                    self._norm_wait.popleft()
-                    continue
-                if self._per_user.get(user_key or "", 0) >= self._per_user_max:
-                    # 该普通用户个人已达上限：放到队尾让他人先走；仅剩自己则保留队首等待自身释放
-                    if len(self._norm_wait) > 1:
-                        self._norm_wait.popleft()
-                        self._norm_wait.append((fut, user_key))
+            total_waiting = len(self._priv_wait) + len(self._norm_wait)
+            congested = total_waiting > self._heavy_deprio_threshold
+
+            # (deque, match_heavy) —— match_heavy=None 表示不限；否则只匹配该 heavy 值
+            if congested:
+                # 拥堵：特权优先于普通，同特权内轻指令优先（重指令降权）
+                # 顺序：轻特权 > 重特权 > 轻普通 > 重普通
+                candidates = [
+                    (self._priv_wait, False),
+                    (self._priv_wait, True),
+                    (self._norm_wait, False),
+                    (self._norm_wait, True),
+                ]
+            else:
+                # 非拥堵：特权优先（不限 heavy），其次普通
+                candidates = [
+                    (self._priv_wait, None),
+                    (self._norm_wait, None),
+                ]
+
+            picked: Optional[Tuple[Deque[_Waiter], int]] = None
+            for dq, match_heavy in candidates:
+                for i in range(len(dq)):
+                    fut, user_key, heavy = dq[i]
+                    if fut.done():  # 已取消/超时移除
+                        del dq[i]
+                        picked = None
+                        break  # 重新扫描（删除了一个 done）
+                    if match_heavy is not None and heavy != match_heavy:
                         continue
+                    # 普通队列 per_user 约束
+                    if dq is self._norm_wait and self._per_user.get(user_key or "", 0) >= self._per_user_max:
+                        # 仍有可放行者则轮转队尾，否则放行队首（等待自身释放）
+                        if len(dq) > 1 and self._norm_has_admittable():
+                            dq.append(dq[i])
+                            del dq[i]
+                            picked = None
+                            break  # 重新扫描
+                    picked = (dq, i)
                     break
-                self._norm_wait.popleft()
-                self._running += 1
-                self._bump_per_user(user_key)
-                self._running_since[self._key(user_key)] = time.monotonic()
-                if not fut.done():
-                    fut.set_result(True)
-                continue
-            break
+                if picked is not None:
+                    break
+
+            if picked is None:
+                break
+
+            dq, i = picked
+            fut, user_key, _heavy = dq[i]
+            del dq[i]
+            self._running += 1
+            self._bump_per_user(user_key)
+            self._running_since[self._key(user_key)] = time.monotonic()
+            if dq is self._priv_wait:
+                self._priv_jumped_total += 1
+            if not fut.done():
+                fut.set_result(True)
 
     # ── 对外接口 ──────────────────────────────────────────────
 
-    async def acquire(self, user_key: Optional[str], *, privileged: bool) -> None:
+    async def acquire(self, user_key: Optional[str], *, privileged: bool, heavy: bool = False) -> None:
         """获取一个全局执行槽位。成功返回；被拒绝抛 SlotRejected。
 
         特权：仅受全局容量约束，满则排队并插队到队首；
-        普通：同时受全局容量 + per_user_max 约束，个人已满立即拒绝，否则排队队尾。
+        普通：同时受全局容量 + per_user_max 约束，个人已满立即拒绝，否则排队队尾；
+        heavy：重指令标记（是区吗/开庭等），用于拥堵时降权优先放行轻指令。
         """
         async with self._lock:
             if privileged or user_key is None:
@@ -139,7 +187,7 @@ class GlobalPriorityCommandQueue:
                     self._running_since[self._key(user_key)] = time.monotonic()
                     return
                 fut = asyncio.get_running_loop().create_future()
-                self._priv_wait.append((fut, user_key))
+                self._priv_wait.append((fut, user_key, heavy))
             else:
                 if self._per_user.get(user_key, 0) >= self._per_user_max:
                     raise SlotRejected("per_user_full")
@@ -149,13 +197,19 @@ class GlobalPriorityCommandQueue:
                     self._running_since[self._key(user_key)] = time.monotonic()
                     return
                 fut = asyncio.get_running_loop().create_future()
-                self._norm_wait.append((fut, user_key))
+                self._norm_wait.append((fut, user_key, heavy))
         # 锁外 await，避免阻塞其他协程
         try:
             await asyncio.wait_for(fut, self._queue_wait_timeout)
         except asyncio.TimeoutError:
             self._remove_waiter(fut)
             raise SlotRejected("queue_timeout")
+        except asyncio.CancelledError:
+            # 外部取消（bot 重启 / 平台取消排队中的任务）：必须把 deque 中的 fut 移除，
+            # 否则后续 release -> _admit_next_locked 会给已无等待者的 fut 调 set_result(True)，
+            # 使 _running / _per_user 永久 +1 通胀；反复触发可使全局容量耗尽乃至死锁。
+            self._remove_waiter(fut)
+            raise
         return
 
     async def release(self, user_key: Optional[str]) -> None:
@@ -173,7 +227,7 @@ class GlobalPriorityCommandQueue:
         """清空全部槽位与等待者（每日重置兜底）。"""
         async with self._lock:
             for dq in (self._priv_wait, self._norm_wait):
-                for fut, _ in dq:
+                for fut, _, _ in dq:
                     if not fut.done():
                         fut.set_exception(SlotRejected("cleared"))
             self._priv_wait.clear()
@@ -203,6 +257,10 @@ class GlobalPriorityCommandQueue:
 
     def stats(self) -> dict:
         """统计快照（不持有锁，供监控展示参考）。"""
+        heavy_waiting = 0
+        for f, _, h in list(self._priv_wait) + list(self._norm_wait):
+            if not f.done() and h:
+                heavy_waiting += 1
         return {
             "capacity": self._capacity,
             "per_user_max": self._per_user_max,
@@ -210,6 +268,7 @@ class GlobalPriorityCommandQueue:
             "waiting": len(self._priv_wait) + len(self._norm_wait),
             "privileged_waiting": len(self._priv_wait),
             "normal_waiting": len(self._norm_wait),
+            "heavy_waiting": heavy_waiting,
             "active_users": len(self._per_user),
             "privileged_jumped_total": self._priv_jumped_total,
         }
