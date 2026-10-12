@@ -698,19 +698,25 @@ class OverstatsPlugin(Star):
             asyncio.ensure_future(
                 self._maybe_warn_reply_timeout(event, done_event, cmd_text, bnet_id)
             )
-        # 是区吗拥堵自动暂停：队列积压过多（排队超出阈值）时，直接暂停该功能——
-        # 不再入队等待，而是向发送者说明并 return，避免重指令在高并发下持续挤占后端、
-        # 拖垮全部用户。管理员 / 白名单（privileged）不受此暂停限制，可正常使用该功能；
+        # 重指令（是区吗 / 开庭）拥堵自动暂停：等待数 > 阈值（默认 10）时，直接暂停该重指令
+        # 并返回，不再入队等待——避免重指令在拥堵时持续挤占后端、拖垮全部用户。
+        # 等待数 > 5（heavy_deprio_threshold）时已由优先级队列让「轻普通」插队到「重普通」前面；
+        # 这里进一步在 > 10 时直接把「重普通」抛出。管理员 / 白名单（privileged）不受限。
         # 队列回落到阈值以下后，普通用户新请求自动恢复正常（无需手动恢复）。
-        if congestion_hint and not privileged and getattr(self, '_cmd_limiter', None) is not None:
+        if heavy and not privileged and getattr(self, '_cmd_limiter', None) is not None:
             try:
                 _waiting = int(self._cmd_limiter.stats().get("waiting", 0))
             except Exception:
                 _waiting = 0
             if _waiting > getattr(self, '_shiqu_congestion_threshold', 10):
-                yield event.plain_result(
-                    "⚠️ 当前同时使用的人过多，系统已自动暂停「是区吗」功能，请稍后再试。"
-                )
+                if congestion_hint:
+                    yield event.plain_result(
+                        "⚠️ 当前同时使用的人过多，系统已自动暂停「是区吗」功能，请稍后再试。"
+                    )
+                else:
+                    yield event.plain_result(
+                        "⚠️ 当前同时使用的人过多，系统已自动暂停「开庭」功能，请稍后再试。"
+                    )
                 return
         try:
             await self._try_acquire_cmd_slot(event, privileged=privileged, heavy=heavy)
