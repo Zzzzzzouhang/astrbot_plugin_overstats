@@ -186,6 +186,9 @@ class OverstatsPlugin(Star):
         self._shiqu_backend_semaphore = asyncio.Semaphore(2)
         # 是区吗拥堵提示阈值：全局队列等待数 > 此值时，向「是区吗」发送者追加拥堵提示
         self._shiqu_congestion_threshold = 10
+        # 全局队列溢出硬上限：整体排队等待数 >= 此值时，直接拒绝后续普通指令
+        # （"使用人数过多，稍后再试"），避免队列无限堆积拖垮后端；管理员/白名单不受限。
+        self._cmd_queue_overflow_threshold = 50
         if self._save_image_locally:
             self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop())
         else:
@@ -669,6 +672,18 @@ class OverstatsPlugin(Star):
         - coro_factory：无参可调用，返回 async generator。
         """
         privileged = self._is_privileged(event)
+        # 全局队列溢出保护：整体排队等待数 >= 硬上限时，直接拒绝后续普通指令，
+        # 避免队列无限堆积拖垮后端；管理员 / 白名单（privileged）不受限，可正常进入排队。
+        if not privileged and getattr(self, '_cmd_limiter', None) is not None:
+            try:
+                _waiting = int(self._cmd_limiter.stats().get("waiting", 0))
+            except Exception:
+                _waiting = 0
+            if _waiting >= getattr(self, '_cmd_queue_overflow_threshold', 50):
+                yield event.plain_result(
+                    f"⚠️ 当前使用人数过多（队列＞{getattr(self, '_cmd_queue_overflow_threshold', 50)}），请稍后再试。"
+                )
+                return
         done_event = asyncio.Event()
         # 群聊 + 本地缓存：注册回复超时主动预警（QQ 回复 msg_id 5 分钟过期）
         if self._save_image_locally and self._is_qq_group_message(event):
@@ -683,16 +698,20 @@ class OverstatsPlugin(Star):
             asyncio.ensure_future(
                 self._maybe_warn_reply_timeout(event, done_event, cmd_text, bnet_id)
             )
-        # 是区吗拥堵提示：队列积压过多时，先告知用户可能长时间等待（在排队等待之前发出）
-        if congestion_hint and getattr(self, '_cmd_limiter', None) is not None:
+        # 是区吗拥堵自动暂停：队列积压过多（排队超出阈值）时，直接暂停该功能——
+        # 不再入队等待，而是向发送者说明并 return，避免重指令在高并发下持续挤占后端、
+        # 拖垮全部用户。管理员 / 白名单（privileged）不受此暂停限制，可正常使用该功能；
+        # 队列回落到阈值以下后，普通用户新请求自动恢复正常（无需手动恢复）。
+        if congestion_hint and not privileged and getattr(self, '_cmd_limiter', None) is not None:
             try:
                 _waiting = int(self._cmd_limiter.stats().get("waiting", 0))
             except Exception:
                 _waiting = 0
             if _waiting > getattr(self, '_shiqu_congestion_threshold', 10):
                 yield event.plain_result(
-                    "⚠️ 当前同时使用的人过多，「是区吗」会优先处理其他指令，你可能需等待较长时间，请耐心等待或稍后再试。"
+                    "⚠️ 当前同时使用的人过多，系统已自动暂停「是区吗」功能，请稍后再试。"
                 )
+                return
         try:
             await self._try_acquire_cmd_slot(event, privileged=privileged, heavy=heavy)
         except SlotRejected:
@@ -753,14 +772,21 @@ class OverstatsPlugin(Star):
                 head = f'⏳ {bnet_id} 发送的「{cmd_tag}」仍在生成中，'
             else:
                 head = f'⏳ 你发送的「{cmd_tag}」仍在生成中，'
-            # 第一行与「msg_id 过期」说明合并为同一行，中间不换行
-            first = head + '群消息回复即将过期（5分钟），可能无法正常回复。'
+            # 仅保留「仍在生成中」引导语 + 取回/排队说明，合并为同一行（不再提示 msg_id 过期），中间不换行
             if congested:
                 tail = f'当前排队用户较多（约 {waiting} 人），回复即将超时，请稍后 @机器人 点 {get_tag}。'
             else:
                 tail = f'若稍后未收到图片，请 @机器人 发送 {get_tag} 取回（图片保留 24 小时）。'
-            text = self._format_markdown_by_platform(event, '\n'.join([first, tail]))
-            chain = MessageChain([Comp.At(qq=user_id), Comp.Plain(text)])
+            text = self._format_markdown_by_platform(
+                event,
+                head + tail + '\n⚠️ 推荐**私聊**（60分钟）使用或**群主/管理员** 点击机器人头像-右上角设置-机器人权限设置-**允许主动发送消息**。',
+            )
+            # QQ 官方机器人需以 markdown 消息类型发送，方能渲染 **加粗** 与 <qqbot-cmd-input> 可点击标签；
+            # 其他平台（onebot/QQNT 等）无 markdown 消息类型，仍用 Plain 发送（标签已被 _format_markdown_by_platform 剥离）。
+            if self._is_qq_official(event) and hasattr(Comp, 'Markdown'):
+                chain = MessageChain([Comp.At(qq=user_id), Comp.Markdown(text)])
+            else:
+                chain = MessageChain([Comp.At(qq=user_id), Comp.Plain(text)])
             # 改用「被动回复」：event.send 会以原消息 msg_id 作为回复目标，
             # 规避群内主动消息所需的 admin 权限（v4.28.2 报错「主动消息失败, 无权限」）。
             # 4:50 时原 msg_id 仍在 5 分钟交互窗口内，被动回复不受主动消息权限限制。
