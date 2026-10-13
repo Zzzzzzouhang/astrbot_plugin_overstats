@@ -11,9 +11,9 @@ logger = logging.getLogger("astrbot")
 async def dashen_profile(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
     """查看玩家详情卡片（支持 快速/竞技 模式）。"""
     bnet_id, mode = plugin._parse_profile_args(arg1, arg2)
-    target_id = await plugin._get_bnet_id(event, bnet_id)
-    if not target_id:
-        yield plugin._plain_error_result(event, plugin._bnet_err('大神数据'))
+    target_id, _gate = await plugin._gate_bnet_id(event, bnet_id, '大神数据')
+    if _gate:
+        yield _gate
         return
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🔍 正在生成 {target_id} 的<qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" />，可用参数 战网id 查询别人。')
     if status_text:
@@ -40,9 +40,9 @@ async def dashen_profile(plugin, event: AstrMessageEvent, arg1: str = '', arg2: 
 
 async def dashen_match(plugin, event: AstrMessageEvent, bnet_id: str = ''):
     """拉取最近 20 局的对局列表。"""
-    target_id = await plugin._get_bnet_id(event, bnet_id)
-    if not target_id:
-        yield plugin._plain_error_result(event, plugin._bnet_err('大神对局'))
+    target_id, _gate = await plugin._gate_bnet_id(event, bnet_id, '大神对局')
+    if _gate:
+        yield _gate
         return
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📊 正在拉取 {target_id} 的<qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" />，可用参数 战网id 查询别人。')
     if status_text:
@@ -91,6 +91,10 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
         bnet_id = await plugin._get_user_bind_id(user_id)
     target_id = await plugin._get_bnet_id(event, bnet_id)
     if not target_id:
+        _gate = await plugin._maintenance_gate(event)
+        if _gate:
+            yield _gate
+            return
         yield plugin._plain_error_result(event, '❌ 请输入战网ID，如：单局详细 Player#12345 1 \n或先使用 /绑定 战网ID，示例：/绑定 Player#12345')
         return
     # AI 锐评每日限次（参考「是区吗」每日重置 + 管理员/白名单豁免逻辑）
@@ -206,9 +210,9 @@ async def dashen_rank_history(plugin, event: AstrMessageEvent, arg1: str = '', a
             season_nums.append(int(arg))
         else:
             bnet_id = arg
-    target_id = await plugin._get_bnet_id(event, bnet_id)
-    if not target_id:
-        yield plugin._plain_error_result(event, plugin._bnet_err('历史段位') + '\n可选附加 起始 终止 赛季，如 /历史段位 Player#12345 15 22')
+    target_id, _gate = await plugin._gate_bnet_id(event, bnet_id, '历史段位', '可选附加 起始 终止 赛季，如 /历史段位 Player#12345 15 22')
+    if _gate:
+        yield _gate
         return
     season_hint = ''
     if len(season_nums) == 1:
@@ -256,9 +260,17 @@ async def dashen_sameplay(plugin, event: AstrMessageEvent, p1: str = '', p2: str
     else:
         p1 = bound_id
     if not p1:
+        _gate = await plugin._maintenance_gate(event)
+        if _gate:
+            yield _gate
+            return
         yield plugin._plain_error_result(event, '❌ 请先绑定战网ID（/绑定 Player#12345）或输入对战网ID，可用参数：p1战网id p2战网id')
         return
     if not p2:
+        _gate = await plugin._maintenance_gate(event)
+        if _gate:
+            yield _gate
+            return
         yield plugin._plain_error_result(event, '❌ 缺少第二个战网ID，可用参数：p1战网id p2战网id\n示例：/同玩查询 Player#12345 OtherPlayer#67890')
         return
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'👥 正在分析 {p1} 与 {p2} 的<qqbot-cmd-input text="同玩查询 " show="同玩查询" reference="false" />胜率，可用参数：战网ID1 战网ID2 查询别人。')

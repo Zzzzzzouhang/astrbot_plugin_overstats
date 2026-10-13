@@ -15,9 +15,9 @@ async def quick_strength(plugin, event: AstrMessageEvent, arg1: str = '', arg2: 
             limit = int(arg)
         else:
             bnet_id = arg
-    target_id = await plugin._get_bnet_id(event, bnet_id)
-    if not target_id:
-        yield plugin._plain_error_result(event, plugin._bnet_err('快速强度') + '\n可选附加对局数（3-12），如 /快速强度 Player#12345 8')
+    target_id, _gate = await plugin._gate_bnet_id(event, bnet_id, '快速强度', '可选附加对局数（3-12），如 /快速强度 Player#12345 8')
+    if _gate:
+        yield _gate
         return
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'⚡ 正在评估 {target_id} 的<qqbot-cmd-input text="快速强度 " show="快速强度" reference="false" />指数，可用参数 战网id 查询别人。')
     if status_text:
@@ -55,9 +55,9 @@ async def competitive_strength(plugin, event: AstrMessageEvent, arg1: str = '', 
             limit = int(arg)
         else:
             bnet_id = arg
-    target_id = await plugin._get_bnet_id(event, bnet_id)
-    if not target_id:
-        yield plugin._plain_error_result(event, plugin._bnet_err('竞技强度') + '\n可选附加对局数（3-12），如 /竞技强度 Player#12345 8')
+    target_id, _gate = await plugin._gate_bnet_id(event, bnet_id, '竞技强度', '可选附加对局数（3-12），如 /竞技强度 Player#12345 8')
+    if _gate:
+        yield _gate
         return
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🏆 正在评估 {target_id} 的<qqbot-cmd-input text="竞技强度 " show="竞技强度" reference="false" />指数，可用参数 战网id 查询别人。')
     if status_text:
@@ -88,9 +88,9 @@ async def competitive_strength(plugin, event: AstrMessageEvent, arg1: str = '', 
 async def quick_hero_treemap(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
     """获取快速模式英雄使用率矩形树图（可选赛季）。"""
     bnet_id, season = plugin._parse_treemap_args(arg1, arg2)
-    target_id = await plugin._get_bnet_id(event, bnet_id)
-    if not target_id:
-        yield plugin._plain_error_result(event, plugin._bnet_err('快速英雄云图'))
+    target_id, _gate = await plugin._gate_bnet_id(event, bnet_id, '快速英雄云图')
+    if _gate:
+        yield _gate
         return
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📊 正在获取 {target_id} 的<qqbot-cmd-input text="快速英雄云图 " show="快速英雄云图" reference="false" />，可用参数 战网id 查询别人。')
     if status_text:
@@ -121,9 +121,9 @@ async def quick_hero_treemap(plugin, event: AstrMessageEvent, arg1: str = '', ar
 async def competitive_hero_treemap(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
     """获取竞技模式英雄使用率矩形树图（可选赛季）。"""
     bnet_id, season = plugin._parse_treemap_args(arg1, arg2)
-    target_id = await plugin._get_bnet_id(event, bnet_id)
-    if not target_id:
-        yield plugin._plain_error_result(event, plugin._bnet_err('竞技英雄云图'))
+    target_id, _gate = await plugin._gate_bnet_id(event, bnet_id, '竞技英雄云图')
+    if _gate:
+        yield _gate
         return
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🏆 正在获取 {target_id} 的<qqbot-cmd-input text="竞技英雄云图 " show="竞技英雄云图" reference="false" />，可用参数 战网id 查询别人。')
     if status_text:
@@ -154,6 +154,10 @@ async def competitive_hero_treemap(plugin, event: AstrMessageEvent, arg1: str = 
 async def ow_hero_perk(plugin, event: AstrMessageEvent, hero_name: str):
     """提取指定英雄的核心威能、机制数据图。"""
     if not hero_name:
+        _gate = await plugin._maintenance_gate(event)
+        if _gate:
+            yield _gate
+            return
         yield plugin._plain_error_result(event, '❌ 请输入英雄名称，如：威能 闪光')
         return
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🔮 正在提取 {hero_name} 的<qqbot-cmd-input text="威能 " show="威能" reference="false" />核心威能数据，可用参数：<英雄名>')
@@ -181,6 +185,10 @@ async def ow_hero_pick(plugin, event: AstrMessageEvent, arg1: str = '', arg2: st
     positional, kw = plugin._extract_keywords([arg1, arg2, arg3])
     hero_name = positional[0] if positional else ''
     if not hero_name:
+        _gate = await plugin._maintenance_gate(event)
+        if _gate:
+            yield _gate
+            return
         yield plugin._plain_error_result(event, '❌ 请输入英雄名称，如：ow英雄 闪光\n可选附加：快速/竞技 模式、段位，如 /ow英雄 安娜 快速 大师')
         return
     mode_label = '快速' if kw.get('game_mode') == 'quick' else '竞技'

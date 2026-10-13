@@ -148,6 +148,10 @@ async def ow_patch_notes(plugin, event: AstrMessageEvent, kind: str = 'latest'):
     """拉取外服更新日志卡片（参数：latest / small / big）。"""
     valid_kinds = ['latest', 'small', 'big']
     if kind not in valid_kinds:
+        _gate = await plugin._maintenance_gate(event)
+        if _gate:
+            yield _gate
+            return
         yield plugin._plain_error_result(event, '❌ 参数错误。支持的日志类型：latest, small, big\n例如：ow更新 small')
         return
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📰 正在拉取外服 {kind} 更新日志卡片，可用参数 类型')
@@ -173,6 +177,10 @@ async def ow_patch_notes(plugin, event: AstrMessageEvent, kind: str = 'latest'):
 async def ow_rank_leaderboard(plugin, event: AstrMessageEvent, province: str, role: str):
     """获取指定地区的大神天梯省榜（位置：tank / dps / healer / open）。"""
     if not province or not role:
+        _gate = await plugin._maintenance_gate(event)
+        if _gate:
+            yield _gate
+            return
         yield plugin._plain_error_result(event, '❌ 请输入省份名称 and 职责位置，例如：省榜 北京 tank\n(支持的位置: tank / dps / healer / open)')
         return
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'🏆 正在获取 {province} 地区 【{role}】 位置的大神天梯省榜，可用参数：<省份> <职责>')
@@ -202,6 +210,10 @@ async def ow_hero_leaderboard(plugin, event: AstrMessageEvent, province: str, he
     province = _positional[0] if len(_positional) >= 1 else province
     hero = _positional[1] if len(_positional) >= 2 else hero
     if not province or not hero:
+        _gate = await plugin._maintenance_gate(event)
+        if _gate:
+            yield _gate
+            return
         yield plugin._plain_error_result(event, '❌ 请输入省份和英雄名称，例如：绝活榜 北京 猎空\n可选附加 开放（开放队列模式），如 /绝活榜 北京 猎空 开放')
         return
     mode = kw.get('lb_mode', 'preset')

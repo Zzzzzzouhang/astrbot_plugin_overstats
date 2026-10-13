@@ -53,6 +53,9 @@ class GlobalPriorityCommandQueue:
         self._norm_wait: Deque[_Waiter] = deque()
         # 运行槽位起始时间（monotonic），按 user_key 记录（同用户多槽仅记最近一次，兜底用）
         self._running_since: Dict[str, float] = {}
+        # 已被 expire_all() 提前回收、但对应指令仍在执行的槽位数（按 user_key）：
+        # 这些指令后续 release 时只抵扣、不再递减计数，避免重复递减使并发计数永久偏低。
+        self._reclaimed: Dict[str, int] = {}
         self._priv_jumped_total = 0
 
     # ── 配置热生效 ────────────────────────────────────────────
@@ -213,8 +216,21 @@ class GlobalPriorityCommandQueue:
         return
 
     async def release(self, user_key: Optional[str]) -> None:
-        """释放该用户一个全局槽位，并尝试补位。"""
+        """释放该用户一个全局槽位，并尝试补位。
+
+        若该用户有被 `expire_all()` 提前回收的槽位（`_reclaimed` 计数），本次 release
+        只做抵扣、不再递减 `_running` / `_per_user`（回收时已递减过），避免重复递减
+        造成并发计数永久偏低；抵扣后仍尝试补位，因为名额实际已释放。
+        """
         async with self._lock:
+            if user_key is not None and self._reclaimed.get(user_key, 0) > 0:
+                left = self._reclaimed[user_key] - 1
+                if left > 0:
+                    self._reclaimed[user_key] = left
+                else:
+                    self._reclaimed.pop(user_key, None)
+                self._admit_next_locked()
+                return
             if user_key is not None:
                 self._per_user[user_key] = max(0, self._per_user.get(user_key, 0) - 1)
                 if self._per_user[user_key] == 0:
@@ -235,9 +251,14 @@ class GlobalPriorityCommandQueue:
             self._running = 0
             self._per_user.clear()
             self._running_since.clear()
+            self._reclaimed.clear()
 
     async def expire_all(self) -> int:
-        """超时强制释放运行中的槽位（防卡死泄漏），返回释放数量。"""
+        """超时强制释放运行中的槽位（防卡死泄漏），返回释放数量。
+
+        被回收的槽位会记入 `_reclaimed`：对应指令日后真正结束时，其 `release()` 只抵扣、
+        不再重复递减计数（否则 `_running` 会永久偏低，护栏被悄悄削弱）。
+        """
         if self._timeout_seconds <= 0:
             return 0
         async with self._lock:
@@ -250,10 +271,23 @@ class GlobalPriorityCommandQueue:
                         self._per_user[key] -= 1
                         if self._per_user[key] == 0:
                             self._per_user.pop(key, None)
+                    if key != "*":
+                        self._reclaimed[key] = self._reclaimed.get(key, 0) + 1
                     self._running_since.pop(key, None)
                     removed += 1
             self._admit_next_locked()
             return removed
+
+    def per_user_saturated(self, user_key: Optional[str]) -> bool:
+        """无锁快速预检：该用户个人并发是否已达上限。
+
+        仅供调用方（main.py）决定「是否值得先推送排队提示」等文案决策，**不作为准入依据**
+        ——真正的准入判断仍由 acquire() 在锁内完成，避免并发竞态。
+        per_user_max<=0（不限制）或 user_key 为 None（不计数）时恒为 False。
+        """
+        if self._per_user_max <= 0 or user_key is None:
+            return False
+        return self._per_user.get(user_key, 0) >= self._per_user_max
 
     def stats(self) -> dict:
         """统计快照（不持有锁，供监控展示参考）。"""
@@ -270,5 +304,6 @@ class GlobalPriorityCommandQueue:
             "normal_waiting": len(self._norm_wait),
             "heavy_waiting": heavy_waiting,
             "active_users": len(self._per_user),
+            "reclaimed_pending": sum(self._reclaimed.values()),
             "privileged_jumped_total": self._priv_jumped_total,
         }

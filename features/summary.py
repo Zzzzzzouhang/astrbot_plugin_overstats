@@ -13,9 +13,9 @@ async def dashen_today(plugin, event: AstrMessageEvent, bnet_id: str = ''):
     if banned:
         yield event.plain_result(plugin._VIOLATION_BAN_MSG.format(command=CMD, remain=plugin._violation_ban_remain_str(ban_remain)))
         return
-    target_id = await plugin._get_bnet_id(event, bnet_id)
-    if not target_id:
-        yield plugin._plain_error_result(event, plugin._bnet_err('今日总结'))
+    target_id, _gate = await plugin._gate_bnet_id(event, bnet_id, '今日总结')
+    if _gate:
+        yield _gate
         return
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'⏳ 正在计算 {target_id} 的<qqbot-cmd-input text="今日总结 " show="今日总结" reference="false" />，可用参数 战网id 查询别人。')
     if status_text:
@@ -51,9 +51,9 @@ async def dashen_today(plugin, event: AstrMessageEvent, bnet_id: str = ''):
 
 async def dashen_yesterday(plugin, event: AstrMessageEvent, bnet_id: str = '', _skip_status_prompt: bool = False):
     """统计并生成昨日战绩数据卡片。"""
-    target_id = await plugin._get_bnet_id(event, bnet_id)
-    if not target_id:
-        yield plugin._plain_error_result(event, plugin._bnet_err('昨日总结'))
+    target_id, _gate = await plugin._gate_bnet_id(event, bnet_id, '昨日总结')
+    if _gate:
+        yield _gate
         return
     prompt_token = None
     _maintenance_stop = False
@@ -87,9 +87,9 @@ async def dashen_yesterday(plugin, event: AstrMessageEvent, bnet_id: str = '', _
 
 async def dashen_week(plugin, event: AstrMessageEvent, bnet_id: str = ''):
     """统计本周战绩大数据总结，耗时较长（约 30-60 秒）。"""
-    target_id = await plugin._get_bnet_id(event, bnet_id)
-    if not target_id:
-        yield plugin._plain_error_result(event, plugin._bnet_err('周度总结'))
+    target_id, _gate = await plugin._gate_bnet_id(event, bnet_id, '周度总结')
+    if _gate:
+        yield _gate
         return
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📊 正在生成 {target_id} 的<qqbot-cmd-input text="本周总结 " show="本周总结" reference="false" />，可用参数 战网id 查询别人。')
     if status_text:
