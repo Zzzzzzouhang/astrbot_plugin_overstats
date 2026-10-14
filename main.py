@@ -81,7 +81,7 @@ except ImportError:  # 插件作为顶层模块加载时
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.7.9")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.8.0")
 class OverstatsPlugin(Star):
     """Overstats 全指令插件。
 
@@ -197,10 +197,9 @@ class OverstatsPlugin(Star):
         # 全局队列溢出硬上限：整体排队等待数 >= 此值时，直接拒绝后续普通指令
         # （"使用人数过多，稍后再试"），避免队列无限堆积拖垮后端；管理员/白名单不受限。
         self._cmd_queue_overflow_threshold = 50
-        # 高峰排队阈值：群聊下整体排队等待数 > 此值时，入队前即推送「排队中」提示
-        # （含「回复即将超时，请稍后点 获取图片」），不再等到 4:50 超时预警才告知；
-        # 该提示推送成功后，4:50 的超时预警不再重复发送。管理员/白名单不受限。
-        self._cmd_queue_busy_threshold = 10
+        # 高峰排队提示：群聊业务指令无法立即获得全局槽位（等待队列非空 / 运行槽位已满）时，
+        # 入队前即以后台任务推送「排队中」提示（含排队人数与「回复即将超时，请稍后点 获取图片」），
+        # 不再等到 4:50 超时预警才告知；提示推送成功后，4:50 的超时预警不再重复发送。管理员/白名单不受限。
         if self._save_image_locally:
             self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop())
         else:
@@ -722,9 +721,11 @@ class OverstatsPlugin(Star):
         - congestion_hint：拥堵提示标记（仅 是区吗 使用）。当全局队列等待数 >
           self._shiqu_congestion_threshold 时，在获取槽位【之前】先向发送者追加一条
           "同时人多/会优先处理其他指令/可能等待过长" 的提示，避免用户干等。
-        - 高峰排队提示：群聊下当全局队列等待数 > self._cmd_queue_busy_threshold（默认 10）时，
-          在获取槽位【之前】以后台任务（不阻塞入队）推送「⏳ 正在排队中…回复即将超时，请稍后点 获取图片」
-          提示；该提示推送成功后置位 done_event，4:50 的「仍在生成中」超时预警随之取消（避免同义重复）。
+        - 高峰排队提示：群聊下当指令无法立即获得全局槽位（等待队列非空，或运行槽位已满、
+          本指令入队后必然要等）时，在获取槽位【之前】以后台任务（不阻塞入队）向发送者
+          推送「⏳ 正在排队中…（约 N 人）回复即将超时，请稍后点 获取图片」提示——用户
+          入队后第一时间即可得知拥堵与超时风险，不再干等 4:50 的超时预警；该提示推送成功后
+          置位 done_event，4:50 的「仍在生成中」超时预警随之取消（避免同义重复）。
         - coro_factory：无参可调用，返回 async generator。
         """
         # 计时起点：收到用户指令即开始（早于排队与后续所有 await），使 4:50 超时预警
@@ -741,13 +742,18 @@ class OverstatsPlugin(Star):
             )
         try:
             privileged = self._is_privileged(event)
-            # 全局队列等待数（一次读取，供溢出保护 / 重指令暂停 / 高峰排队提示共用）
+            # 全局队列快照（一次读取，供溢出保护 / 重指令暂停 / 高峰排队提示共用）
             waiting = 0
+            running = 0
+            capacity = 0
             if getattr(self, '_cmd_limiter', None) is not None:
                 try:
-                    waiting = int(self._cmd_limiter.stats().get("waiting", 0))
+                    _stats = self._cmd_limiter.stats()
+                    waiting = int(_stats.get("waiting", 0))
+                    running = int(_stats.get("global_running", 0))
+                    capacity = int(_stats.get("capacity", 0))
                 except Exception:
-                    waiting = 0
+                    waiting = running = capacity = 0
             # 全局队列溢出保护：整体排队等待数 >= 硬上限时，直接拒绝后续普通指令，
             # 避免队列无限堆积拖垮后端；管理员 / 白名单（privileged）不受限，可正常进入排队。
             if not privileged and waiting >= getattr(self, '_cmd_queue_overflow_threshold', 50):
@@ -770,15 +776,17 @@ class OverstatsPlugin(Star):
                         "⚠️ 当前同时使用的人过多，系统已自动暂停「开庭」功能，请稍后再试。"
                     )
                 return
-            # 高峰排队前置提示：队列等待数 > 阈值（默认 10）时，不等 4:50 超时预警，
-            # 入队前即向群内推送「排队中」提示（含「回复即将超时，请稍后点 获取图片」）。
+            # 高峰排队前置提示：指令无法立即获得槽位（等待队列非空，或运行槽位已满——
+            # 本指令入队后必然要等）时，不等 4:50 超时预警，入队前即向群内推送「排队中」提示
+            # （含排队人数与「回复即将超时，请稍后点 获取图片」），让用户入队后第一时间知情。
             # 改为后台任务发送（不 await）：平台发送耗时（最坏 15s）不再占用入队关键路径
             # ——否则这段耗时直接从用户的 5 分钟预算里扣除，且高峰期会被平台限流进一步放大。
             # 发送成功后由该任务置位 done_event，取消 4:50 的超时预警（同义去重）。
             # 先预检个人并发：已满时 acquire 会立即拒绝（"你已有指令正在执行"），
             # 此时再推「排队中…请稍后点获取图片」会给出互相矛盾的两条指引。
+            # 注意 capacity>0 保护：stats 读取异常时三者均为 0，此时不得因 0>=0 误判为「槽位已满」。
             if (group_qq and not privileged
-                    and waiting > getattr(self, '_cmd_queue_busy_threshold', 10)
+                    and (waiting > 0 or (capacity > 0 and running >= capacity))
                     and not self._is_per_user_saturated(event)):
                 notice_task: asyncio.Task | None = asyncio.ensure_future(
                     self._send_queue_waiting_notice(event, cmd_text, waiting, done_event)
@@ -867,7 +875,11 @@ class OverstatsPlugin(Star):
             return ''
 
     async def _send_queue_waiting_notice(self, event: AstrMessageEvent, command_text: str, waiting: int, done_event: asyncio.Event) -> None:
-        """高峰模式「排队中」前置提示（后台任务，不阻塞入队）。
+        """「排队中」前置提示（后台任务，不阻塞入队）。
+
+        触发条件（由 _run_with_cmd_slot 决定）：指令无法立即获得全局槽位——等待队列非空，
+        或运行槽位已满。用户在收到指令的第一时间即被告知排队情况与超时取回方式，
+        不再干等 4:50 的超时预警。
 
         - 以后台任务运行：平台发送耗时（最坏 15s）不再占用入队关键路径。
         - 发送前检查 done_event：指令已结束（图片已回复 / 已提前返回 / 被拒）时不补发，
@@ -884,7 +896,12 @@ class OverstatsPlugin(Star):
                 head = f'⏳ {bnet_id} 发送的「{cmd_tag}」正在排队中，'
             else:
                 head = f'⏳ 你发送的「{cmd_tag}」正在排队中，'
-            tail = f'当前排队用户较多（约 {waiting} 人），回复即将超时，请稍后 @机器人 点 {get_tag}。'
+            # waiting=0 表示运行槽位已满但等待队列暂空（即将成为第一位等待者），
+            # 此时不能显示「约 0 人」，改述为并发已满；两种情况均保留超时取回指引。
+            if waiting > 0:
+                tail = f'当前排队用户较多（约 {waiting} 人），回复即将超时，请稍后 @机器人 点 {get_tag}。'
+            else:
+                tail = f'当前并发指令已满、即将排队，若回复超时，请稍后 @机器人 点 {get_tag}。'
             text = self._format_markdown_by_platform(
                 event,
                 head + tail + '\n⚠️ 推荐**私聊**（60分钟）使用或**群主** 点击机器人头像-右上角设置-机器人主动在群内发言。',
