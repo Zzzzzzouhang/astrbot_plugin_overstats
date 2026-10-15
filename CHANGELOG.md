@@ -1,5 +1,43 @@
 # Changelog
 
+## v2.9.0 (2026-10-15)
+
+### ♻️ 重构：排队与提示模块分层（domain / service / platform）
+
+依据线上数据（`request_metrics.sqlite3` + 25 分钟高峰期运行日志）重构，保持对外行为与文案不变：
+- 日志统计：25 分钟内 **105 次「回复消息 msg_id 已过期」**、11 次「被动回复次数超限」、34 次发送失败；
+- 上游接口成功率 98.33%，而插件→后端模块层仅 **84.20%**（`dashen-shiqu/image` 63%、`dashen-summary/today/image` 77%）；
+- 「排队中」前置提示在旧阈值（等待数 > 10）下实际 **触发 0 次**。
+
+新增 `core/` 分层包：
+- `core/domain/`（纯逻辑、零 IO、可独立单测）：`queue_policy`（准入 / 溢出 / 重指令暂停 / 降权）、`queue_snapshot`、`notice`（回复窗口 + 提示时机决策）、`notice_text`（文案构造）、`image_cache`（条目存活与裁剪）、`slot`（槽位请求 / 凭证 / 拒绝）；
+- `core/service/`（asyncio 与 IO 编排）：`CommandQueueService`（排队 + 槽位生命周期 + 回收）、`ReplyNoticeService`（排队提示 / 超时预警 / 去重）、`ImageCacheService`（24h 缓存）；
+- `core/platform/`（平台差异适配）：`PlatformPort` 协议 + `AstrBotPlatformAdapter`（QQ 官方 markdown / @ 消息链 / 被动回复）。
+- `deploy/ops/priority_queue.py` 改为兼容门面（API 与行为不变，既有 12 项测试全通过）。
+
+### ⚡ 性能
+- **队列统计 O(n) → O(1)**：等待数 / 特权等待 / 重指令等待改用计数器维护，`stats()` 不再遍历等待队列（高峰期被每条指令与监控面板高频调用）；
+- **等待者移除 O(n) → O(1)**：取消 / 超时改为惰性标记 + 出队丢弃，不再线性查找 deque；
+- **图片缓存索引去掉每条指令的全量 JSON 读写**：改为内存权威 + 后台 1s 合并落盘（原子写 tmp+replace），高峰期 N 次写合并为 1 次；
+- **提示文案的战网 ID 解析加 60s 缓存**：指令文本命中时零 IO，未命中时不再每条提示都抢绑定表文件锁。
+
+### 📈 响应成功率
+- **入队即 @ 告知**（v2.8.0 行为保留并下沉到 domain 决策）：指令无法立即获得槽位时立刻推送「⏳ 正在排队中…（约 N 人）回复即将超时，请稍后 @机器人 点 获取图片」，把告知前移到 msg_id 仍有效的窗口内；
+- **抑制注定失败的发送**：已推送排队提示且 msg_id 窗口已过期时，业务层「正在计算…」状态提示静默跳过（此类消息正是日志中 105 次过期失败的主要来源），改为依赖已下发的取图指引，减少失败与平台限流压力；
+- **槽位回收更精确**：运行槽位改为按槽位记录（`slot_id`），超时回收不再因「同用户多槽只回收其一」导致容量泄漏（日志中曾出现兜底回收 2 个槽位）；
+- 排队提示与 4:50 预警仍保持同义去重，发送失败时保留 4:50 预警兜底。
+
+### 🐛 审查修复（重构复查）
+- **排队路径返回的槽位凭证 `slot_id` 恒为 0**：补位方置入 future 的真实凭证被丢弃，导致 `release` 的精确释放无法生效。改为原样返回 future 结果，并在 `_run_with_cmd_slot` 接线精确释放（同用户多指令时不再依赖 FIFO 推断）；
+- **`expire_all()` 补位条件收紧为 `if removed`**：原实现为无条件补位，收窄后若出现「计数已变但未回收」的边界，等待者可能挂起到 `queue_wait_timeout` 才被拒。恢复为无条件补位；
+- **插件卸载未落盘图片缓存索引**：`terminate()` 增加停止刷盘任务 + 最后一次 `flush()`，避免丢失尚未写入的缓存条目；
+- **指令提示状态用 `id(event)` 作键存在 id 复用风险**：登记时一并保存 event 引用，读取时校验身份；
+- 清理死代码：`NoticeKind`、`RejectReason.OVERFLOW`、`QueueSnapshot.congested_for`、`image_cache.prune_entries`、`_WAIT_BUCKETS`，以及 `main.py` 中随迁移失效的 `threading` / `urllib.parse` 导入。
+
+### ✅ 测试
+- 新增 `tests/test_core_domain.py`（18 项）与 `tests/test_core_service.py`（13 项），覆盖策略判定、回复窗口、文案变体、缓存裁剪、排队并发、槽位凭证与提示去重；
+- 既有 `tests/test_priority_queue.py`（12 项）全部通过，行为无回归；合计 **43 项通过**。
+
 ## v2.8.0 (2026-10-14)
 
 ### ✨ 新增

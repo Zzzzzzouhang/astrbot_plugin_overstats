@@ -8,8 +8,6 @@ import base64
 import json
 import time
 import inspect
-import threading
-import urllib.parse
 from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
 from astrbot.api.all import *
@@ -35,6 +33,42 @@ try:
     from .deploy.ops.priority_queue import GlobalPriorityCommandQueue, SlotRejected
 except ImportError:
     from deploy.ops.priority_queue import GlobalPriorityCommandQueue, SlotRejected  # type: ignore[no-redef]
+
+# 排队与提示的分层架构：domain（纯策略）/ service（编排）/ platform（平台适配）
+try:
+    from .core.domain import (
+        GET_IMAGE_TAG,
+        ImageCacheEntry,
+        QueueThresholds,
+        ReplyWindow,
+        SlotRequest,
+        build_cmd_tag,
+        decide_queue_notice,
+        extract_bnet_id,
+        is_alive,
+        should_pause_heavy,
+        should_reject_overflow,
+        should_skip_status_prompt,
+    )
+    from .core.service import CommandQueueService, ImageCacheService, ReplyNoticeService
+    from .core.platform.astrbot import AstrBotPlatformAdapter
+except ImportError:  # 插件作为顶层模块加载时
+    from core.domain import (  # type: ignore[no-redef]
+        GET_IMAGE_TAG,
+        ImageCacheEntry,
+        QueueThresholds,
+        ReplyWindow,
+        SlotRequest,
+        build_cmd_tag,
+        decide_queue_notice,
+        extract_bnet_id,
+        is_alive,
+        should_pause_heavy,
+        should_reject_overflow,
+        should_skip_status_prompt,
+    )
+    from core.service import CommandQueueService, ImageCacheService, ReplyNoticeService  # type: ignore[no-redef]
+    from core.platform.astrbot import AstrBotPlatformAdapter  # type: ignore[no-redef]
 
 # OW 开庭模块（独立封装，避免主文件臃肿）
 try:
@@ -81,7 +115,7 @@ except ImportError:  # 插件作为顶层模块加载时
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.8.0")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.9.0")
 class OverstatsPlugin(Star):
     """Overstats 全指令插件。
 
@@ -141,13 +175,25 @@ class OverstatsPlugin(Star):
         super().__init__(context)
         self.config = config
         self.file_lock = asyncio.Lock()
-        self._cmd_limiter = GlobalPriorityCommandQueue(
+        # 排队相关阈值（供 domain 策略使用，集中一处避免多处真相）
+        # 是区吗拥堵提示/暂停阈值：全局队列等待数 > 此值时向「是区吗」发送者追加拥堵提示
+        self._shiqu_congestion_threshold = 10
+        # 全局队列溢出硬上限：整体排队等待数 >= 此值时，直接拒绝后续普通指令
+        self._cmd_queue_overflow_threshold = 50
+        # 排队服务（service 层）：内部委托 domain 的准入策略，对外保持旧 API
+        self._cmd_limiter = CommandQueueService(
             capacity=5,
             per_user_max=3,
-            timeout_seconds=self._CMD_SLOT_AUTO_RELEASE_SECONDS,
-            queue_wait_timeout=600,
-            heavy_deprio_threshold=5,
+            thresholds=QueueThresholds(
+                overflow=self._cmd_queue_overflow_threshold,
+                heavy_pause=self._shiqu_congestion_threshold,
+                heavy_deprio=5,
+                queue_wait_timeout=600,
+                slot_auto_release=self._CMD_SLOT_AUTO_RELEASE_SECONDS,
+            ),
         )
+        # 平台适配器：收敛 QQ 官方 markdown / @ 消息链 / 被动回复等平台差异
+        self._platform = AstrBotPlatformAdapter()
         self._load_rate_limit_config()
         self._semaphore_reset_task = asyncio.create_task(self._daily_semaphore_reset_loop())
         # 运行槽位兜底回收：正常释放走 _run_with_cmd_slot 的 finally，本循环只兜「异常泄漏」
@@ -158,6 +204,9 @@ class OverstatsPlugin(Star):
         self.daily_prompt_pending_users: set[str] = set()
         # 跨功能并发守卫：同一用户同一时间 是区吗/开庭 最多一条在执行（两管理器共用）
         self._ow_executing: set[str] = set()
+        # 指令级提示状态：event id -> (指令到达时刻, 已推送提示标记)，
+        # 供业务层判定「正在计算…」状态提示是否已注定过期（避免发送必然失败的消息）
+        self._cmd_notice_state: dict[int, tuple[float, asyncio.Event]] = {}
         self.id_resolve_error_hint = '未查询到id或者id错误，id严格区分大小写'
         self._save_image_locally = bool(self.config.get('save_image_locally', True))
         try:
@@ -185,18 +234,13 @@ class OverstatsPlugin(Star):
         self.daily_prompt_reset_task = asyncio.create_task(self._daily_prompt_reset_loop())
         self._http_session: aiohttp.ClientSession | None = None
         # 后端并发上限与指令全局队列容量保持一致（capacity=5），两层嵌套取 min，故均设为 5
-        self.overstats_semaphore = asyncio.Semaphore(self._cmd_limiter._capacity)
-        self._overstats_inner_semaphore = asyncio.Semaphore(self._cmd_limiter._capacity)
+        self.overstats_semaphore = asyncio.Semaphore(self._cmd_limiter.capacity)
+        self._overstats_inner_semaphore = asyncio.Semaphore(self._cmd_limiter.capacity)
         # 周度总结专属后端并发上限（单条指令会打一次后端，故等价于同时最多 2 条周度总结在跑）
         self._weekly_summary_semaphore = asyncio.Semaphore(2)
         # 是区吗后端并发上限：全局同时最多 2 条「是区吗」查询在打后端图片接口
         # （单条是区吗 = 一次 HTTP 请求，但后端内部放大成数百次 LLM 子请求，必须收住）。
         self._shiqu_backend_semaphore = asyncio.Semaphore(2)
-        # 是区吗拥堵提示阈值：全局队列等待数 > 此值时，向「是区吗」发送者追加拥堵提示
-        self._shiqu_congestion_threshold = 10
-        # 全局队列溢出硬上限：整体排队等待数 >= 此值时，直接拒绝后续普通指令
-        # （"使用人数过多，稍后再试"），避免队列无限堆积拖垮后端；管理员/白名单不受限。
-        self._cmd_queue_overflow_threshold = 50
         # 高峰排队提示：群聊业务指令无法立即获得全局槽位（等待队列非空 / 运行槽位已满）时，
         # 入队前即以后台任务推送「排队中」提示（含排队人数与「回复即将超时，请稍后点 获取图片」），
         # 不再等到 4:50 超时预警才告知；提示推送成功后，4:50 的超时预警不再重复发送。管理员/白名单不受限。
@@ -214,7 +258,20 @@ class OverstatsPlugin(Star):
         self._admin_cmd_set: set[str] = {'多图测试', '单图测试', 'ow开庭', '开庭', 'ow是区吗', '是区吗', 'ow是区吗结果', '是区吗结果', 'ow开庭结果', '开庭结果', 'owAI检测', 'AI检测', '维护', 'ow违禁封禁', 'ow违禁解封', 'ow连接测试', 'ow部署', 'ow部署状态', 'ow更新后端', 'ow停止后端', 'ow重启后端', 'ow部署日志', 'ow后端日志', 'ow卸载后端', 'ow卸载后端执行确认', 'ow卸载后端执行仅代码', 'ow卸载后端执行仅venv', 'ow卸载后端执行强制', '群设置', '全量适配开', '全量适配开完全匹配', '全量适配关', '管理'}
         # 图片缓存索引（本地保留 24 小时，供群聊回复超时后 @机器人 取回）
         self._image_cache_index_path = self.plugin_data_dir / self._IMAGE_CACHE_INDEX_FILE
-        self._cache_lock = threading.Lock()
+        # 图片缓存服务（service 层）：内存权威 + 合并落盘，省去每条指令的全量 JSON 读写
+        # （锁由服务内部持有，替代原先 main.py 的 _cache_lock）
+        self._image_cache_service = ImageCacheService(
+            self._image_cache_index_path,
+            ttl=self._IMAGE_CACHE_TTL,
+        )
+        # 提示服务（service 层）：排队提示 / 超时预警的编排与去重
+        self._notice_service = ReplyNoticeService(
+            self._platform,
+            window=ReplyWindow(ttl=self._REPLY_MSG_ID_TTL, warn_before=self._TIMEOUT_WARN_BEFORE),
+            bnet_resolver=self._get_user_bind_id,
+            waiting_provider=self._cmd_limiter.snapshot,
+            congestion_threshold=self._CONGESTION_WAITING_THRESHOLD,
+        )
         self.court_manager = CourtManager(self)
         self.shiqu_manager = ShiquManager(self)
         self._register_monitor_apis()
@@ -249,6 +306,12 @@ class OverstatsPlugin(Star):
         else:
             logger.warning('[Overstats] 监控采集器未就绪，Web 面板将显示空数据')
         self._auto_start_task = asyncio.create_task(self.deploy_manager.maybe_auto_start())
+        # 图片缓存索引：启动即加载，并开启后台合并落盘
+        try:
+            self._image_cache_service.load()
+            self._image_cache_flush_task = asyncio.create_task(self._image_cache_service.start())
+        except Exception as e:
+            logger.warning(f'[Overstats] 图片缓存服务启动失败: {e}')
 
     def _current_prompt_cycle_date(self, now: datetime | None=None) -> str:
         now = now or datetime.now()
@@ -686,11 +749,14 @@ class OverstatsPlugin(Star):
         heavy：重指令标记（是区吗/开庭），拥堵时降权优先放行轻指令。
         """
         self._load_rate_limit_config()
-        await self._cmd_limiter.acquire(self._cmd_user_key(event), privileged=privileged, heavy=heavy)
+        return await self._cmd_limiter.acquire(self._cmd_user_key(event), privileged=privileged, heavy=heavy)
 
-    async def _release_cmd_slot(self, event: AstrMessageEvent | None = None) -> None:
-        """释放该用户的指令并发槽位。"""
-        await self._cmd_limiter.release(self._cmd_user_key(event))
+    async def _release_cmd_slot(self, event: AstrMessageEvent | None = None, slot_id: int = 0) -> None:
+        """释放该用户的指令并发槽位。
+
+        传入 slot_id（>0）时精确释放该槽位；否则按用户 FIFO 释放其最早占用的槽位。
+        """
+        await self._cmd_limiter.release(self._cmd_user_key(event), slot_id)
 
     def _is_per_user_saturated(self, event: AstrMessageEvent | None) -> bool:
         """预检该用户个人并发是否已达上限（仅用于「是否先推排队提示」的决策）。
@@ -737,36 +803,29 @@ class OverstatsPlugin(Star):
         if group_qq:
             # 后台注册超时预警：指令文本随注册传入，战网 ID 延迟到真正发送时才解析，
             # 避免解析耗时把 4:50 的计时起点往后推。
-            asyncio.ensure_future(
-                self._maybe_warn_reply_timeout(event, done_event, cmd_text, started_at)
+            self._notice_service.schedule_timeout_warning(
+                event=event, command_text=cmd_text, started_at=started_at, done_event=done_event
             )
+        self._mark_cmd_notice_state(event, started_at, done_event)
         try:
             privileged = self._is_privileged(event)
-            # 全局队列快照（一次读取，供溢出保护 / 重指令暂停 / 高峰排队提示共用）
-            waiting = 0
-            running = 0
-            capacity = 0
-            if getattr(self, '_cmd_limiter', None) is not None:
-                try:
-                    _stats = self._cmd_limiter.stats()
-                    waiting = int(_stats.get("waiting", 0))
-                    running = int(_stats.get("global_running", 0))
-                    capacity = int(_stats.get("capacity", 0))
-                except Exception:
-                    waiting = running = capacity = 0
-            # 全局队列溢出保护：整体排队等待数 >= 硬上限时，直接拒绝后续普通指令，
+            request = SlotRequest.of(self._cmd_user_key(event), privileged=privileged, heavy=heavy)
+            # 全局队列快照与阈值（一次读取，供溢出保护 / 重指令暂停 / 高峰排队提示共用）
+            snapshot = self._cmd_limiter.snapshot()
+            thresholds = self._cmd_limiter.thresholds
+            # 全局队列溢出保护（domain 策略）：整体排队等待数 >= 硬上限时，直接拒绝后续普通指令，
             # 避免队列无限堆积拖垮后端；管理员 / 白名单（privileged）不受限，可正常进入排队。
-            if not privileged and waiting >= getattr(self, '_cmd_queue_overflow_threshold', 50):
+            if should_reject_overflow(snapshot, request, thresholds):
                 yield event.plain_result(
-                    f"⚠️ 当前使用人数过多（队列＞{getattr(self, '_cmd_queue_overflow_threshold', 50)}），请稍后再试。"
+                    f"⚠️ 当前使用人数过多（队列＞{thresholds.overflow}），请稍后再试。"
                 )
                 return
-            # 重指令（是区吗 / 开庭）拥堵自动暂停：等待数 > 阈值（默认 10）时，直接暂停该重指令
-            # 并返回，不再入队等待——避免重指令在拥堵时持续挤占后端、拖垮全部用户。
-            # 等待数 > 5（heavy_deprio_threshold）时已由优先级队列让「轻普通」插队到「重普通」前面；
+            # 重指令（是区吗 / 开庭）拥堵自动暂停（domain 策略）：等待数 > 阈值（默认 10）时，
+            # 直接暂停该重指令并返回，不再入队等待——避免重指令在拥堵时持续挤占后端、拖垮全部用户。
+            # 等待数 > 5（heavy_deprio）时已由优先级队列让「轻普通」插队到「重普通」前面；
             # 这里进一步在 > 10 时直接把「重普通」抛出。管理员 / 白名单（privileged）不受限。
             # 队列回落到阈值以下后，普通用户新请求自动恢复正常（无需手动恢复）。
-            if heavy and not privileged and waiting > getattr(self, '_shiqu_congestion_threshold', 10):
+            if should_pause_heavy(snapshot, request, thresholds):
                 if congestion_hint:
                     yield event.plain_result(
                         "⚠️ 当前同时使用的人过多，系统已自动暂停「是区吗」功能，请稍后再试。"
@@ -776,25 +835,29 @@ class OverstatsPlugin(Star):
                         "⚠️ 当前同时使用的人过多，系统已自动暂停「开庭」功能，请稍后再试。"
                     )
                 return
-            # 高峰排队前置提示：指令无法立即获得槽位（等待队列非空，或运行槽位已满——
+            # 高峰排队前置提示（domain 决策）：指令无法立即获得槽位（等待队列非空，或运行槽位已满——
             # 本指令入队后必然要等）时，不等 4:50 超时预警，入队前即向群内推送「排队中」提示
             # （含排队人数与「回复即将超时，请稍后点 获取图片」），让用户入队后第一时间知情。
-            # 改为后台任务发送（不 await）：平台发送耗时（最坏 15s）不再占用入队关键路径
+            # 由提示服务以后台任务发送（不 await）：平台发送耗时（最坏 15s）不再占用入队关键路径
             # ——否则这段耗时直接从用户的 5 分钟预算里扣除，且高峰期会被平台限流进一步放大。
             # 发送成功后由该任务置位 done_event，取消 4:50 的超时预警（同义去重）。
             # 先预检个人并发：已满时 acquire 会立即拒绝（"你已有指令正在执行"），
             # 此时再推「排队中…请稍后点获取图片」会给出互相矛盾的两条指引。
-            # 注意 capacity>0 保护：stats 读取异常时三者均为 0，此时不得因 0>=0 误判为「槽位已满」。
-            if (group_qq and not privileged
-                    and (waiting > 0 or (capacity > 0 and running >= capacity))
-                    and not self._is_per_user_saturated(event)):
-                notice_task: asyncio.Task | None = asyncio.ensure_future(
-                    self._send_queue_waiting_notice(event, cmd_text, waiting, done_event)
+            notice_decision = decide_queue_notice(
+                group_message=group_qq,
+                privileged=privileged,
+                snapshot=snapshot,
+                per_user_saturated=self._is_per_user_saturated(event),
+            )
+            if notice_decision.should_send:
+                notice_task: asyncio.Task | None = self._notice_service.schedule_queue_notice(
+                    event=event, command_text=cmd_text, waiting=notice_decision.waiting, done_event=done_event
                 )
             else:
                 notice_task = None
+            ticket = None
             try:
-                await self._try_acquire_cmd_slot(event, privileged=privileged, heavy=heavy)
+                ticket = await self._try_acquire_cmd_slot(event, privileged=privileged, heavy=heavy)
             except SlotRejected:
                 # acquire 是被立即拒绝（个人并发已满的竞态）时，提示任务往往还没被事件循环调度
                 # （同一 tick 内锁的快速路径不挂起、直接抛出），此时取消它即可，避免用户同时收到
@@ -814,186 +877,103 @@ class OverstatsPlugin(Star):
                 async for r in coro_factory():
                     yield r
             finally:
-                await self._release_cmd_slot(event)
+                # 精确释放本指令占用的槽位（ticket 缺失时退回按用户 FIFO 释放）
+                await self._release_cmd_slot(event, getattr(ticket, 'slot_id', 0) or 0)
         finally:
             # 指令结束（含各提前 return 分支）：置位以取消超时预警后台任务
             done_event.set()
+            self._clear_cmd_notice_state(event)
 
-    # ── 群聊回复超时预警与图片缓存 ─────────────────────────────
+    # ── 群聊提示与图片缓存（委托 core 分层服务）────────────────
     def _extract_bnet_id(self, event: AstrMessageEvent) -> str:
-        """从用户消息文本中提取战网 ID（Name#12345 形式）。"""
+        """从用户消息文本中提取战网 ID（Name#12345 形式）——委托 domain 纯函数。"""
         try:
             msg = event.message_str or ''
         except Exception:
             return ''
-        m = re.search(r'[A-Za-z0-9_\-]{2,16}#\d{4,8}', msg)
-        return m.group(0) if m else ''
+        return extract_bnet_id(msg)
 
     @staticmethod
     def _cmd_tags(command_text: str) -> tuple[str, str]:
-        """把指令文本与「获取图片」转为 QQ 官方可点击指令标签（非官方平台自动降级为纯文本）。"""
-        raw_cmd = (command_text or '').strip()
-        cmd_label = raw_cmd.split()[0] if raw_cmd.split() else '指令'
-        cmd_tag = f'<qqbot-cmd-input text="{cmd_label} " show="{cmd_label}" reference="false" />'
-        get_tag = '<qqbot-cmd-input text="获取图片 " show="获取图片" reference="false" />'
-        return cmd_tag, get_tag
+        """把指令文本与「获取图片」转为 QQ 官方可点击指令标签——委托 domain 纯函数。"""
+        return build_cmd_tag(command_text), GET_IMAGE_TAG
 
     async def _send_at_notice(self, event: AstrMessageEvent, text: str) -> None:
-        """以「被动回复」方式 @ 发送者发送提示。
+        """以「被动回复」方式 @ 发送者发送提示——委托 platform 适配器。
 
         event.send 以原消息 msg_id 作回复目标，规避群内主动消息所需的 admin 权限
         （v4.28.2 报错「主动消息失败, 无权限」）；入队提示与 4:50 超时预警均在 5 分钟
         交互窗口内，被动回复不受主动消息权限限制。
         包一层超时：避免平台发送阻塞导致后台任务（及捕获的 event）被长期持有 → 内存泄漏。
         """
-        try:
-            user_id = str(event.get_sender_id())
-        except Exception:
-            user_id = ''
-        # QQ 官方机器人需以 markdown 消息类型发送，方能渲染 **加粗** 与 <qqbot-cmd-input> 可点击标签；
-        # 其他平台（onebot/QQNT 等）无 markdown 消息类型，仍用 Plain 发送（标签已被剥离）。
-        if self._is_qq_official(event) and hasattr(Comp, 'Markdown'):
-            chain = MessageChain([Comp.At(qq=user_id), Comp.Markdown(text)])
-        else:
-            chain = MessageChain([Comp.At(qq=user_id), Comp.Plain(text)])
-        await asyncio.wait_for(event.send(chain), timeout=15)
+        await self._platform.send_notice(event, self._platform.format_text(event, text))
 
     async def _resolve_notice_bnet_id(self, event: AstrMessageEvent) -> str:
         """提示文案用的战网 ID：优先取指令文本中的（Name#12345），缺失时回退该用户的绑定 ID。
 
-        仅在真正需要发送提示时解析，避免在入队前引入额外 await 拖后 4:50 的计时起点。
+        战网 ID 解析带短 TTL 缓存（提示服务内），高峰期避免每条提示都抢文件锁读绑定表。
         """
         try:
-            bnet_id = self._extract_bnet_id(event)
-            if bnet_id:
-                return bnet_id
+            msg = getattr(event, 'message_str', '') or ''
+        except Exception:
+            msg = ''
+        return await self._notice_service.resolve_bnet_id(event, msg)
+
+    def _mark_cmd_notice_state(self, event: AstrMessageEvent, started_at: float, done_event: asyncio.Event) -> None:
+        """登记该指令的提示状态，供业务层判定状态提示是否已注定过期。
+
+        一并保存 event 引用：读取时校验身份，避免 id() 被回收复用后误判到别的指令上。
+        """
+        try:
+            self._cmd_notice_state[id(event)] = (event, started_at, done_event)
         except Exception:
             pass
+
+    def _clear_cmd_notice_state(self, event: AstrMessageEvent) -> None:
+        """指令结束（含各提前 return 分支）时清理登记，避免 event 引用被长期持有。"""
         try:
-            return (await self._get_user_bind_id(str(event.get_sender_id()))) or ''
+            self._cmd_notice_state.pop(id(event), None)
         except Exception:
-            return ''
+            pass
 
-    async def _send_queue_waiting_notice(self, event: AstrMessageEvent, command_text: str, waiting: int, done_event: asyncio.Event) -> None:
-        """「排队中」前置提示（后台任务，不阻塞入队）。
+    def _should_skip_status_prompt_for(self, event: AstrMessageEvent) -> bool:
+        """业务层「正在计算…」类状态提示是否应跳过。
 
-        触发条件（由 _run_with_cmd_slot 决定）：指令无法立即获得全局槽位——等待队列非空，
-        或运行槽位已满。用户在收到指令的第一时间即被告知排队情况与超时取回方式，
-        不再干等 4:50 的超时预警。
-
-        - 以后台任务运行：平台发送耗时（最坏 15s）不再占用入队关键路径。
-        - 发送前检查 done_event：指令已结束（图片已回复 / 已提前返回 / 被拒）时不补发，
-          避免出现「结果先到、排队提示后到」的倒序。
-        - 发送成功后置位 done_event，取消 4:50 的「仍在生成中」超时预警（同义去重）。
-        - 发送失败（平台异常/超时）时不置位，保留 4:50 的预警兜底。
+        已推送过「排队中」提示且 msg_id 窗口已过期时，该状态提示注定被动回复失败
+        ——线上高峰期大量「msg_id 已过期」失败正来自此类消息。跳过它可以减少一次
+        必然失败的平台调用与平台限流压力；用户此时已持有取回方式（@机器人 获取图片）。
         """
-        try:
-            if done_event.is_set():
-                return
-            bnet_id = await self._resolve_notice_bnet_id(event)
-            cmd_tag, get_tag = self._cmd_tags(command_text)
-            if bnet_id:
-                head = f'⏳ {bnet_id} 发送的「{cmd_tag}」正在排队中，'
-            else:
-                head = f'⏳ 你发送的「{cmd_tag}」正在排队中，'
-            # waiting=0 表示运行槽位已满但等待队列暂空（即将成为第一位等待者），
-            # 此时不能显示「约 0 人」，改述为并发已满；两种情况均保留超时取回指引。
-            if waiting > 0:
-                tail = f'当前排队用户较多（约 {waiting} 人），回复即将超时，请稍后 @机器人 点 {get_tag}。'
-            else:
-                tail = f'当前并发指令已满、即将排队，若回复超时，请稍后 @机器人 点 {get_tag}。'
-            text = self._format_markdown_by_platform(
-                event,
-                head + tail + '\n⚠️ 推荐**私聊**（60分钟）使用或**群主** 点击机器人头像-右上角设置-机器人主动在群内发言。',
-            )
-            # 紧邻发送前再确认一次：缩小「检查 → 实际发出」之间的竞态窗口
-            if done_event.is_set():
-                return
-            await self._send_at_notice(event, text)
-            done_event.set()
-        except Exception as e:
-            logger.error(f'排队中提示发送失败: {e}')
+        state = self._cmd_notice_state.get(id(event))
+        if not state:
+            return False
+        owner, started_at, done_event = state
+        if owner is not event:
+            return False  # id 被回收复用且指向另一条指令
+        return should_skip_status_prompt(
+            elapsed=time.monotonic() - started_at,
+            window=self._notice_service.window(),
+            already_notified=done_event.is_set(),
+        )
 
-    async def _maybe_warn_reply_timeout(self, event: AstrMessageEvent, done_event: asyncio.Event, command_text: str, started_at: float) -> None:
-        """自「收到用户指令」起 4 分 50 秒仍未返回时，以「被动回复」方式发送超时预警。
+    # 说明：「排队中」提示与 4:50 超时预警的编排已迁至
+    # core/service/reply_notice.py（ReplyNoticeService），文案构造在
+    # core/domain/notice_text.py，时机判定在 core/domain/notice.py。
 
-        started_at 为收到指令时刻的 time.monotonic()（含排队等待，与 msg_id 的 5 分钟交互窗口
-        对齐）；若注册时距起点已超过 4:50（极端排队），则不再等待、立即发送。
-        done_event 被置位（指令已返回 / 已推送过高峰「排队中」提示）时直接结束，不发预警。
-        """
-        remaining = self._TIMEOUT_WARN_BEFORE - (time.monotonic() - started_at)
-        if remaining > 0:
-            try:
-                await asyncio.wait_for(done_event.wait(), timeout=remaining)
-                return  # 已正常返回，无需预警
-            except asyncio.TimeoutError:
-                pass
-        if done_event.is_set():
-            return
-        try:
-            if not self._is_qq_group_message(event):
-                return
-            waiting = 0
-            try:
-                waiting = self._cmd_limiter.stats().get('waiting', 0)
-            except Exception:
-                pass
-            bnet_id = await self._resolve_notice_bnet_id(event)
-            congested = waiting >= self._CONGESTION_WAITING_THRESHOLD
-            cmd_tag, get_tag = self._cmd_tags(command_text)
-            if bnet_id:
-                head = f'⏳ {bnet_id} 发送的「{cmd_tag}」仍在生成中，'
-            else:
-                head = f'⏳ 你发送的「{cmd_tag}」仍在生成中，'
-            # 仅保留「仍在生成中」引导语 + 取回/排队说明，合并为同一行（不再提示 msg_id 过期），中间不换行
-            if congested:
-                tail = f'当前排队用户较多（约 {waiting} 人），回复即将超时，请稍后 @机器人 点 {get_tag}。'
-            else:
-                tail = f'若稍后未收到图片，请 @机器人 发送 {get_tag} 取回（图片保留 24 小时）。'
-            text = self._format_markdown_by_platform(
-                event,
-                head + tail + '\n⚠️ 推荐**私聊**（60分钟）使用或**群主/管理员** 点击机器人头像-右上角设置-机器人权限设置-**允许主动发送消息**。',
-            )
-            await self._send_at_notice(event, text)
-        except Exception as e:
-            logger.error(f'回复超时预警发送失败: {e}')
+    # 说明：图片缓存索引的读写与清理已迁至 core/service/image_cache.py（ImageCacheService），
+    # 条目存活 / 裁剪判定在 core/domain/image_cache.py。
 
     def _record_image_cache_sync(self, user_key: str, path: str, command: str = '') -> None:
         """记录用户最近生成的图片到本地缓存索引（保留 24 小时，最多保留 5 张）。"""
-        try:
-            with self._cache_lock:
-                index: dict = {}
-                if self._image_cache_index_path.exists():
-                    try:
-                        index = json.loads(self._image_cache_index_path.read_text(encoding='utf-8'))
-                    except Exception:
-                        index = {}
-                entries = index.get(user_key, [])
-                entries.append({'path': str(path), 'command': command, 'ts': time.time()})
-                now = time.time()
-                entries = [e for e in entries if now - e.get('ts', 0) <= self._IMAGE_CACHE_TTL]
-                entries = entries[-5:]
-                index[user_key] = entries
-                tmp = self._image_cache_index_path.with_name(self._image_cache_index_path.name + '.tmp')
-                tmp.write_text(json.dumps(index, ensure_ascii=False), encoding='utf-8')
-                tmp.replace(self._image_cache_index_path)
-        except Exception as e:
-            logger.warning(f'记录图片缓存失败: {e}')
+        self._image_cache_service.record(user_key, str(path), command)
 
     @staticmethod
     def _cache_entry_alive(entry: dict, now: float, ttl: float) -> bool:
-        """判断缓存索引条目是否有效：path 非空且指向真实文件、且在保留期内。
+        """判断缓存索引条目是否有效：path 非空且指向真实文件、且在保留期内——委托 domain。
 
         用 is_file() 而非 exists()：畸形条目的 path 为空/为目录时，exists() 恒为真
         （Path('') 解析为当前目录），会导致这类条目既无法被清理、又被当成有效条目。
         """
-        p = entry.get('path')
-        if not p:
-            return False
-        try:
-            return (now - entry.get('ts', 0) <= ttl) and Path(p).is_file()
-        except Exception:
-            return False
+        return is_alive(ImageCacheEntry.from_dict(entry), now, ttl)
 
     def _get_user_all_images(self, user_key: str) -> list:
         """取回用户全部仍在 24 小时保留期内且文件存在的图片记录（按生成时间升序）。
@@ -1001,63 +981,15 @@ class OverstatsPlugin(Star):
         用于「获取图片」补发：群聊回复超时未送达的图片，可能来自多条不同指令，
         需一次性全部取回（最多受缓存上限约束，默认 5 张）。
         """
-        try:
-            if not self._image_cache_index_path.exists():
-                return []
-            index = json.loads(self._image_cache_index_path.read_text(encoding='utf-8'))
-            entries = index.get(user_key, [])
-            now = time.time()
-            entries = [e for e in entries if self._cache_entry_alive(e, now, self._IMAGE_CACHE_TTL)]
-            return entries
-        except Exception:
-            return []
+        return [e.to_dict() for e in self._image_cache_service.list_alive(user_key)]
 
     def _prune_user_cache(self, user_key: str) -> None:
         """清理某用户过期的图片缓存索引条目。"""
-        try:
-            with self._cache_lock:
-                if not self._image_cache_index_path.exists():
-                    return
-                index = json.loads(self._image_cache_index_path.read_text(encoding='utf-8'))
-                entries = index.get(user_key, [])
-                now = time.time()
-                entries = [e for e in entries if self._cache_entry_alive(e, now, self._IMAGE_CACHE_TTL)]
-                if entries:
-                    index[user_key] = entries
-                else:
-                    index.pop(user_key, None)
-                tmp = self._image_cache_index_path.with_name(self._image_cache_index_path.name + '.tmp')
-                tmp.write_text(json.dumps(index, ensure_ascii=False), encoding='utf-8')
-                tmp.replace(self._image_cache_index_path)
-        except Exception:
-            pass
+        self._image_cache_service.prune_user(user_key)
 
     def _prune_image_cache_index_sync(self, now_ts: float | None = None) -> None:
         """清理全局图片缓存索引中过期或文件已缺失的条目（每日定时调用）。"""
-        try:
-            if not self._image_cache_index_path.exists():
-                return
-            if now_ts is None:
-                now_ts = time.time()
-            with self._cache_lock:
-                index = json.loads(self._image_cache_index_path.read_text(encoding='utf-8'))
-                changed = False
-                for uk in list(index.keys()):
-                    entries = index.get(uk, [])
-                    new_entries = [e for e in entries if self._cache_entry_alive(e, now_ts, self._IMAGE_CACHE_TTL)]
-                    if new_entries:
-                        if len(new_entries) != len(entries):
-                            index[uk] = new_entries
-                            changed = True
-                    else:
-                        index.pop(uk, None)
-                        changed = True
-                if changed:
-                    tmp = self._image_cache_index_path.with_name(self._image_cache_index_path.name + '.tmp')
-                    tmp.write_text(json.dumps(index, ensure_ascii=False), encoding='utf-8')
-                    tmp.replace(self._image_cache_index_path)
-        except Exception:
-            pass
+        self._image_cache_service.prune_all(now_ts)
 
     def _violation_ban_path(self) -> Path:
         return self.plugin_data_dir / self._VIOLATION_BAN_FILE
@@ -1234,15 +1166,8 @@ class OverstatsPlugin(Star):
         return 'GROUP_MESSAGE' in str(getattr(event, 'unified_msg_origin', '')).upper()
 
     def _is_qq_group_message(self, event: AstrMessageEvent) -> bool:
-        if not self._is_group_message(event):
-            return False
-        try:
-            platform_name = event.get_platform_name()
-            if 'qq' in str(platform_name).lower():
-                return True
-        except Exception:
-            pass
-        return 'qq' in str(getattr(event, 'unified_msg_origin', '')).lower()
+        """是否 QQ 平台群聊消息——委托 platform 适配器（判定逻辑在 core/platform）。"""
+        return self._platform.is_qq_group_message(event)
 
     def _append_group_interaction_notice(self, event: AstrMessageEvent, text: str) -> str:
         if not self._is_qq_group_message(event):
@@ -1300,6 +1225,10 @@ class OverstatsPlugin(Star):
             AstrBot 管理员不受维护模式限制，可正常使用数据查询指令。
             注意：指令并发限流槽位已上移至 main.py handler 层（_run_with_cmd_slot）统一管理，
             本方法不再获取/释放槽位，仅负责维护模式与每日首次提示。
+
+            拥堵场景优化：若该指令已推送过「排队中」提示且 msg_id 窗口已过期，
+            则状态提示注定被动回复失败（线上高峰期大量「msg_id 已过期」失败即来自此处），
+            此时返回 None 静默跳过——用户已持有取回方式，不必再发一条必然失败的消息。
             """
         await self._ensure_maintenance_loaded()
         if self._maintenance_state and self._maintenance_state.get('enabled'):
@@ -1307,6 +1236,8 @@ class OverstatsPlugin(Star):
                 pass
             else:
                 return (self._maintenance_state.get('content', '系统维护中'), None, True)
+        if self._should_skip_status_prompt_for(event):
+            return (None, None, False)
         need_release = False
         if not self._is_group_message(event):
             return (base_text, (None, need_release), False)
@@ -1379,7 +1310,15 @@ class OverstatsPlugin(Star):
                 await self.deploy_manager.cleanup()
         except Exception as e:
             logger.warning(f'[Overstats] 停止后端进程异常: {e}')
-        for task_attr in ('daily_prompt_reset_task', '_cleanup_task', '_semaphore_reset_task', '_slot_reclaim_task'):
+        # 图片缓存索引：停刷前最后一次落盘，避免丢失尚未写入的条目
+        try:
+            if getattr(self, '_image_cache_service', None) is not None:
+                self._image_cache_service.stop()
+                self._image_cache_service.flush()
+        except Exception as e:
+            logger.warning(f'[Overstats] 停止图片缓存服务异常: {e}')
+        for task_attr in ('daily_prompt_reset_task', '_cleanup_task', '_semaphore_reset_task',
+                          '_slot_reclaim_task', '_image_cache_flush_task'):
             task = getattr(self, task_attr, None)
             if task and (not task.done()):
                 task.cancel()
@@ -1397,53 +1336,17 @@ class OverstatsPlugin(Star):
             await self._http_session.close()
 
     def _is_qq_official(self, event: AstrMessageEvent) -> bool:
-        """判断当前消息是否来自 QQ 官方机器人平台"""
-        try:
-            pn = event.get_platform_name()
-            if pn and 'qq_official' in str(pn).lower():
-                return True
-        except Exception:
-            pass
-        umo = event.unified_msg_origin
-        if 'qq_official' in str(umo).lower() or 'qqofficial' in str(umo).lower():
-            return True
-        if hasattr(event, 'message_obj') and event.message_obj:
-            s = str(event.message_obj).lower()
-            if 'qq_official' in s or 'qqofficial' in s:
-                return True
-        return False
+        """判断当前消息是否来自 QQ 官方机器人平台——委托 platform 适配器。"""
+        return self._platform.is_qq_official(event)
 
     def _format_markdown_by_platform(self, event: AstrMessageEvent, text: str) -> str:
         """
             根据平台环境动态处理文本：
             如果是 QQ 官方机器人：保留标签并对 text 和 show 属性进行 urlencode
             如果是其他机器人：剥离 <qqbot-cmd-input> 和 <qqbot-cmd-enter> 标签，将其转化为普通文本格式
+            ——具体实现见 core/platform/astrbot.py
             """
-        if self._is_qq_official(event):
-
-            def replacer_input(match):
-                text_val = urllib.parse.quote(match.group(1))
-                show_val = urllib.parse.quote(match.group(2))
-                return f'<qqbot-cmd-input text="{text_val}" show="{show_val}" reference="false" />'
-
-            def replacer_enter(match):
-                text_val = urllib.parse.quote(match.group(1))
-                return f'<qqbot-cmd-enter text="{text_val}" />'
-            text = re.sub('<qqbot-cmd-input\\s+text="([^"]+)"\\s+show="([^"]+)"\\s+reference="false"\\s*/>', replacer_input, text)
-            text = re.sub('<qqbot-cmd-enter\\s+text="([^"]+)"\\s*/>', replacer_enter, text)
-            return text
-        else:
-
-            def strip_replacer_input(match):
-                text_val = match.group(1).strip()
-                return f'{text_val}'
-
-            def strip_replacer_enter(match):
-                text_val = match.group(1).strip()
-                return f'{text_val}'
-            text = re.sub('<qqbot-cmd-input\\s+text="([^"]+)"\\s+show="([^"]+)"\\s+reference="false"\\s*/>', strip_replacer_input, text)
-            text = re.sub('<qqbot-cmd-enter\\s+text="([^"]+)"\\s*/>', strip_replacer_enter, text)
-            return text
+        return self._platform.format_text(event, text)
 
     @staticmethod
     def _is_retryable_backend_error(status: int, error_data) -> bool:
@@ -1851,6 +1754,11 @@ class OverstatsPlugin(Star):
             binds = self._load_binds()
             binds[str(user_id)] = bnet_id
             self._save_binds(binds)
+        # 绑定变更后立即使提示服务的战网 ID 缓存失效，避免使用旧 ID 生成提示文案
+        try:
+            self._notice_service.invalidate_bind_cache(str(user_id))
+        except Exception:
+            pass
             try:
                 old_kv_key = f'bind_{user_id}'
                 await self.delete_kv_data(old_kv_key)
