@@ -1473,7 +1473,6 @@ class OverstatsPlugin(Star):
         if not img_bytes:
             return self._plain_error_result(event, fallback_text or '❌ 图片生成失败')
         try:
-            user_id = event.get_sender_id()
             if self._save_image_locally:
                 img_hash = abs(hash(img_bytes))
                 img_path = self.temp_image_dir / f'{img_hash}.png'
@@ -1482,7 +1481,9 @@ class OverstatsPlugin(Star):
                 image_comp = Comp.Image.fromFileSystem(str(img_path))
             else:
                 image_comp = Comp.Image.fromBytes(img_bytes)
-            chain = [Comp.At(qq=user_id), Comp.Plain('\n' if not fallback_text else f'\n{fallback_text}\n'), image_comp]
+            # 富媒体消息（图片，msg_type=7）不支持 @：按 QQ 官方接口文档，
+            # @ 组件在此类消息中不会被渲染，只会原样显示为 at 标签文本，故不带 @。
+            chain = [Comp.Plain('\n' if not fallback_text else f'\n{fallback_text}\n'), image_comp]
             return event.chain_result(chain)
         except Exception as e:
             logger.error(f'构建图片消息链时发生错误: {e}')
@@ -1504,12 +1505,12 @@ class OverstatsPlugin(Star):
 
     async def _send_multiple_images_result(self, event: AstrMessageEvent, imgs_list: list[bytes], command: str):
         try:
-            user_id = event.get_sender_id()
             valid_images = [img for img in imgs_list if img]
             if not valid_images:
                 yield self._plain_error_result(event, '❌ 未能获取到有效的图片数据')
                 return
-            chain = [Comp.At(qq=user_id), Comp.Plain('\n')]
+            # 同 _build_image_chain：富媒体消息不带 @（不会被渲染，只会显示成标签文本）
+            chain = [Comp.Plain('\n')]
             for img_bytes in valid_images:
                 if self._save_image_locally:
                     img_path = self.temp_image_dir / f'{abs(hash(img_bytes))}_{time.time_ns()}.png'

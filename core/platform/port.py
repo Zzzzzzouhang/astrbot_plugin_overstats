@@ -32,6 +32,8 @@ class PlatformPort(Protocol):
         """按平台处理文本：QQ 官方保留并编码 <qqbot-cmd-input> 标签，其余平台剥离标签。"""
         ...
 
+
+
     async def send_notice(self, event: Any, text: str, *, timeout: float = 15.0) -> None:
         """以「被动回复」方式 @ 发送者发送提示（内部保证不超过 timeout 秒）。"""
         ...

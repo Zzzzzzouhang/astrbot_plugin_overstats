@@ -96,7 +96,11 @@ class AstrBotPlatformAdapter:
         """构造 @发送者 + 提示文本的消息链。
 
         QQ 官方机器人需以 markdown 消息类型发送，方能渲染 **加粗** 与可点击指令标签；
-        其他平台（onebot/QQNT 等）无 markdown 类型，用 Plain 发送（标签已被剥离）。
+        其他平台（onebot/QQNT 等）无 markdown 消息类型，仍用 Plain 发送（标签已被剥离）。
+
+        注意：本方法仅用于「纯文本提示」。按 QQ 官方接口文档，富媒体消息
+        （图片等，msg_type=7）不支持 @，故发送图片时不得使用 @ 组件
+        ——否则会原样显示为 at 标签文本。
         """
         user_id = self.sender_id(event)
         if self.is_qq_official(event) and hasattr(Comp, "Markdown"):
