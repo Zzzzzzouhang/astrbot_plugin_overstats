@@ -31,7 +31,7 @@ _COURT_BTN = '<qqbot-cmd-input text="ow开庭 " show="ow开庭" reference="false
 _COURT_RESULT_BTN = '<qqbot-cmd-input text="ow开庭结果" show="ow开庭结果" reference="false" />'
 
 # 与是区吗共用 _ow_executing，超时时间保持一致
-_OW_EXECUTING_TIMEOUT = 300  # 锁自动释放时间（秒）
+_OW_EXECUTING_TIMEOUT = 400  # 锁自动释放时间（秒）
 
 
 class CourtManager:

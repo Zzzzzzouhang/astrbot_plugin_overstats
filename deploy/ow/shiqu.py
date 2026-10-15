@@ -28,7 +28,7 @@ _SHIQU_LAST_TARGET_KV_PREFIX = "ow_shiqu_last_target"
 _SHIQU_LAST_QUERY_TS_KV_PREFIX = "ow_shiqu_last_query_ts"
 _SHIQU_IMAGE_SENT_KV_PREFIX = "ow_shiqu_image_sent"
 _SHIQU_PENDING_SECONDS = 300  # 5 分钟内再发确认
-_OW_EXECUTING_TIMEOUT = 300  # 锁自动释放时间（秒）
+_OW_EXECUTING_TIMEOUT = 400  # 锁自动释放时间（秒）
 
 # 后端图片接口路径（base_url 已含 /api/v2，故此处不带前缀）
 _SHIQU_IMAGE_ENDPOINT = "/dashen-shiqu/image"

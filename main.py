@@ -169,6 +169,10 @@ class OverstatsPlugin(Star):
     _TIMEOUT_WARN_BEFORE = 290                    # 4分50秒：仍未返回则主动预警
     _IMAGE_CACHE_TTL = 86400                       # 生成图片本地缓存保留时长（24 小时）
     _CONGESTION_WAITING_THRESHOLD = 3              # 排队人数达到此值视为拥堵
+    # 获取图片单次补发上限：单聊每条消息最多回复 4 张、群聊最多 5 张，
+    # 规避 QQ 被动回复次数超限；超出部分仍保留 24 小时，可再次获取图片取回。
+    _GET_IMAGE_MAX_REPLIES_PRIVATE = 4
+    _GET_IMAGE_MAX_REPLIES_GROUP = 5
     _IMAGE_CACHE_INDEX_FILE = "image_cache_index.json"
 
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -2258,8 +2262,16 @@ class OverstatsPlugin(Star):
 💡 图片仅在本地保留 24 小时，超时后自动清理"""
             yield event.plain_result(self._format_markdown_by_platform(event, text))
             return
+        # 单聊每条消息最多回复 4 张、群聊最多 5 张，超出部分仍保留 24 小时可再次获取
+        is_group = self._is_group_message(event)
+        max_replies = self._GET_IMAGE_MAX_REPLIES_GROUP if is_group else self._GET_IMAGE_MAX_REPLIES_PRIVATE
+        total = len(alive)
+        truncated = total > max_replies
+        if truncated:
+            alive = alive[:max_replies]
+        send_hint = "（仅补发最近 {} 张，其余仍保留 24 小时，可再次「获取图片」取回）".format(max_replies) if truncated else ""
         text = f"""🖼️ **正在补发 {len(alive)} 张图片**
-• 来自此前因回复超时未送达的指令
+• 来自此前因回复超时未送达的指令{send_hint}
 💡 本地保留 24 小时"""
         yield event.plain_result(self._format_markdown_by_platform(event, text))
         sent = 0
