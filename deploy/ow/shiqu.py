@@ -311,7 +311,8 @@ class ShiquManager:
         # （单条是区吗在后端放大成数百次 LLM 子请求，必须全局收住，否则拖垮后端）。
         async with self._plugin._shiqu_backend_semaphore:
             img_bytes, error_data, _err_code = await self._plugin._fetch_image(
-                _SHIQU_IMAGE_ENDPOINT, payload, timeout=630, retry=False
+                _SHIQU_IMAGE_ENDPOINT, payload, timeout=630, retry=False,
+                base_url=self._plugin.shiqu_base_url
             )
         if not img_bytes:
             msg = ""
@@ -346,7 +347,8 @@ class ShiquManager:
             yield event.plain_result(f"❌ 没有找到上次的判定书结果，请先用 {_SHIQU_BTN} 生成一份。")
             return
         img_bytes, error_data, _err_code = await self._plugin._fetch_image(
-            _SHIQU_IMAGE_ENDPOINT, {"bnet_id": target_id, "use_db": True}, timeout=900, retry=False
+            _SHIQU_IMAGE_ENDPOINT, {"bnet_id": target_id, "use_db": True}, timeout=900, retry=False,
+            base_url=self._plugin.shiqu_base_url
         )
         if not img_bytes:
             msg = ""
@@ -363,7 +365,7 @@ class ShiquManager:
 
     async def test_connectivity(self):
         """测试后端可达性，返回 (ok, message)。"""
-        base = str(self._plugin.base_url or "")
+        base = str(self._plugin.shiqu_base_url or "")
         health_url = base.rsplit("/api/v2", 1)[0].rstrip("/") + "/healthz"
         try:
             t0 = time.time()

@@ -69,7 +69,12 @@
 | 配置项 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `deploy_mode` | String | `manual` | 后端接入模式：`manual`=独立链接（自行部署后端），`auto`=一键托管（插件自动部署管理）。切换后需重载插件。 |
-| `overstats_api_url` | String | `http://127.0.0.1:18080/api/v2` | Overstats 服务 API 地址（manual 模式使用，auto 模式忽略） |
+| `overstats_api_url` | String | `http://127.0.0.1:18080/api/v2` | Overstats 服务 API 地址（manual 模式使用，auto 模式忽略）。主地址：未开启专属地址分流时所有指令均走此地址 |
+| `overstats_api_url_2` | String | — | 第二个后端地址（manual 模式可选），可用于把「是区吗」分流到独立节点 |
+| `overstats_api_url_3` | String | — | 第三个后端地址（manual 模式可选） |
+| `shiqu_dedicated_address_enabled` | Bool | `false` | 开启后所有「是区吗」指令（含「是区吗结果」）只发往专属地址，其余指令仍走主地址（仅 manual 模式生效） |
+| `shiqu_dedicated_address` | String | `second` | 是区吗专属地址选择：`second`=第二个地址 / `third`=第三个地址 / `main`=主地址 |
+| `backend_concurrency_max` | Int | `32` | 插件侧后端请求并发上限（轻指令直连后端的兜底保护）；0 或负数表示不限制 |
 | `direct_message_handling_enabled` | Bool | `true` | 是否开启直接消息处理（群聊中真实@机器人识别战网ID、单局数字等，私聊直接识别） |
 | `full_adaptation_nickname` | String | — | 全量适配昵称兜底值。@昵称模式下，当群内未通过 `/全量适配开 昵称` 指定昵称、且未能自动探测到机器人昵称时使用。直接匹配模式无需昵称。留空则需先真实@一次机器人以自动获取昵称。 |
 

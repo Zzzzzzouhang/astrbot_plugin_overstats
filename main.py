@@ -115,7 +115,7 @@ except ImportError:  # 插件作为顶层模块加载时
 
 logger = logging.getLogger("astrbot")
 
-@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.9.0")
+@register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.10.0")
 class OverstatsPlugin(Star):
     """Overstats 全指令插件。
 
@@ -233,9 +233,15 @@ class OverstatsPlugin(Star):
         self.daily_prompt_state = self._load_daily_prompt_state()
         self.daily_prompt_reset_task = asyncio.create_task(self._daily_prompt_reset_loop())
         self._http_session: aiohttp.ClientSession | None = None
-        # 后端并发上限与指令全局队列容量保持一致（capacity=5），两层嵌套取 min，故均设为 5
-        self.overstats_semaphore = asyncio.Semaphore(self._cmd_limiter.capacity)
-        self._overstats_inner_semaphore = asyncio.Semaphore(self._cmd_limiter.capacity)
+        # 后端请求并发闸门：与重指令队列容量解耦。轻指令不走全局队列、直连后端，
+        # 若沿用队列容量（global_max=3）会把轻指令一并卡在 3 条，故单独由
+        # backend_concurrency_max 兜底保护后端。
+        self._backend_concurrency_max = self._read_backend_concurrency_max()
+        self.overstats_semaphore = asyncio.Semaphore(self._backend_concurrency_max)
+        self._overstats_inner_semaphore = asyncio.Semaphore(self._backend_concurrency_max)
+        # 轻指令按用户并发计数：轻指令不进全局队列，但仍受 per_user_max 约束，
+        # 故单独按用户记账（判定与自增之间无 await，单线程 asyncio 下天然原子）。
+        self._light_user_running: dict[str, int] = {}
         # 周度总结专属后端并发上限（单条指令会打一次后端，故等价于同时最多 2 条周度总结在跑）
         self._weekly_summary_semaphore = asyncio.Semaphore(2)
         # 是区吗后端并发上限：全局同时最多 2 条「是区吗」查询在打后端图片接口
@@ -672,7 +678,10 @@ class OverstatsPlugin(Star):
           enabled:      总开关。严格布尔解析，`"false"/"0"/"off"/空` 一律视为关闭，
                         避免 `bool("false") == True` 导致限流被意外开启。
           per_user_max: 同一普通用户并发上限（默认 3；0 或负数表示不限制）。
-          global_max:   全局并发容量，同时执行的指令条数上限（默认 5）；
+                        作用于全部业务指令：重指令在队列内受其约束，轻指令不进队列、
+                        但由插件按用户单独记账并同样受此上限约束。
+          global_max:   重指令（是区吗 / 开庭）的全局并发容量上限（默认 3）。
+                        轻指令不走该队列（直连后端、由后端自行调度），不受此值限制；
                         特权（白名单群/人/管理员）不受 per_user_max 约束，但仍受此全局容量约束并插队优先。
         """
         raw = str(self.config.get('cmd_rate_limit', '{}') or '{}').strip()
@@ -692,9 +701,9 @@ class OverstatsPlugin(Star):
             per_user = 3
         self._rate_limit_per_user = max(0, per_user)
         try:
-            global_max = int(cfg.get('global_max', 5))
+            global_max = int(cfg.get('global_max', 3))
         except (TypeError, ValueError):
-            global_max = 5
+            global_max = 3
         self._rate_limit_global_max = max(1, global_max)
         if getattr(self, '_cmd_limiter', None) is not None:
             self._cmd_limiter.update_config(
@@ -702,11 +711,13 @@ class OverstatsPlugin(Star):
                 self._CMD_SLOT_AUTO_RELEASE_SECONDS,
                 capacity=self._rate_limit_global_max,
             )
-            # 后端并发信号量与全局队列容量保持一致：配置热更新时同步重建，
-            # 使「改 capacity 即同时收住指令并发与后端并发」在热重载下也成立。
+            # 后端并发闸门与此处的重指令队列容量解耦：轻指令直连后端、不受 global_max
+            # 约束，只由 backend_concurrency_max 兜底，避免把轻指令一并卡在重指令上限上。
             if hasattr(self, 'overstats_semaphore'):
-                self.overstats_semaphore = asyncio.Semaphore(self._rate_limit_global_max)
-                self._overstats_inner_semaphore = asyncio.Semaphore(self._rate_limit_global_max)
+                n = self._read_backend_concurrency_max()
+                self._backend_concurrency_max = n
+                self.overstats_semaphore = asyncio.Semaphore(n)
+                self._overstats_inner_semaphore = asyncio.Semaphore(n)
         logger.info(
             f'[Overstats] 指令限流配置生效: enabled={self._rate_limit_enabled} '
             f'per_user_max={self._rate_limit_per_user} global_max={self._rate_limit_global_max}'
@@ -771,14 +782,80 @@ class OverstatsPlugin(Star):
         except Exception:
             return False
 
+    # ── 轻指令按用户并发记账（不进全局队列，但仍受 per_user_max 约束）──
+
+    def _try_take_light_user_slot(self, event: AstrMessageEvent) -> bool:
+        """轻指令按用户并发准入：同一用户并发数已达 per_user_max 则拒绝。
+
+        轻指令不进全局队列（无槽位、不排队），但仍受 per_user_max 约束，故在此单独按用户记账。
+        特权用户（白名单 / 管理员 / 限流总开关关闭）不受限；per_user_max<=0 表示不限制。
+        判定与自增之间无 await，单线程 asyncio 下天然原子，无需额外加锁。
+        """
+        self._load_rate_limit_config()
+        if self._is_privileged(event):
+            return True
+        if self._rate_limit_per_user <= 0:
+            return True
+        uk = self._cmd_user_key(event)
+        if uk is None:
+            return True
+        cur = self._light_user_running.get(uk, 0)
+        if cur >= self._rate_limit_per_user:
+            return False
+        self._light_user_running[uk] = cur + 1
+        return True
+
+    def _release_light_user_slot(self, event: AstrMessageEvent) -> None:
+        """释放该用户一个轻指令并发计数（与 _try_take_light_user_slot 配对，放在 finally）。"""
+        uk = self._cmd_user_key(event)
+        if uk is None:
+            return
+        cur = self._light_user_running.get(uk, 0)
+        if cur <= 1:
+            self._light_user_running.pop(uk, None)
+        else:
+            self._light_user_running[uk] = cur - 1
+
+    # ── 后端地址路由（主地址 / 第二、第三地址 / 是区吗专属地址）──
+
+    def _read_backend_concurrency_max(self) -> int:
+        """后端请求并发上限；<=0 表示不限制（用极大值构造信号量，避免 Semaphore(0) 永久阻塞）。"""
+        try:
+            n = int(self.config.get('backend_concurrency_max', 32))
+        except (TypeError, ValueError):
+            n = 32
+        return n if n > 0 else 10 ** 6
+
+    @property
+    def shiqu_base_url(self) -> str:
+        """「是区吗」使用的后端地址。
+
+        开启专属地址分流后指向所选地址（第二 / 第三 / 主），否则与主地址一致。
+        仅 manual（独立链接）模式支持多地址；auto 模式或所选地址留空时自动回退主地址。
+        """
+        if not self._strict_bool(self.config.get('shiqu_dedicated_address_enabled'), False):
+            return self.base_url
+        if getattr(self, 'deploy_manager', None) is not None and self.deploy_manager.is_auto_mode:
+            return self.base_url
+        which = str(self.config.get('shiqu_dedicated_address', 'second') or 'second').strip().lower()
+        if which == 'third':
+            url = str(self.config.get('overstats_api_url_3', '') or '').strip()
+        elif which == 'main':
+            url = ''
+        else:
+            url = str(self.config.get('overstats_api_url_2', '') or '').strip()
+        return url or self.base_url
+
     async def _run_with_cmd_slot(self, event: AstrMessageEvent, coro_factory, *, heavy: bool = False, congestion_hint: bool = False):
         """业务指令并发限流包装器：在 main.py handler 层统一获取/释放全局槽位。
 
         - 仅"需要访问后端且触发 LLM 生成"的业务指令使用本包装；绑定/帮助/管理/测试类指令、
           结果读取类（ow是区吗结果/ow开庭结果，use_db=True 快速读取，不触发 LLM 扇出）以及
           「获取图片」（读本地缓存）均不经过限流。
-        - 所有用户均进入全局真实队列（全局容量 global_max）；
+        - 重指令（heavy=True，是区吗 / 开庭）进入全局真实队列，容量为 global_max（默认 3）；
           特权（白名单群/人/管理员，或限流关闭）插队优先，普通用户排队队尾并额外受 per_user_max 约束。
+        - 轻指令（heavy=False）不进队列：不占槽位、不排队、不做溢出/拥堵拒绝，直接打后端
+          由后端自行调度并发；仅按用户受 per_user_max 约束（见 _try_take_light_user_slot）。
         - 仅「个人并发已满」立即返回拒绝文案；队列等待不拒绝，只 await 直至获得槽位。
         - 槽位覆盖整个生成器生命周期，try/finally 保证任何中断（含 astrbot 取消）都会释放。
         - 超时预警计时起点为「收到用户指令」的时刻（本方法入口，早于排队与后续所有 await），
@@ -808,6 +885,26 @@ class OverstatsPlugin(Star):
             )
         self._mark_cmd_notice_state(event, started_at, done_event)
         try:
+            if not heavy:
+                # 轻指令：不走全局队列——不占槽位、不排队、不做溢出/拥堵拒绝，
+                # 直接打后端、由后端自行调度并发（避免重指令队列成为轻指令的瓶颈）。
+                # 仅保留「同一用户并发不超过 per_user_max」的按用户限流。
+                if not self._try_take_light_user_slot(event):
+                    yield event.plain_result(self._RATE_LIMIT_USER_REJECT_MSG)
+                    if self.monitor:
+                        try:
+                            uid = str(event.get_sender_id())
+                        except Exception:
+                            uid = ''
+                        asyncio.ensure_future(self.monitor.record_rate_limit('cmd', uid))
+                    return
+                try:
+                    async for r in coro_factory():
+                        yield r
+                finally:
+                    self._release_light_user_slot(event)
+                return
+            # ── 以下为重指令（是区吗 / 开庭）的全局队列路径 ──
             privileged = self._is_privileged(event)
             request = SlotRequest.of(self._cmd_user_key(event), privileged=privileged, heavy=heavy)
             # 全局队列快照与阈值（一次读取，供溢出保护 / 重指令暂停 / 高峰排队提示共用）
@@ -1371,13 +1468,14 @@ class OverstatsPlugin(Star):
                'connectionreset', 'connectionrefused', 'remotedisconnected', 'econnreset', 'econnrefused')
         return any(k in text for k in _kw)
 
-    async def _fetch_image(self, endpoint: str, payload: dict=None, timeout: int=600, retry: bool=True) -> tuple[bytes | None, dict | None, str]:
+    async def _fetch_image(self, endpoint: str, payload: dict=None, timeout: int=600, retry: bool=True, base_url: str | None=None) -> tuple[bytes | None, dict | None, str]:
         """请求后端图片接口。
 
         retry=True（默认）：遇到 5xx/internal_error 等瞬时错误 10 秒后自动重试 1 次（共 2 次尝试）；
         retry=False：只尝试 1 次，失败直接返回（是区吗/开庭等 AI 生成类功能使用，避免重复高成本生成）。
+        base_url：覆盖默认主地址（用于「是区吗」分流到专属后端节点）；留空则走主地址 self.base_url。
         """
-        url = f'{self.base_url}{endpoint}'
+        url = f'{base_url or self.base_url}{endpoint}'
         payload = payload or {}
         async with self.overstats_semaphore:
             async with self._overstats_inner_semaphore:

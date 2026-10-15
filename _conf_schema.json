@@ -10,9 +10,40 @@
   "overstats_api_url": {
     "description": "Overstats API 地址（manual 模式使用）",
     "type": "string",
-    "hint": "独立链接模式下填写，例如：http://127.0.0.1:18080/api/v2。auto 模式下此项忽略，将自动使用本地托管地址。",
+    "hint": "独立链接模式下填写，例如：http://127.0.0.1:18080/api/v2。auto 模式下此项忽略，将自动使用本地托管地址。主地址：未开启专属地址分流时，所有指令均走此地址。",
     "obvious_hint": true,
     "default": "http://127.0.0.1:18080/api/v2"
+  },
+  "overstats_api_url_2": {
+    "description": "Overstats API 地址 2（manual 模式可选）",
+    "type": "string",
+    "hint": "独立链接模式下的第二个后端地址，例如：http://127.0.0.1:18081/api/v2。留空表示未配置。可用于把「是区吗」等高成本指令分流到独立后端节点。",
+    "default": ""
+  },
+  "overstats_api_url_3": {
+    "description": "Overstats API 地址 3（manual 模式可选）",
+    "type": "string",
+    "hint": "独立链接模式下的第三个后端地址，例如：http://127.0.0.1:18082/api/v2。留空表示未配置。",
+    "default": ""
+  },
+  "shiqu_dedicated_address_enabled": {
+    "description": "是区吗走专属后端地址",
+    "type": "bool",
+    "hint": "开启后，所有「是区吗」指令（含「是区吗结果」取图）只发往下方指定的专属地址，其余指令仍走主地址。用于把高成本的 AI 判定隔离到独立后端节点，避免拖慢其他功能。仅 manual（独立链接）模式生效。",
+    "default": false
+  },
+  "shiqu_dedicated_address": {
+    "description": "是区吗专属地址选择",
+    "type": "string",
+    "hint": "指定「是区吗」发往哪个地址：second=第二个地址，third=第三个地址，main=主地址。仅当上方开关开启时生效；所选地址留空则自动回退主地址。",
+    "default": "second",
+    "options": ["second", "third", "main"]
+  },
+  "backend_concurrency_max": {
+    "description": "后端请求并发上限",
+    "type": "int",
+    "hint": "插件侧同时向后端发起的图片请求并发上限（兜底保护后端不被瞬时打满）。轻指令不走队列、直连后端，由此值兜底；重指令另受「全局并发容量」约束。默认 32，填 0 或负数表示不限制。",
+    "default": 32
   },
   "direct_message_handling_enabled": {
     "description": "直接消息处理",
