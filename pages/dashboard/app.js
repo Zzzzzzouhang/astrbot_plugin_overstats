@@ -576,9 +576,12 @@ async function openShiquDetail(id, mode) {
       if (copyBtn) copyBtn.style.display = "";
       if (body) body.innerHTML = renderShiquPromptHTML(rec.prompt);
     } else {
-      // raw_response 为后端 LLM 原始文本：短键 + 可能被截断/拼接，
-      // 故用与后端同口径的健壮解析 + 短键→长键归一化后再渲染。
-      const parsed = _shiquNormalizeKeys(_shiquParseRaw(rec.raw_response));
+      // 优先用后端落库的归一化结果（normalized_json）：已含本地补全的英雄/胜负/好友名/
+      // 同场次数等字段，渲染与判定书图片完全一致；旧记录无该字段时回退解析 raw_response。
+      const srcText = (rec.normalized_json && String(rec.normalized_json).trim())
+        ? rec.normalized_json
+        : (rec.raw_response || "");
+      const parsed = _shiquNormalizeKeys(_shiquParseRaw(srcText));
       if (parsed) {
         if (body) body.innerHTML = renderShiquAnalysisHTML(parsed);
       } else {

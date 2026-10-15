@@ -170,11 +170,24 @@ class ShiquSqliteReader:
             logger.warning(f"[ShiquSqlite] 无法打开 {dbp}: {e}")
             return None
         try:
-            row = conn.execute(
-                f"SELECT id, target_id, ok, prompt, raw_response, duration_ms, call_count, created_at "
-                f"FROM {_TABLE} WHERE id = ?",
-                (int(record_id),),
-            ).fetchone()
+            # 优先读取 normalized_json（后端已把英雄/胜负/好友名/同场次数等本地补全字段写入）；
+            # 旧表无该列时降级到仅读原始字段，由调用方回退解析 raw_response。
+            try:
+                row = conn.execute(
+                    f"SELECT id, target_id, ok, prompt, raw_response, normalized_json, "
+                    f"duration_ms, call_count, created_at "
+                    f"FROM {_TABLE} WHERE id = ?",
+                    (int(record_id),),
+                ).fetchone()
+                has_norm = True
+            except sqlite3.OperationalError:
+                row = conn.execute(
+                    f"SELECT id, target_id, ok, prompt, raw_response, "
+                    f"duration_ms, call_count, created_at "
+                    f"FROM {_TABLE} WHERE id = ?",
+                    (int(record_id),),
+                ).fetchone()
+                has_norm = False
             if not row:
                 return None
             return {
@@ -183,9 +196,10 @@ class ShiquSqliteReader:
                 "ok": bool(row[2]),
                 "prompt": row[3] or "",
                 "raw_response": row[4] or "",
-                "duration_ms": row[5],
-                "call_count": row[6],
-                "created_at": row[7],
+                "normalized_json": (row[5] if has_norm else "") or "",
+                "duration_ms": row[6 if has_norm else 5],
+                "call_count": row[7 if has_norm else 6],
+                "created_at": row[8 if has_norm else 7],
             }
         except Exception as e:
             logger.warning(f"[ShiquSqlite] 单条查询失败: {e}")
