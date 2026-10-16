@@ -40,12 +40,14 @@ try:
         GET_IMAGE_TAG,
         ImageCacheEntry,
         QueueThresholds,
+        RejectReason,
         ReplyWindow,
         SlotRequest,
         build_cmd_tag,
         decide_queue_notice,
         extract_bnet_id,
         is_alive,
+        most_recent,
         should_pause_heavy,
         should_reject_overflow,
         should_skip_status_prompt,
@@ -57,12 +59,14 @@ except ImportError:  # 插件作为顶层模块加载时
         GET_IMAGE_TAG,
         ImageCacheEntry,
         QueueThresholds,
+        RejectReason,
         ReplyWindow,
         SlotRequest,
         build_cmd_tag,
         decide_queue_notice,
         extract_bnet_id,
         is_alive,
+        most_recent,
         should_pause_heavy,
         should_reject_overflow,
         should_skip_status_prompt,
@@ -132,6 +136,9 @@ class OverstatsPlugin(Star):
     _GROUP_CONFIG_KV_KEY = "group_feature_config"
     _MAINTENANCE_KV_KEY = "maintenance_state"
     _RATE_LIMIT_USER_REJECT_MSG = '⏳ 你已有指令正在执行，请等待其返回结果后再发起新的指令'
+    # 重指令（是区吗 / 开庭）拥堵自动暂停文案：全局排队等待数 > 阈值（默认 10）时，
+    # 新请求在 acquire() 锁内被精确拒绝、直接返回本文案，不再入队；队列回落到阈值以下自动恢复。
+    _HEAVY_PAUSED_MSG = '⚠️ 当前用的人较多，服务自动暂停，稍后再试。'
     # 运行槽位兜底回收阈值（秒）：任何槽位占用超过该时长即视为异常，由 _slot_reclaim_loop
     # 周期调用 expire_all() 回收。回收是幂等的——对应指令日后真正结束时其 release 只抵扣、
     # 不重复递减，因此不会让并发计数永久偏低。
@@ -179,9 +186,13 @@ class OverstatsPlugin(Star):
         super().__init__(context)
         self.config = config
         self.file_lock = asyncio.Lock()
+        # 内存缓存：binds / violation_bans 原为每条指令持 file_lock 同步读盘（高峰期全局串行 + 阻塞事件循环），
+        # 现改为惰性加载一次后常驻内存，读路径零 IO 零锁；写路径更新内存并落盘（见 _binds_cache_get_all 等）。
+        self._binds_mem: dict | None = None
+        self._violation_bans_mem: dict | None = None
         # 排队相关阈值（供 domain 策略使用，集中一处避免多处真相）
         # 是区吗拥堵提示/暂停阈值：全局队列等待数 > 此值时向「是区吗」发送者追加拥堵提示
-        self._shiqu_congestion_threshold = 10
+        self._shiqu_congestion_threshold = 8
         # 全局队列溢出硬上限：整体排队等待数 >= 此值时，直接拒绝后续普通指令
         self._cmd_queue_overflow_threshold = 50
         # 排队服务（service 层）：内部委托 domain 的准入策略，对外保持旧 API
@@ -850,6 +861,24 @@ class OverstatsPlugin(Star):
             url = str(self.config.get('overstats_api_url_2', '') or '').strip()
         return url or self.base_url
 
+    def _heavy_paused_text(self, waiting: int) -> str:
+        """重指令拥堵暂停文案：基础提示 + 当前排队人数 + 按每人约 4 分钟预估的等待耗时。
+
+        waiting 为全局队列当前等待人数；eta = waiting * _HEAVY_PAUSED_PER_PERSON_MINUTES，
+        超过 1 小时按「X 小时 Y 分」展示，否则按「X 分钟」。
+        """
+        try:
+            waiting = max(0, int(waiting))
+        except (TypeError, ValueError):
+            waiting = 0
+        eta_min = waiting * self._HEAVY_PAUSED_PER_PERSON_MINUTES
+        if eta_min >= 60:
+            h, m = divmod(eta_min, 60)
+            eta = f'{h} 小时 {m} 分' if m else f'{h} 小时'
+        else:
+            eta = f'{eta_min} 分钟'
+        return f'{self._HEAVY_PAUSED_MSG}当前排队约 {waiting} 人，预计还需约 {eta}。'
+
     async def _run_with_cmd_slot(self, event: AstrMessageEvent, coro_factory, *, heavy: bool = False, congestion_hint: bool = False):
         """业务指令并发限流包装器：在 main.py handler 层统一获取/释放全局槽位。
 
@@ -921,20 +950,16 @@ class OverstatsPlugin(Star):
                     f"⚠️ 当前使用人数过多（队列＞{thresholds.overflow}），请稍后再试。"
                 )
                 return
-            # 重指令（是区吗 / 开庭）拥堵自动暂停（domain 策略）：等待数 > 阈值（默认 10）时，
+            # 重指令（是区吗 / 开庭）拥堵自动暂停：全局排队等待数 > 阈值（默认 10）时，
             # 直接暂停该重指令并返回，不再入队等待——避免重指令在拥堵时持续挤占后端、拖垮全部用户。
             # 等待数 > 5（heavy_deprio）时已由优先级队列让「轻普通」插队到「重普通」前面；
-            # 这里进一步在 > 10 时直接把「重普通」抛出。管理员 / 白名单（privileged）不受限。
+            # 这里进一步在等待数 > 阈值（默认 8）时直接把「重普通」抛出。管理员 / 白名单（privileged）不受限。
             # 队列回落到阈值以下后，普通用户新请求自动恢复正常（无需手动恢复）。
+            # 此处为「快照式早停」：等待数已明显超阈值时直接返回，省去后续提示任务调度；
+            # 权威判定在 acquire() 锁内（should_pause_heavy_at，实时计数），用于兜住并发超额——
+            # 快照读到 ≈阈值、到真正入队前计数又被推高的请求，会在 acquire 处被精确拒绝（见下方 SlotRejected 分支）。
             if should_pause_heavy(snapshot, request, thresholds):
-                if congestion_hint:
-                    yield event.plain_result(
-                        "⚠️ 当前同时使用的人过多，系统已自动暂停「是区吗」功能，请稍后再试。"
-                    )
-                else:
-                    yield event.plain_result(
-                        "⚠️ 当前同时使用的人过多，系统已自动暂停「开庭」功能，请稍后再试。"
-                    )
+                yield event.plain_result(self._heavy_paused_text(snapshot.waiting))
                 return
             # 高峰排队前置提示（domain 决策）：指令无法立即获得槽位（等待队列非空，或运行槽位已满——
             # 本指令入队后必然要等）时，不等 4:50 超时预警，入队前即向群内推送「排队中」提示
@@ -959,13 +984,18 @@ class OverstatsPlugin(Star):
             ticket = None
             try:
                 ticket = await self._try_acquire_cmd_slot(event, privileged=privileged, heavy=heavy)
-            except SlotRejected:
-                # acquire 是被立即拒绝（个人并发已满的竞态）时，提示任务往往还没被事件循环调度
-                # （同一 tick 内锁的快速路径不挂起、直接抛出），此时取消它即可，避免用户同时收到
-                # 「正在排队中…请稍后点 获取图片」与「你已有指令正在执行」两条互相矛盾的指引；
-                # 若提示已发出则不回收（已送达的消息无法撤回），取消亦不影响它。
+            except SlotRejected as rej:
+                # acquire 被立即拒绝：提示任务往往还没被事件循环调度（同一 tick 内锁的快速路径
+                # 不挂起、直接抛出），此时取消它即可，避免用户同时收到「正在排队中…请稍后点 获取图片」
+                # 与拒绝文案两条互相矛盾的指引；若提示已发出则不回收（已送达的消息无法撤回）。
                 if notice_task is not None and not notice_task.done():
                     notice_task.cancel()
+                if getattr(rej, 'reason', None) == RejectReason.HEAVY_PAUSED:
+                    # 锁内精确判定：排队已超阈值，直接暂停（与上方快照早停同一文案）。
+                    # 这是兜住「超过阈值」上限的权威路径——快照读到 ≈阈值、入队前计数又被
+                    # 并发请求推高的请求，会在这里被精确抛掉，队列不会无限冲到远高于阈值。
+                    yield event.plain_result(self._heavy_paused_text(self._cmd_limiter.snapshot().waiting))
+                    return
                 yield event.plain_result(self._RATE_LIMIT_USER_REJECT_MSG)
                 try:
                     uid = str(event.get_sender_id())
@@ -1096,18 +1126,28 @@ class OverstatsPlugin(Star):
         return self.plugin_data_dir / self._VIOLATION_BAN_FILE
 
     def _load_violation_bans(self) -> dict:
-        """加载违规封禁记录 JSON，结构 { "平台:ID|指令名": 封禁时间戳 }。"""
+        """加载违规封禁记录 JSON，结构 { "平台:ID|指令名": 封禁时间戳 }。
+
+        带内存缓存：首次从磁盘惰性加载后常驻内存，避免每条指令入口（_check_violation_ban）
+        都同步 read_text + json.loads 阻塞事件循环；写路径经 _save_violation_bans 同步刷新。
+        """
+        mem = self._violation_bans_mem
+        if mem is not None:
+            return mem
         path = self._violation_ban_path()
         if not path.exists():
-            return {}
+            self._violation_bans_mem = {}
+            return self._violation_bans_mem
         try:
             data = json.loads(path.read_text(encoding='utf-8'))
-            return data if isinstance(data, dict) else {}
+            self._violation_bans_mem = data if isinstance(data, dict) else {}
         except Exception:
-            return {}
+            self._violation_bans_mem = {}
+        return self._violation_bans_mem
 
     def _save_violation_bans(self, bans: dict) -> None:
-        """原子写入 JSON。"""
+        """原子写入 JSON，并刷新内存缓存保持「内存即权威」。"""
+        self._violation_bans_mem = bans
         path = self._violation_ban_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f'{path.name}.tmp')
@@ -1570,15 +1610,16 @@ class OverstatsPlugin(Star):
         except asyncio.CancelledError:
             pass
 
-    def _build_image_chain(self, event: AstrMessageEvent, img_bytes: bytes, fallback_text: str='', command: str=''):
-        """构建图片消息链（同步，不含违规检测）。"""
+    async def _build_image_chain(self, event: AstrMessageEvent, img_bytes: bytes, fallback_text: str='', command: str=''):
+        """构建图片消息链（不含违规检测）。落盘改走 executor，避免同步 write_bytes 阻塞事件循环。"""
         if not img_bytes:
             return self._plain_error_result(event, fallback_text or '❌ 图片生成失败')
         try:
             if self._save_image_locally:
                 img_hash = abs(hash(img_bytes))
                 img_path = self.temp_image_dir / f'{img_hash}.png'
-                img_path.write_bytes(img_bytes)
+                # 图片可达数 MB，同步写在高峰期会阻塞事件循环；挪到默认 executor（IO 密集型，释放 GIL）
+                await asyncio.get_running_loop().run_in_executor(None, img_path.write_bytes, img_bytes)
                 self._record_image_cache_sync(self._user_key(event), str(img_path), command)
                 image_comp = Comp.Image.fromFileSystem(str(img_path))
             else:
@@ -1593,12 +1634,33 @@ class OverstatsPlugin(Star):
 
     async def _send_image_result(self, event: AstrMessageEvent, img_bytes: bytes, command: str, fallback_text: str=''):
         """发送单张图片，自动捕获违规异常并封禁该指令。"""
-        result = self._build_image_chain(event, img_bytes, fallback_text, command)
+        result = await self._build_image_chain(event, img_bytes, fallback_text, command)
         try:
             yield result
         except Exception as exc:
             err_msg = str(exc)
             logger.error(f'发送图片消息失败[{command}]: {err_msg}')
+            if '违规' in err_msg or 'violation' in err_msg.lower():
+                await self._set_violation_ban(event, command)
+                yield event.plain_result(self._VIOLATION_BAN_MSG.format(command=command, remain='12小时'))
+            else:
+                yield event.plain_result('❌ 发送图片失败，请稍后重试。')
+
+    async def _send_cached_image_result(self, event: AstrMessageEvent, path: str, command: str):
+        """补发「获取图片」：直接复用本地已缓存文件发送，只读不发写。
+
+        区别于 _send_image_result（面向新生成图片，会经 _build_image_chain 落盘并登记缓存索引）：
+        补发的图片早已落盘并登记，此处只读文件发送，避免把同一图片反复 write_bytes + record，
+        防止索引被重复追加、占满每用户配额（见 domain/image_cache.append_entry 不去重）。
+        调用方需确保 path 指向真实文件（发送前已做存在性校验）。
+        """
+        try:
+            # 富媒体消息（图片，msg_type=7）不支持 @，故不带 @（同 _build_image_chain）。
+            chain = [Comp.Plain('\n'), Comp.Image.fromFileSystem(str(path))]
+            yield event.chain_result(chain)
+        except Exception as exc:
+            err_msg = str(exc)
+            logger.error(f'发送缓存图片失败[{command}]: {err_msg}')
             if '违规' in err_msg or 'violation' in err_msg.lower():
                 await self._set_violation_ban(event, command)
                 yield event.plain_result(self._VIOLATION_BAN_MSG.format(command=command, remain='12小时'))
@@ -1613,10 +1675,12 @@ class OverstatsPlugin(Star):
                 return
             # 同 _build_image_chain：富媒体消息不带 @（不会被渲染，只会显示成标签文本）
             chain = [Comp.Plain('\n')]
+            loop = asyncio.get_running_loop()
             for img_bytes in valid_images:
                 if self._save_image_locally:
                     img_path = self.temp_image_dir / f'{abs(hash(img_bytes))}_{time.time_ns()}.png'
-                    img_path.write_bytes(img_bytes)
+                    # 同 _build_image_chain：落盘走 executor，避免同步写阻塞事件循环
+                    await loop.run_in_executor(None, img_path.write_bytes, img_bytes)
                     self._record_image_cache_sync(self._user_key(event), str(img_path), command)
                     chain.append(Comp.Image.fromFileSystem(str(img_path)))
                 else:
@@ -1827,7 +1891,25 @@ class OverstatsPlugin(Star):
             logger.error(f'读取绑定明文文件失败: {e}')
         return {}
 
+    def _binds_cache_get_all(self) -> dict:
+        """绑定表内存缓存：首次从磁盘惰性加载，之后常驻内存；写路径经 _save_binds 同步刷新。
+
+        读路径（_get_user_bind_id）直接走此字典，不再每条指令持 file_lock 同步读盘——
+        消除高峰期全局锁串行与事件循环阻塞（CPython 下 dict.get 原子，读无需加锁）。
+        """
+        mem = self._binds_mem
+        if mem is None:
+            loaded = self._load_binds()
+            # 仅当仍为 None 时才落地，避免首次「并发读 + 并发写」互相覆盖
+            # （后者可能已含刚写入的绑定，被前者的旧快照覆盖会短暂丢失该绑定）。
+            if self._binds_mem is None:
+                self._binds_mem = loaded
+            mem = self._binds_mem
+        return mem
+
     def _save_binds(self, data: dict):
+        # 落盘同时刷新内存缓存，保持「内存即权威、磁盘为持久化」
+        self._binds_mem = data
         try:
             file_path = self._get_binds_file_path()
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -1836,25 +1918,27 @@ class OverstatsPlugin(Star):
             logger.error(f'保存绑定明文文件失败: {e}')
 
     async def _get_user_bind_id(self, user_id: str) -> str | None:
-        async with self.file_lock:
-            binds = self._load_binds()
-            user_key = str(user_id)
-            if user_key in binds:
-                return binds[user_key]
-            try:
-                old_kv_key = f'bind_{user_id}'
-                old_bnet_id = await self.get_kv_data(old_kv_key, None)
-                if old_bnet_id:
+        user_key = str(user_id)
+        binds = self._binds_cache_get_all()
+        cached = binds.get(user_key)
+        if cached is not None:
+            return cached
+        # 内存未命中：兼容旧 KV 存储，仅查一次；命中后迁入内存缓存并落盘
+        try:
+            old_kv_key = f'bind_{user_id}'
+            old_bnet_id = await self.get_kv_data(old_kv_key, None)
+            if old_bnet_id:
+                async with self.file_lock:
                     binds[user_key] = str(old_bnet_id)
                     self._save_binds(binds)
-                    return old_bnet_id
-            except Exception as e:
-                logger.error(f'迁移数据失败: {e}')
-            return None
+                return str(old_bnet_id)
+        except Exception as e:
+            logger.error(f'迁移数据失败: {e}')
+        return None
 
     async def _set_user_bind_id(self, user_id: str, bnet_id: str):
         async with self.file_lock:
-            binds = self._load_binds()
+            binds = self._binds_cache_get_all()
             binds[str(user_id)] = bnet_id
             self._save_binds(binds)
         # 绑定变更后立即使提示服务的战网 ID 缓存失效，避免使用旧 ID 生成提示文案
@@ -2241,22 +2325,13 @@ class OverstatsPlugin(Star):
 
         群聊回复 msg_id 过期会导致图片投递失败，但图片已在本地生成并缓存；用户稍后 @机器人
         发送「获取图片」可一次性取回此前因超时未送达的全部图片（可能来自多条不同指令）。
+        补发只读已存文件（_send_cached_image_result），不重复落盘、不重复登记索引，
+        故不会因反复补发把同一图片追加进索引、占满每用户配额。
         """
         user_key = self._user_key(event)
-        # 先剔除「索引仍在但文件已被清理」的条目，避免回复的图片数量与实际发出的张数不符
+        # list_alive 已按「保留期内 + 文件真实存在」过滤；这里直接取，无需在同一时刻再 stat 一遍
         cached = self._get_user_all_images(user_key)
-        alive: list[tuple[dict, Path]] = []
-        for entry in cached:
-            try:
-                p = Path(entry.get('path', ''))
-                if p.is_file():
-                    alive.append((entry, p))
-            except Exception:
-                continue
-        if len(alive) < len(cached):
-            # 顺手清理已失效（文件缺失 / path 畸形）的索引条目
-            self._prune_user_cache(user_key)
-        if not alive:
+        if not cached:
             text = """🖼️ **获取图片**
 • 暂无可获取的图片
 💡 图片仅在本地保留 24 小时，超时后自动清理"""
@@ -2265,28 +2340,31 @@ class OverstatsPlugin(Star):
         # 单聊每条消息最多回复 4 张、群聊最多 5 张，超出部分仍保留 24 小时可再次获取
         is_group = self._is_group_message(event)
         max_replies = self._GET_IMAGE_MAX_REPLIES_GROUP if is_group else self._GET_IMAGE_MAX_REPLIES_PRIVATE
-        total = len(alive)
-        truncated = total > max_replies
-        if truncated:
-            alive = alive[:max_replies]
+        # cached 按生成时间升序（旧→新）：取最近 max_replies 张（末尾），其余保留可再次取回
+        truncated = len(cached) > max_replies
+        to_send = most_recent(cached, max_replies)
         send_hint = "（仅补发最近 {} 张，其余仍保留 24 小时，可再次「获取图片」取回）".format(max_replies) if truncated else ""
-        text = f"""🖼️ **正在补发 {len(alive)} 张图片**
+        text = f"""🖼️ **正在补发 {len(to_send)} 张图片**
 • 来自此前因回复超时未送达的指令{send_hint}
 💡 本地保留 24 小时"""
         yield event.plain_result(self._format_markdown_by_platform(event, text))
         sent = 0
-        for entry, path in alive:
-            try:
-                img_bytes = path.read_bytes()
-            except Exception as e:
-                logger.error(f'读取缓存图片失败: {e}')
+        vanished = 0
+        for entry in to_send:
+            path = str(entry.get('path', '') or '')
+            # 发送前（已过「正在补发」文案的发送 await）再确认文件仍在，规避 TOCTOU；
+            # 与 list_alive 的校验处于不同时间点，非同刻重复 stat。
+            if not path or not Path(path).is_file():
+                vanished += 1
                 continue
-            async for r in self._send_image_result(event, img_bytes, entry.get('command') or '获取图片'):
+            async for r in self._send_cached_image_result(event, path, entry.get('command') or '获取图片'):
                 yield r
             sent += 1
-        if sent == 0:
-            # 补发途中文件被清理（读取全部失败）时的兜底：提示并清理失效索引
+        if vanished or sent == 0:
+            # 顺手清理已失效（文件缺失 / path 畸形）的索引条目
             self._prune_user_cache(user_key)
+        if sent == 0:
+            # 兜底：list_alive 之后文件被全部清理时的提示
             text = """🖼️ **获取图片**
 • 缓存图片均已过期或读取失败
 💡 图片仅在本地保留 24 小时"""

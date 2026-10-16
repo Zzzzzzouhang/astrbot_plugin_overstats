@@ -40,7 +40,16 @@ def should_reject_overflow(snapshot: QueueSnapshot, request: SlotRequest, thresh
 
 def should_pause_heavy(snapshot: QueueSnapshot, request: SlotRequest, thresholds: QueueThresholds) -> bool:
     """拥堵时重指令（是区吗 / 开庭）自动暂停：等待数 > 阈值即直接返回，不再入队。"""
-    return request.heavy and not request.privileged and snapshot.waiting > thresholds.heavy_pause
+    return should_pause_heavy_at(snapshot.waiting, request, thresholds)
+
+
+def should_pause_heavy_at(waiting: int, request: SlotRequest, thresholds: QueueThresholds) -> bool:
+    """锁内精确版：直接以等待数判定，供 acquire() 持锁入队前调用。
+
+    与 should_pause_heavy 等价，但入参是整数而非快照——避免 handler 顶部读一次快照、
+    到真正入队前计数已被并发请求推高的「超额」问题（高峰期快照式判定会让队列冲到远高于阈值）。
+    """
+    return request.heavy and not request.privileged and waiting > thresholds.heavy_pause
 
 
 def decide_admission(

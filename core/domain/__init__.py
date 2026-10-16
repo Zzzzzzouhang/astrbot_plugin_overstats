@@ -15,6 +15,7 @@ from .image_cache import (
     coerce_entry,
     filter_alive,
     is_alive,
+    most_recent,
 )
 from .notice import NoticeDecision, ReplyWindow, decide_queue_notice, decide_timeout_warning, should_skip_status_prompt
 from .notice_text import (
@@ -30,6 +31,7 @@ from .queue_policy import (
     QueueThresholds,
     decide_admission,
     should_pause_heavy,
+    should_pause_heavy_at,
     should_reject_overflow,
 )
 from .queue_snapshot import QueueSnapshot
@@ -42,7 +44,7 @@ __all__ = [
     "SlotRequest", "SlotTicket", "SlotRejected",
     # snapshot / policy
     "QueueSnapshot", "QueueThresholds", "AdmissionDecision",
-    "decide_admission", "should_reject_overflow", "should_pause_heavy",
+    "decide_admission", "should_reject_overflow", "should_pause_heavy", "should_pause_heavy_at",
     # notice
     "ReplyWindow", "NoticeDecision",
     "decide_queue_notice", "decide_timeout_warning", "should_skip_status_prompt",
@@ -50,5 +52,5 @@ __all__ = [
     "command_label", "extract_bnet_id",
     # image cache
     "DEFAULT_TTL", "MAX_PER_USER", "ImageCacheEntry",
-    "append_entry", "coerce_entry", "filter_alive", "is_alive",
+    "append_entry", "coerce_entry", "filter_alive", "is_alive", "most_recent",
 ]

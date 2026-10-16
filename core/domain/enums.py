@@ -32,6 +32,7 @@ class RejectReason(str, Enum):
     PER_USER_FULL = "per_user_full"      # 该用户个人并发已达上限
     QUEUE_TIMEOUT = "queue_timeout"      # 排队等待超时（防永久挂起）
     CLEARED = "cleared"                  # 队列被清空（每日重置 / 重启）
+    HEAVY_PAUSED = "heavy_paused"        # 重指令拥堵自动暂停（acquire 锁内精确判定：等待数 > 阈值）
 
     # 注：队列溢出（等待数达硬上限）不入此枚举——该场景由 handler 直接返回文案，
     # 不抛异常，避免与「个人并发已满」的拒绝语义混淆。

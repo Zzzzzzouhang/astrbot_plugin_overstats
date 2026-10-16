@@ -26,6 +26,7 @@ from ..domain.queue_policy import (
     QueueThresholds,
     decide_admission,
     should_pause_heavy,
+    should_pause_heavy_at,
     should_reject_overflow,
 )
 from ..domain.queue_snapshot import QueueSnapshot
@@ -171,6 +172,11 @@ class CommandQueueService:
                     raise SlotRejected(decision.reason)
                 if decision.outcome is SlotOutcome.ADMIT:
                     return self._occupy_locked(request)
+                # 入队前锁内精确判定重指令拥堵暂停：等待数已 > 阈值则直接拒绝、不再入队。
+                # 在锁内以实时计数判定，避免 handler 快照式判定在并发下的「超额」
+                # （高峰期多个请求同一时刻都读到 ≈阈值而全部入队，队列冲到远高于阈值）。
+                if should_pause_heavy_at(self._priv_count + self._norm_count, request, self._thresholds):
+                    raise SlotRejected(RejectReason.HEAVY_PAUSED)
                 fut = self._enqueue_locked(self._norm_wait, "norm", request)
 
         # 锁外 await，避免阻塞其他协程。

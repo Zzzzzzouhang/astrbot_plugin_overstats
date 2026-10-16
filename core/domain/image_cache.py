@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, Iterable, List, Optional, TypeVar
+
+T = TypeVar("T")
 
 DEFAULT_TTL = 86400.0     # 图片本地缓存保留时长（24 小时）
 MAX_PER_USER = 5          # 单用户最多保留张数
@@ -81,3 +83,14 @@ def coerce_entry(data: object) -> Optional[ImageCacheEntry]:
     if not path:
         return None
     return ImageCacheEntry.from_dict(data)
+
+
+def most_recent(items: List[T], n: int) -> List[T]:
+    """按「生成时间升序」（旧→新）的列表中取最近 n 条（末尾 n 条）；n<=0 返回空。
+
+    供「获取图片」补发使用：只发送最近 n 张、其余保留可再次取回。锁定「取最新」方向，
+    避免误用 items[:n] 取到最旧的 n 张（旧图往往用户已看过，真正想取回的是刚超时的那几张）。
+    """
+    if n <= 0:
+        return []
+    return list(items)[-n:]
