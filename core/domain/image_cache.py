@@ -18,7 +18,16 @@ MAX_PER_USER = 5          # 单用户最多保留张数
 def _default_exists(path: str) -> bool:
     from pathlib import Path
 
-    return bool(path) and Path(path).is_file()
+    if not path:
+        return False
+    cached = Path(path)
+    # 同时要求「是文件」且「非空」：0 字节残留文件（历史写入中断 / 并发覆盖
+    # 竞态的产物）若被当成有效缓存补发，上传 QQ 富媒体接口会返回 None，
+    # 触发 AstrBot 5 次×30s 重试风暴，故在存活判定源头直接排除。
+    try:
+        return cached.is_file() and cached.stat().st_size > 0
+    except OSError:
+        return False
 
 
 @dataclass(frozen=True)

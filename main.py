@@ -5,7 +5,9 @@ import tempfile
 import asyncio
 import re
 import base64
+import hashlib
 import json
+import threading
 import time
 import inspect
 from datetime import datetime, timedelta, time as dt_time
@@ -118,6 +120,32 @@ except ImportError:  # 插件作为顶层模块加载时
     from features import config as features_config  # type: ignore[no-redef]
 
 logger = logging.getLogger("astrbot")
+
+# QQ 富媒体图片上传前的数据校验：只放行真实图片字节。
+# 背景：曾出现后端 200 + 空 body / 200 + JSON 错误体被当作 .png 写入并上传 QQ，
+# 富媒体上传接口返回 None，触发 AstrBot 5 次×30s 重试，长时间占用事件循环。
+_IMAGE_MAGIC_PREFIXES = (
+    b'\x89PNG\r\n\x1a\n',   # PNG
+    b'\xff\xd8\xff',        # JPEG
+    b'GIF87a',              # GIF
+    b'GIF89a',              # GIF
+    b'BM',                  # BMP
+    b'RIFF',                # WebP 容器（另校验 WEBP 标记）
+)
+_IMAGE_MAX_BYTES = 20 * 1024 * 1024  # QQ 富媒体图片软限制 20MB，超过会被降级为文件卡片
+
+
+def _validate_image_bytes(body: bytes) -> str:
+    """校验 bytes 是否为可上传 QQ 的图片数据；返回空字符串表示通过，否则为原因。"""
+    if not body:
+        return '空响应体'
+    if body[:4] == b'RIFF' and body[8:12] != b'WEBP':
+        return 'RIFF 容器但非 WebP'
+    if not any(body.startswith(p) for p in _IMAGE_MAGIC_PREFIXES):
+        return f'非图片格式数据(前16字节: {body[:16]!r})'
+    if len(body) > _IMAGE_MAX_BYTES:
+        return f'图片超过 20MB 软限制，QQ 会降级为文件卡片'
+    return ''
 
 @register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.10.0")
 class OverstatsPlugin(Star):
@@ -1530,10 +1558,24 @@ class OverstatsPlugin(Star):
                         req_timeout = aiohttp.ClientTimeout(total=timeout) if timeout != 600 else None
                         async with session.post(url, json=payload, timeout=req_timeout) as resp:
                             if resp.status == 200:
+                                body = await resp.read()
                                 if self.monitor:
                                     elapsed = int((time.time() - start_ts) * 1000)
                                     asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
-                                return (await resp.read(), None, '')
+                                # 200 不代表一定是图片：空 body / JSON 错误体一律按错误处理，
+                                # 避免把无效数据当 .png 上传 QQ（富媒体上传返回 None → 重试风暴）。
+                                invalid_reason = _validate_image_bytes(body)
+                                if invalid_reason:
+                                    logger.error(
+                                        f'Overstats API 返回无效图片数据(content_type={resp.content_type}, '
+                                        f'{invalid_reason}): {endpoint}'
+                                    )
+                                    return (
+                                        None,
+                                        {'error': 'invalid_image', 'message': f'后端返回的图片数据无效（{invalid_reason}），请稍后重试'},
+                                        'invalid_image',
+                                    )
+                                return (body, None, '')
                             else:
                                 try:
                                     error_data = await resp.json()
@@ -1610,16 +1652,52 @@ class OverstatsPlugin(Star):
         except asyncio.CancelledError:
             pass
 
+    @staticmethod
+    async def _write_image_atomic(img_path: Path, data: bytes) -> None:
+        """先写临时文件再 os.replace 原子替换，落盘走 executor。
+
+        双保险杜绝「空文件 / 半截文件」被上传 QQ：
+        1) 直接 write_bytes 到目标路径会先截断为 0 字节再写入，并发场景下
+           上传方（botpy 读文件）可能正好读到 0 字节窗口 → QQ 富媒体上传
+           返回 None → AstrBot 5×30s 重试风暴；
+        2) os.replace 在同一文件系统内是原子操作，任何时刻路径上的文件完整。
+        Windows 上目标文件恰被读取方占用时 replace 可能抛 PermissionError，
+        短暂重试后兜底直写目标路径（部署环境为 Linux，rename 无此限制）。
+        """
+        tmp_path = img_path.with_name(f'{img_path.name}.{threading.get_ident()}.tmp')
+        loop = asyncio.get_running_loop()
+
+        def _write() -> None:
+            tmp_path.write_bytes(data)
+            for attempt in range(3):
+                try:
+                    os.replace(tmp_path, img_path)
+                    return
+                except PermissionError:
+                    if attempt == 2:
+                        break
+                    time.sleep(0.05)
+            img_path.write_bytes(data)
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+        await loop.run_in_executor(None, _write)
+
     async def _build_image_chain(self, event: AstrMessageEvent, img_bytes: bytes, fallback_text: str='', command: str=''):
         """构建图片消息链（不含违规检测）。落盘改走 executor，避免同步 write_bytes 阻塞事件循环。"""
         if not img_bytes:
             return self._plain_error_result(event, fallback_text or '❌ 图片生成失败')
         try:
             if self._save_image_locally:
-                img_hash = abs(hash(img_bytes))
-                img_path = self.temp_image_dir / f'{img_hash}.png'
-                # 图片可达数 MB，同步写在高峰期会阻塞事件循环；挪到默认 executor（IO 密集型，释放 GIL）
-                await asyncio.get_running_loop().run_in_executor(None, img_path.write_bytes, img_bytes)
+                # 唯一文件名 + 原子写入：
+                # - sha1 前缀保留内容可读性，time_ns 后缀保证不同请求即使内容相同
+                #   也各自落盘，消除旧实现 hash(img_bytes) 同名路径的并发覆盖竞态；
+                # - 临时文件 + replace 保证上传方读到的永远是完整文件。
+                digest = hashlib.sha1(img_bytes).hexdigest()[:16]
+                img_path = self.temp_image_dir / f'{digest}_{time.time_ns()}.png'
+                await self._write_image_atomic(img_path, img_bytes)
                 self._record_image_cache_sync(self._user_key(event), str(img_path), command)
                 image_comp = Comp.Image.fromFileSystem(str(img_path))
             else:
@@ -1655,6 +1733,14 @@ class OverstatsPlugin(Star):
         调用方需确保 path 指向真实文件（发送前已做存在性校验）。
         """
         try:
+            # 发送前校验文件存在且非空：索引条目可能指向 0 字节残留文件
+            # （历史写入中断 / 同名路径并发覆盖竞态留下的产物）。
+            # 空文件上传 QQ 富媒体接口会返回 None 并触发 5×30s 重试风暴，必须拦下。
+            cached_path = Path(path)
+            if not cached_path.is_file() or cached_path.stat().st_size <= 0:
+                logger.warning(f'跳过无效缓存图片[{command}]: {path}（不存在或为空文件）')
+                yield self._plain_error_result(event, '❌ 该缓存图片已损坏或为空，无法补发')
+                return
             # 富媒体消息（图片，msg_type=7）不支持 @，故不带 @（同 _build_image_chain）。
             chain = [Comp.Plain('\n'), Comp.Image.fromFileSystem(str(path))]
             yield event.chain_result(chain)
@@ -1675,12 +1761,12 @@ class OverstatsPlugin(Star):
                 return
             # 同 _build_image_chain：富媒体消息不带 @（不会被渲染，只会显示成标签文本）
             chain = [Comp.Plain('\n')]
-            loop = asyncio.get_running_loop()
             for img_bytes in valid_images:
                 if self._save_image_locally:
-                    img_path = self.temp_image_dir / f'{abs(hash(img_bytes))}_{time.time_ns()}.png'
-                    # 同 _build_image_chain：落盘走 executor，避免同步写阻塞事件循环
-                    await loop.run_in_executor(None, img_path.write_bytes, img_bytes)
+                    digest = hashlib.sha1(img_bytes).hexdigest()[:16]
+                    img_path = self.temp_image_dir / f'{digest}_{time.time_ns()}.png'
+                    # 同 _build_image_chain：唯一文件名 + 原子写，避免并发覆盖竞态与半截文件
+                    await self._write_image_atomic(img_path, img_bytes)
                     self._record_image_cache_sync(self._user_key(event), str(img_path), command)
                     chain.append(Comp.Image.fromFileSystem(str(img_path)))
                 else:
@@ -2352,9 +2438,10 @@ class OverstatsPlugin(Star):
         vanished = 0
         for entry in to_send:
             path = str(entry.get('path', '') or '')
-            # 发送前（已过「正在补发」文案的发送 await）再确认文件仍在，规避 TOCTOU；
+            # 发送前（已过「正在补发」文案的发送 await）再确认文件仍在且非空，规避 TOCTOU；
             # 与 list_alive 的校验处于不同时间点，非同刻重复 stat。
-            if not path or not Path(path).is_file():
+            # 0 字节残留文件必须跳过：上传 QQ 富媒体接口会返回 None 并触发重试风暴。
+            if not path or not Path(path).is_file() or Path(path).stat().st_size <= 0:
                 vanished += 1
                 continue
             async for r in self._send_cached_image_result(event, path, entry.get('command') or '获取图片'):
