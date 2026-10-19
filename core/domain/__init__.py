@@ -9,12 +9,14 @@
 from .enums import CommandClass, RejectReason, SlotOutcome
 from .image_cache import (
     DEFAULT_TTL,
+    IMAGE_MAGIC_PREFIXES,
     MAX_PER_USER,
     ImageCacheEntry,
     append_entry,
     coerce_entry,
     filter_alive,
     is_alive,
+    is_valid_image_head,
     most_recent,
 )
 from .notice import NoticeDecision, ReplyWindow, decide_queue_notice, decide_timeout_warning, should_skip_status_prompt
@@ -53,4 +55,5 @@ __all__ = [
     # image cache
     "DEFAULT_TTL", "MAX_PER_USER", "ImageCacheEntry",
     "append_entry", "coerce_entry", "filter_alive", "is_alive", "most_recent",
+    "IMAGE_MAGIC_PREFIXES", "is_valid_image_head",
 ]

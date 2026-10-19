@@ -49,6 +49,7 @@ try:
         decide_queue_notice,
         extract_bnet_id,
         is_alive,
+        is_valid_image_head,
         should_pause_heavy,
         should_reject_overflow,
         should_skip_status_prompt,
@@ -67,6 +68,7 @@ except ImportError:  # 插件作为顶层模块加载时
         decide_queue_notice,
         extract_bnet_id,
         is_alive,
+        is_valid_image_head,
         should_pause_heavy,
         should_reject_overflow,
         should_skip_status_prompt,
@@ -122,14 +124,7 @@ logger = logging.getLogger("astrbot")
 # QQ 富媒体图片上传前的数据校验：只放行真实图片字节。
 # 背景：曾出现后端 200 + 空 body / 200 + JSON 错误体被当作 .png 写入并上传 QQ，
 # 富媒体上传接口返回 None，触发 AstrBot 5 次×30s 重试，长时间占用事件循环。
-_IMAGE_MAGIC_PREFIXES = (
-    b'\x89PNG\r\n\x1a\n',   # PNG
-    b'\xff\xd8\xff',        # JPEG
-    b'GIF87a',              # GIF
-    b'GIF89a',              # GIF
-    b'BM',                  # BMP
-    b'RIFF',                # WebP 容器（另校验 WEBP 标记）
-)
+# 魔数口径与 core/domain/image_cache.is_valid_image_head 共用（单一数据源）。
 _IMAGE_MAX_BYTES = 20 * 1024 * 1024  # QQ 富媒体图片软限制 20MB，超过会被降级为文件卡片
 
 
@@ -137,9 +132,7 @@ def _validate_image_bytes(body: bytes) -> str:
     """校验 bytes 是否为可上传 QQ 的图片数据；返回空字符串表示通过，否则为原因。"""
     if not body:
         return '空响应体'
-    if body[:4] == b'RIFF' and body[8:12] != b'WEBP':
-        return 'RIFF 容器但非 WebP'
-    if not any(body.startswith(p) for p in _IMAGE_MAGIC_PREFIXES):
+    if not is_valid_image_head(body[:16]):
         return f'非图片格式数据(前16字节: {body[:16]!r})'
     if len(body) > _IMAGE_MAX_BYTES:
         return f'图片超过 20MB 软限制，QQ 会降级为文件卡片'
@@ -149,9 +142,11 @@ def _validate_image_bytes(body: bytes) -> str:
 def _is_valid_cached_image_file(path: str) -> bool:
     """本地缓存图片发送前的最终校验：存在、非空、文件头为合法图片格式。
 
-    历史 bug（200+空 body / 200+JSON 错误体直接落盘、同名路径并发覆盖）可能
-    已在缓存索引里留下损坏文件；QQ 富媒体上传对非图片字节会返回 None 并触发
-    5×30s 重试风暴。合并消息场景下一张坏图会拖垮整条消息，故发送前逐一拦截。
+    与 domain 的 _default_exists 同口径（后者已在 list_alive / prune 阶段过滤），
+    此处作为发送边界（botpy 实读之前）的最后一道防线，覆盖「列出后、发送前」
+    文件被替换/损坏的极端窗口。历史 bug（200+空 body / 200+JSON 错误体直接
+    落盘、同名路径并发覆盖）可能已在缓存索引里留下损坏文件；合并消息场景下
+    一张坏图会拖垮整条上传，故逐一拦截。
     """
     if not path:
         return False
@@ -163,11 +158,7 @@ def _is_valid_cached_image_file(path: str) -> bool:
             head = f.read(16)
     except OSError:
         return False
-    if not head:
-        return False
-    if head[:4] == b'RIFF':
-        return head[8:12] == b'WEBP'
-    return any(head.startswith(prefix) for prefix in _IMAGE_MAGIC_PREFIXES)
+    return is_valid_image_head(head)
 
 @register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.10.0")
 class OverstatsPlugin(Star):
@@ -2475,11 +2466,12 @@ class OverstatsPlugin(Star):
             yield event.plain_result(self._format_markdown_by_platform(event, text))
             return
         max_replies = self._GET_IMAGE_MAX_PER_MESSAGE
-        truncated = len(valid_paths) > max_replies
-        to_send = valid_paths[-max_replies:]  # 最近 max_replies 张有效图，保持时间升序
-        send_hint = "（仅补发最近 {} 张，其余仍保留 24 小时，可再次「获取图片」取回）".format(max_replies) if truncated else ""
+        # 去重后再取最近 N 张：旧实现以 hash(img_bytes) 命名，相同内容会记录多条
+        # 同 path 条目（历史索引文件里可能有残留）；合并消息场景下重复 path 会让
+        # 同一张图在一根链里出现两次。dict.fromkeys 保序去重。
+        to_send = list(dict.fromkeys(valid_paths))[-max_replies:]
         text = f"""🖼️ **正在补发 {len(to_send)} 张图片**
-• 来自此前因回复超时未送达的指令{send_hint}
+• 来自此前因回复超时未送达的指令
 💡 本地保留 24 小时"""
         yield event.plain_result(self._format_markdown_by_platform(event, text))
         # 合并为一条消息链，一次发送，交由 AstrBot 框架统一处理

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Iterable, List, Optional, TypeVar
 
 T = TypeVar("T")
@@ -14,20 +15,51 @@ T = TypeVar("T")
 DEFAULT_TTL = 86400.0     # 图片本地缓存保留时长（24 小时）
 MAX_PER_USER = 5          # 单用户最多保留张数
 
+# 合法图片文件头魔数（与 QQ 富媒体支持的格式对齐）。
+# 单一数据源：main.py 的 _validate_image_bytes / _is_valid_cached_image_file
+# 与 domain 的存活判定共用，避免两套口径漂移。
+IMAGE_MAGIC_PREFIXES = (
+    b"\x89PNG\r\n\x1a\n",   # PNG
+    b"\xff\xd8\xff",        # JPEG
+    b"GIF87a",              # GIF
+    b"GIF89a",              # GIF
+    b"BM",                  # BMP
+    b"RIFF",                # WebP 容器（另校验 WEBP 标记）
+)
+
+
+def is_valid_image_head(head: bytes) -> bool:
+    """判断文件头 bytes 是否为合法图片格式（纯函数，无 IO）。
+
+    RIFF 容器需进一步校验 offset 8..12 为 WEBP（否则可能是 AVI/WAV 等）。
+    """
+    if not head:
+        return False
+    if head[:4] == b"RIFF":
+        return head[8:12] == b"WEBP"
+    return any(head.startswith(prefix) for prefix in IMAGE_MAGIC_PREFIXES)
+
 
 def _default_exists(path: str) -> bool:
-    from pathlib import Path
+    """缓存文件有效判定：是文件 + 非空 + 文件头是合法图片格式。
 
+    0 字节残留文件（写入中断 / 并发覆盖竞态的产物）与历史 bug 期
+    「200+JSON 错误体当 .png 落盘」的非空损坏文件，都会被当成有效缓存
+    补发，上传 QQ 富媒体接口后返回 None，触发 AstrBot 5 次×30s 重试风暴。
+    在存活判定源头统一排除，list_alive / prune_user / prune_all 口径一致，
+    损坏条目在下次 prune 时真正被清除（而非靠 24h TTL 自然过期）。
+    """
     if not path:
         return False
     cached = Path(path)
-    # 同时要求「是文件」且「非空」：0 字节残留文件（历史写入中断 / 并发覆盖
-    # 竞态的产物）若被当成有效缓存补发，上传 QQ 富媒体接口会返回 None，
-    # 触发 AstrBot 5 次×30s 重试风暴，故在存活判定源头直接排除。
     try:
-        return cached.is_file() and cached.stat().st_size > 0
+        if not cached.is_file() or cached.stat().st_size <= 0:
+            return False
+        with open(cached, "rb") as f:
+            head = f.read(16)
     except OSError:
         return False
+    return is_valid_image_head(head)
 
 
 @dataclass(frozen=True)
@@ -50,7 +82,7 @@ def is_alive(
     ttl: float = DEFAULT_TTL,
     exists: Callable[[str], bool] = _default_exists,
 ) -> bool:
-    """条目是否有效：path 非空且指向真实文件、且在保留期内。"""
+    """条目是否有效：path 非空、文件是合法图片（存在且非空且文件头合法）、且在保留期内。"""
     if not entry.path:
         return False
     if now - entry.ts > ttl:

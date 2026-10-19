@@ -170,4 +170,8 @@ class ImageCacheService:
             tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             tmp.replace(self._path)
         except Exception as e:
+            # 写盘失败时把脏标记置回：否则在下次 record() 之前，内存里这批
+            # （可能尚未落盘过的）条目会一直不被重试，进程崩溃即丢失。
+            with self._lock:
+                self._dirty = True
             logger.error(f"写入图片缓存索引失败: {e}")
