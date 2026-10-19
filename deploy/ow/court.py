@@ -223,7 +223,11 @@ class CourtManager:
                 msg = ""
                 if isinstance(error_data, dict):
                     msg = str(error_data.get("message") or error_data.get("error") or "")
-                yield event.plain_result(f"❌ {target_id} 第 {index + 1} 局开庭失败：{msg or '后端未返回图片'}。")
+                # ID 解析失败与其他指令统一中文提示（不透传后端英文原文）
+                if "Could not resolve customerToken" in msg:
+                    yield event.plain_result(self._plugin._id_resolve_err("开庭失败"))
+                else:
+                    yield event.plain_result(f"❌ {target_id} 第 {index + 1} 局开庭失败：{msg or '后端未返回图片'}。")
                 self._record_cmd('ow开庭', False, error_code=_err_code)
                 return
             async for r in self._plugin._send_image_result(event, img_bytes, "开庭", ""):
@@ -252,7 +256,11 @@ class CourtManager:
             msg = ""
             if isinstance(error_data, dict):
                 msg = str(error_data.get("message") or error_data.get("error") or "")
-            yield event.plain_result(f"❌ 暂无 {target_id} 的最近判决书：{msg or '数据库记录缺失'}。")
+            # ID 解析失败与其他指令统一中文提示（不透传后端英文原文）
+            if "Could not resolve customerToken" in msg:
+                yield event.plain_result(self._plugin._id_resolve_err("获取开庭结果失败"))
+            else:
+                yield event.plain_result(f"❌ 暂无 {target_id} 的最近判决书：{msg or '数据库记录缺失'}。")
             self._record_cmd('ow开庭结果', False, error_code=_err_code)
             return
         async for r in self._plugin._send_image_result(event, img_bytes, "开庭", ""):
