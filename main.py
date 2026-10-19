@@ -49,7 +49,6 @@ try:
         decide_queue_notice,
         extract_bnet_id,
         is_alive,
-        most_recent,
         should_pause_heavy,
         should_reject_overflow,
         should_skip_status_prompt,
@@ -68,7 +67,6 @@ except ImportError:  # 插件作为顶层模块加载时
         decide_queue_notice,
         extract_bnet_id,
         is_alive,
-        most_recent,
         should_pause_heavy,
         should_reject_overflow,
         should_skip_status_prompt,
@@ -147,6 +145,30 @@ def _validate_image_bytes(body: bytes) -> str:
         return f'图片超过 20MB 软限制，QQ 会降级为文件卡片'
     return ''
 
+
+def _is_valid_cached_image_file(path: str) -> bool:
+    """本地缓存图片发送前的最终校验：存在、非空、文件头为合法图片格式。
+
+    历史 bug（200+空 body / 200+JSON 错误体直接落盘、同名路径并发覆盖）可能
+    已在缓存索引里留下损坏文件；QQ 富媒体上传对非图片字节会返回 None 并触发
+    5×30s 重试风暴。合并消息场景下一张坏图会拖垮整条消息，故发送前逐一拦截。
+    """
+    if not path:
+        return False
+    try:
+        cached = Path(path)
+        if not cached.is_file() or cached.stat().st_size <= 0:
+            return False
+        with open(cached, 'rb') as f:
+            head = f.read(16)
+    except OSError:
+        return False
+    if not head:
+        return False
+    if head[:4] == b'RIFF':
+        return head[8:12] == b'WEBP'
+    return any(head.startswith(prefix) for prefix in _IMAGE_MAGIC_PREFIXES)
+
 @register("overstats_full", "YourName", "Overstats 全指令 QQ 机器人插件", "2.10.0")
 class OverstatsPlugin(Star):
     """Overstats 全指令插件。
@@ -206,8 +228,10 @@ class OverstatsPlugin(Star):
     _CONGESTION_WAITING_THRESHOLD = 3              # 排队人数达到此值视为拥堵
     # 获取图片单次补发上限：单聊每条消息最多回复 4 张、群聊最多 5 张，
     # 规避 QQ 被动回复次数超限；超出部分仍保留 24 小时，可再次获取图片取回。
-    _GET_IMAGE_MAX_REPLIES_PRIVATE = 4
-    _GET_IMAGE_MAX_REPLIES_GROUP = 5
+    # 「获取图片」补发上限：最多 4 张合并为一条富媒体消息（与「单局详细」一致）。
+    # 逐张单独发 = 每条消息各一次上传+发送，失败面与重试风暴都被放大；合并后由
+    # AstrBot 框架统一处理，上传/发送次数降到最低。超出部分保留 24 小时可再次取回。
+    _GET_IMAGE_MAX_PER_MESSAGE = 4
     _IMAGE_CACHE_INDEX_FILE = "image_cache_index.json"
 
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -1559,11 +1583,9 @@ class OverstatsPlugin(Star):
                         async with session.post(url, json=payload, timeout=req_timeout) as resp:
                             if resp.status == 200:
                                 body = await resp.read()
-                                if self.monitor:
-                                    elapsed = int((time.time() - start_ts) * 1000)
-                                    asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
                                 # 200 不代表一定是图片：空 body / JSON 错误体一律按错误处理，
                                 # 避免把无效数据当 .png 上传 QQ（富媒体上传返回 None → 重试风暴）。
+                                # 先校验再记监控：无效响应不应计入成功 API 调用。
                                 invalid_reason = _validate_image_bytes(body)
                                 if invalid_reason:
                                     logger.error(
@@ -1575,6 +1597,9 @@ class OverstatsPlugin(Star):
                                         {'error': 'invalid_image', 'message': f'后端返回的图片数据无效（{invalid_reason}），请稍后重试'},
                                         'invalid_image',
                                     )
+                                if self.monitor:
+                                    elapsed = int((time.time() - start_ts) * 1000)
+                                    asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
                                 return (body, None, '')
                             else:
                                 try:
@@ -1724,29 +1749,28 @@ class OverstatsPlugin(Star):
             else:
                 yield event.plain_result('❌ 发送图片失败，请稍后重试。')
 
-    async def _send_cached_image_result(self, event: AstrMessageEvent, path: str, command: str):
-        """补发「获取图片」：直接复用本地已缓存文件发送，只读不发写。
+    async def _send_cached_images_result(self, event: AstrMessageEvent, paths: list[str], command: str):
+        """补发「获取图片」：把多张本地缓存文件合并为一条富媒体消息发送。
 
         区别于 _send_image_result（面向新生成图片，会经 _build_image_chain 落盘并登记缓存索引）：
         补发的图片早已落盘并登记，此处只读文件发送，避免把同一图片反复 write_bytes + record，
         防止索引被重复追加、占满每用户配额（见 domain/image_cache.append_entry 不去重）。
-        调用方需确保 path 指向真实文件（发送前已做存在性校验）。
+
+        区别于旧的逐张发送（每条消息各一次上传+发送）：现在与「单局详细」一致，
+        最多 4 张合并为一条 MessageChain，由 AstrBot 框架统一上传与投递——
+        上传/发送调用次数从 N 次降到 1 次，显著缩小「上传图片API返回None」的
+        触发面与 5×30s 重试风暴的影响范围。调用方需确保 paths 均通过
+        _is_valid_cached_image_file 校验。
         """
         try:
-            # 发送前校验文件存在且非空：索引条目可能指向 0 字节残留文件
-            # （历史写入中断 / 同名路径并发覆盖竞态留下的产物）。
-            # 空文件上传 QQ 富媒体接口会返回 None 并触发 5×30s 重试风暴，必须拦下。
-            cached_path = Path(path)
-            if not cached_path.is_file() or cached_path.stat().st_size <= 0:
-                logger.warning(f'跳过无效缓存图片[{command}]: {path}（不存在或为空文件）')
-                yield self._plain_error_result(event, '❌ 该缓存图片已损坏或为空，无法补发')
-                return
             # 富媒体消息（图片，msg_type=7）不支持 @，故不带 @（同 _build_image_chain）。
-            chain = [Comp.Plain('\n'), Comp.Image.fromFileSystem(str(path))]
+            chain = [Comp.Plain('\n')]
+            for path in paths:
+                chain.append(Comp.Image.fromFileSystem(path))
             yield event.chain_result(chain)
         except Exception as exc:
             err_msg = str(exc)
-            logger.error(f'发送缓存图片失败[{command}]: {err_msg}')
+            logger.error(f'发送缓存图片失败[{command}] 共{len(paths)}张: {err_msg}')
             if '违规' in err_msg or 'violation' in err_msg.lower():
                 await self._set_violation_ban(event, command)
                 yield event.plain_result(self._VIOLATION_BAN_MSG.format(command=command, remain='12小时'))
@@ -2407,12 +2431,16 @@ class OverstatsPlugin(Star):
 
     @filter.command('获取图片', alias={'取图', 'ow取图', 'ow获取图片'})
     async def get_cached_image(self, event: AstrMessageEvent):
-        """补发本地缓存中全部未过期图片（图片本地保留 24 小时，群聊回复超时未收到时使用）。
+        """补发本地缓存中未过期图片（图片本地保留 24 小时，群聊回复超时未收到时使用）。
 
         群聊回复 msg_id 过期会导致图片投递失败，但图片已在本地生成并缓存；用户稍后 @机器人
-        发送「获取图片」可一次性取回此前因超时未送达的全部图片（可能来自多条不同指令）。
-        补发只读已存文件（_send_cached_image_result），不重复落盘、不重复登记索引，
+        发送「获取图片」可一次性取回此前因超时未送达的图片（可能来自多条不同指令）。
+        补发只读已存文件（_send_cached_images_result），不重复落盘、不重复登记索引，
         故不会因反复补发把同一图片追加进索引、占满每用户配额。
+
+        发送策略（与「单局详细」一致）：最多取最近 4 张，合并为一条富媒体消息一次发送。
+        逐张单独发时每条消息各触发一次富媒体上传，任一失败都会进入 AstrBot 的
+        5×30s 重试并阻塞流水线；合并后上传/发送各只有一次，失败面最小化。
         """
         user_key = self._user_key(event)
         # list_alive 已按「保留期内 + 文件真实存在」过滤；这里直接取，无需在同一时刻再 stat 一遍
@@ -2423,39 +2451,40 @@ class OverstatsPlugin(Star):
 💡 图片仅在本地保留 24 小时，超时后自动清理"""
             yield event.plain_result(self._format_markdown_by_platform(event, text))
             return
-        # 单聊每条消息最多回复 4 张、群聊最多 5 张，超出部分仍保留 24 小时可再次获取
-        is_group = self._is_group_message(event)
-        max_replies = self._GET_IMAGE_MAX_REPLIES_GROUP if is_group else self._GET_IMAGE_MAX_REPLIES_PRIVATE
-        # cached 按生成时间升序（旧→新）：取最近 max_replies 张（末尾），其余保留可再次取回
-        truncated = len(cached) > max_replies
-        to_send = most_recent(cached, max_replies)
+        # cached 按生成时间升序（旧→新）。发送前逐一校验：存在 + 非空 + 文件头合法。
+        # 历史 bug 可能已在索引里留下 0 字节 / JSON 错误体落盘的损坏文件（且往往正是
+        # 最新的条目），合并消息场景下一张坏图会拖垮整条上传，必须在此拦下；
+        # 同时从「最新的有效图」开始取满 4 张，不让坏图挤占有效旧图的补发机会。
+        valid_paths: list[str] = []
+        vanished = 0
+        for entry in cached:
+            path = str(entry.get('path', '') or '')
+            if path and _is_valid_cached_image_file(path):
+                valid_paths.append(path)
+            else:
+                vanished += 1
+                logger.warning(f'跳过无效缓存图片[获取图片]: {path!r}（不存在/为空/文件头非法）')
+        if vanished:
+            # 顺手清理已失效（文件缺失 / 损坏 / path 畸形）的索引条目
+            self._prune_user_cache(user_key)
+        if not valid_paths:
+            # 兜底：list_alive 之后文件被全部清理或全部损坏时的提示
+            text = """🖼️ **获取图片**
+• 缓存图片均已过期、被清理或已损坏
+💡 图片仅在本地保留 24 小时，请重新发起指令"""
+            yield event.plain_result(self._format_markdown_by_platform(event, text))
+            return
+        max_replies = self._GET_IMAGE_MAX_PER_MESSAGE
+        truncated = len(valid_paths) > max_replies
+        to_send = valid_paths[-max_replies:]  # 最近 max_replies 张有效图，保持时间升序
         send_hint = "（仅补发最近 {} 张，其余仍保留 24 小时，可再次「获取图片」取回）".format(max_replies) if truncated else ""
         text = f"""🖼️ **正在补发 {len(to_send)} 张图片**
 • 来自此前因回复超时未送达的指令{send_hint}
 💡 本地保留 24 小时"""
         yield event.plain_result(self._format_markdown_by_platform(event, text))
-        sent = 0
-        vanished = 0
-        for entry in to_send:
-            path = str(entry.get('path', '') or '')
-            # 发送前（已过「正在补发」文案的发送 await）再确认文件仍在且非空，规避 TOCTOU；
-            # 与 list_alive 的校验处于不同时间点，非同刻重复 stat。
-            # 0 字节残留文件必须跳过：上传 QQ 富媒体接口会返回 None 并触发重试风暴。
-            if not path or not Path(path).is_file() or Path(path).stat().st_size <= 0:
-                vanished += 1
-                continue
-            async for r in self._send_cached_image_result(event, path, entry.get('command') or '获取图片'):
-                yield r
-            sent += 1
-        if vanished or sent == 0:
-            # 顺手清理已失效（文件缺失 / path 畸形）的索引条目
-            self._prune_user_cache(user_key)
-        if sent == 0:
-            # 兜底：list_alive 之后文件被全部清理时的提示
-            text = """🖼️ **获取图片**
-• 缓存图片均已过期或读取失败
-💡 图片仅在本地保留 24 小时"""
-            yield event.plain_result(self._format_markdown_by_platform(event, text))
+        # 合并为一条消息链，一次发送，交由 AstrBot 框架统一处理
+        async for r in self._send_cached_images_result(event, to_send, '获取图片'):
+            yield r
 
     @filter.command('今日总结', alias={'今日', '今日数据'})
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = ''):
