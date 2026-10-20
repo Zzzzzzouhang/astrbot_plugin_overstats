@@ -1746,8 +1746,32 @@ class OverstatsPlugin(Star):
             else:
                 yield event.plain_result('❌ 发送图片失败，请稍后重试。')
 
+    async def _send_cached_image_result(self, event: AstrMessageEvent, path: str, command: str):
+        """补发「获取图片」单张：直接复用本地已缓存文件发送，只读不发写。
+
+        与 _send_image_result（面向新生成图片，会经 _build_image_chain 落盘并登记索引）不同：
+        补发的图片早已落盘并登记，此处只读文件发送，避免把同一图片反复 write_bytes + record，
+        防止索引被重复追加、占满每用户配额（见 domain/image_cache.append_entry 不去重）。
+
+        单张走本路径（与普通指令的单图消息结构一致：Plain('\\n') + 一张 Image.fromFileSystem）；
+        两张及以上才合并为一条富媒体消息（见 _send_cached_images_result）。
+        调用方需确保 path 已通过 _is_valid_cached_image_file 校验。
+        """
+        try:
+            # 富媒体消息（图片，msg_type=7）不支持 @，故不带 @（同 _build_image_chain）。
+            chain = [Comp.Plain('\n'), Comp.Image.fromFileSystem(path)]
+            yield event.chain_result(chain)
+        except Exception as exc:
+            err_msg = str(exc)
+            logger.error(f'发送缓存图片失败[{command}]: {path} | {err_msg}')
+            if '违规' in err_msg or 'violation' in err_msg.lower():
+                await self._set_violation_ban(event, command)
+                yield event.plain_result(self._VIOLATION_BAN_MSG.format(command=command, remain='12小时'))
+            else:
+                yield event.plain_result('❌ 发送图片失败，请稍后重试。')
+
     async def _send_cached_images_result(self, event: AstrMessageEvent, paths: list[str], command: str):
-        """补发「获取图片」：把多张本地缓存文件合并为一条富媒体消息发送。
+        """补发「获取图片」多张（≥2）：把本地缓存文件合并为一条富媒体消息发送。
 
         区别于 _send_image_result（面向新生成图片，会经 _build_image_chain 落盘并登记缓存索引）：
         补发的图片早已落盘并登记，此处只读文件发送，避免把同一图片反复 write_bytes + record，
@@ -1756,8 +1780,8 @@ class OverstatsPlugin(Star):
         区别于旧的逐张发送（每条消息各一次上传+发送）：现在与「单局详细」一致，
         最多 4 张合并为一条 MessageChain，由 AstrBot 框架统一上传与投递——
         上传/发送调用次数从 N 次降到 1 次，显著缩小「上传图片API返回None」的
-        触发面与 5×30s 重试风暴的影响范围。调用方需确保 paths 均通过
-        _is_valid_cached_image_file 校验。
+        触发面与 5×30s 重试风暴的影响范围。单张请走 _send_cached_image_result。
+        调用方需确保 paths 均通过 _is_valid_cached_image_file 校验。
         """
         try:
             # 富媒体消息（图片，msg_type=7）不支持 @，故不带 @（同 _build_image_chain）。
@@ -2435,7 +2459,9 @@ class OverstatsPlugin(Star):
         补发只读已存文件（_send_cached_images_result），不重复落盘、不重复登记索引，
         故不会因反复补发把同一图片追加进索引、占满每用户配额。
 
-        发送策略（与「单局详细」一致）：最多取最近 4 张，合并为一条富媒体消息一次发送。
+        发送策略（最多取最近 4 张）：
+        - 1 张：走标准单图发送路径（_send_cached_image_result），与普通指令的单图消息结构一致；
+        - ≥2 张：合并为一条富媒体消息一次发送（_send_cached_images_result，与「单局详细」一致）。
         逐张单独发时每条消息各触发一次富媒体上传，任一失败都会进入 AstrBot 的
         5×30s 重试并阻塞流水线；合并后上传/发送各只有一次，失败面最小化。
         """
@@ -2480,9 +2506,14 @@ class OverstatsPlugin(Star):
 • 来自此前因回复超时未送达的指令
 💡 本地保留 24 小时"""
         yield event.plain_result(self._format_markdown_by_platform(event, text))
-        # 合并为一条消息链，一次发送，交由 AstrBot 框架统一处理
-        async for r in self._send_cached_images_result(event, to_send, '获取图片'):
-            yield r
+        # 按张数分流：1 张走标准单图发送路径（与普通指令的单图消息结构一致）；
+        # ≥2 张才合并为一条富媒体消息，由 AstrBot 框架统一上传与投递。
+        if len(to_send) == 1:
+            async for r in self._send_cached_image_result(event, to_send[0], '获取图片'):
+                yield r
+        else:
+            async for r in self._send_cached_images_result(event, to_send, '获取图片'):
+                yield r
 
     @filter.command('今日总结', alias={'今日', '今日数据'})
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = ''):
