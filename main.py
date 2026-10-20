@@ -30,13 +30,12 @@ try:
 except ImportError:
     from deploy.ops.concurrency_limiter import UserConcurrencyLimiter  # type: ignore[no-redef]
 
-# 全局指令并发优先级队列（真实队列：全局容量 + 特权插队）
-try:
-    from .deploy.ops.priority_queue import GlobalPriorityCommandQueue, SlotRejected
-except ImportError:
-    from deploy.ops.priority_queue import GlobalPriorityCommandQueue, SlotRejected  # type: ignore[no-redef]
-
 # 排队与提示的分层架构：domain（纯策略）/ service（编排）/ platform（平台适配）
+# 注意：SlotRejected 必须与 CommandQueueService 从同一模块树导入（.core.domain）——
+# 它正是 acquire() 抛出、_run_with_cmd_slot 需要 except 的异常类。
+# 切勿改从 deploy.ops.priority_queue 门面导入：该门面内部按顶层 `core.` 绝对导入
+# （回退分支还会把插件根目录插入 sys.path），会得到另一个模块树的同名类，
+# 导致 except SlotRejected 永远匹配不到、拒绝异常逃逸到 AstrBot（表现为回复":("）。
 try:
     from .core.domain import (
         GET_IMAGE_TAG,
@@ -44,6 +43,7 @@ try:
         QueueThresholds,
         RejectReason,
         ReplyWindow,
+        SlotRejected,
         SlotRequest,
         build_cmd_tag,
         decide_queue_notice,
@@ -63,6 +63,7 @@ except ImportError:  # 插件作为顶层模块加载时
         QueueThresholds,
         RejectReason,
         ReplyWindow,
+        SlotRejected,
         SlotRequest,
         build_cmd_tag,
         decide_queue_notice,
@@ -188,9 +189,13 @@ class OverstatsPlugin(Star):
     # 运行槽位兜底回收阈值（秒）：任何槽位占用超过该时长即视为异常，由 _slot_reclaim_loop
     # 周期调用 expire_all() 回收。回收是幂等的——对应指令日后真正结束时其 release 只抵扣、
     # 不重复递减，因此不会让并发计数永久偏低。
-    # 注意：周度总结 / 单局详细等长指令最坏可跑 20~30 分钟，超过 10 分钟会被提前回收名额
-    # （指令本身继续执行、结果照常返回，仅并发名额提前释放/让后来者补位）——这是刻意取舍。
-    _CMD_SLOT_AUTO_RELEASE_SECONDS = 600
+    # 取值 3600（60 分钟）是刻意决策：正常重指令（是区吗/开庭）最坏持槽 ≈ HTTP 超时
+    # （630/900s）+ 发送开销 ≈ 16 分钟，低于该阈值——正常路径永不触发回收，capacity 因此
+    # 成为可承诺的硬约束（同时最多 N 条重指令在整个后端管线里，不随时间稀释）。回收器只兜
+    # 真正的泄漏：非 HTTP 阶段挂起（战网 ID 解析 / 图片上传）或生成器被丢弃未走 finally。
+    # 历史取值 600 会让跑超 10 分钟的正常指令被静默回收名额（指令继续执行、容量被稀释），
+    # 该语义已按上述硬约束决策废弃。
+    _CMD_SLOT_AUTO_RELEASE_SECONDS = 3600
     _SLOT_RECLAIM_INTERVAL = 60  # 运行槽位兜底回收的检查间隔（秒）
     _VIOLATION_BAN_SECONDS = 43200  # 12 小时
     _VIOLATION_BAN_FILE = "violation_bans.json"
@@ -465,10 +470,11 @@ class OverstatsPlugin(Star):
         """周期回收运行超时的指令槽位（兜底）。
 
         正常路径下槽位由 `_run_with_cmd_slot` 的 try/finally 释放；本循环只针对
-        「生成器被丢弃 / 异常未走 finally」等极端泄漏，避免容量被占满直到次日 4 点 clear()。
-        回收阈值 `_CMD_SLOT_AUTO_RELEASE_SECONDS`（默认 600s）：占用超过即视为异常并回收，
-        且回收幂等（对应指令后续 release 只抵扣、不重复递减计数）；长指令（周度总结 /
-        单局详细最坏 20~30 分钟）会被提前释放并发名额，但指令本身继续执行、结果照常返回。
+        「生成器被丢弃 / 异常未走 finally / 非 HTTP 阶段挂起」等极端泄漏，避免容量被占满
+        直到次日 4 点 clear()。回收阈值 `_CMD_SLOT_AUTO_RELEASE_SECONDS`（默认 3600s）：
+        占用超过即视为异常并回收，且回收幂等（对应指令后续 release 只抵扣、不重复递减计数）。
+        阈值高于正常指令最坏持槽时间（≈ HTTP 超时 + 发送开销 ≈ 16 分钟），故正常指令不会被
+        提前回收、capacity 保持硬约束语义；只有真正泄漏的槽位才会在 60 分钟时被清出。
         """
         try:
             while True:

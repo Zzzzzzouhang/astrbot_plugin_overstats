@@ -19,7 +19,9 @@ class QueueThresholds:
     heavy_pause: int = 10               # 重指令拥堵暂停阈值（等待数 > 此值）
     heavy_deprio: int = 5               # 拥堵降权阈值（等待数 > 此值时重指令降权）
     queue_wait_timeout: float = 600.0   # 排队等待上限（秒），超时视为拒绝
-    slot_auto_release: float = 600.0    # 运行槽位占用超时（秒），兜底回收
+    slot_auto_release: float = 3600.0   # 运行槽位占用超时（秒），兜底回收；
+    # 默认 3600（60 分钟）：高于正常指令最坏持槽时间（≈ HTTP 超时 + 发送 ≈ 16 分钟），
+    # 正常路径永不触发回收、capacity 保持硬约束语义；只兜真正的泄漏（见 main.py 常量注释）。
 
 
 @dataclass(frozen=True)

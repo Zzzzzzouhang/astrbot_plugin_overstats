@@ -13,9 +13,14 @@ import sys
 from pathlib import Path
 
 try:
-    from core.domain.queue_policy import QueueThresholds
-    from core.domain.slot import SlotRejected
-    from core.service.command_queue import CommandQueueService
+    # 包内加载（AstrBot 以 data.plugins.<name> 包导入）时优先用相对导入，
+    # 与本包内其他模块（main.py 的 `.core.*`）保持同一模块树——
+    # 若此处按顶层 `core.` 绝对导入，会加载出第二个同名模块树，
+    # 其 SlotRejected 与 CommandQueueService 抛出的不是同一个类，
+    # 调用方的 `except SlotRejected` 将永远匹配不到（历史 bug）。
+    from ...core.domain.queue_policy import QueueThresholds
+    from ...core.domain.slot import SlotRejected
+    from ...core.service.command_queue import CommandQueueService
 except ImportError:  # 按文件路径直接加载（如单测 importlib）时无包上下文
     _PLUGIN_ROOT = str(Path(__file__).resolve().parents[2])
     if _PLUGIN_ROOT not in sys.path:
