@@ -128,6 +128,18 @@ logger = logging.getLogger("astrbot")
 # 魔数口径与 core/domain/image_cache.is_valid_image_head 共用（单一数据源）。
 _IMAGE_MAX_BYTES = 20 * 1024 * 1024  # QQ 富媒体图片软限制 20MB，超过会被降级为文件卡片
 
+# 后端错误码 -> 面向用户的中文文案。
+# 后端（Overstats）部分错误的 message 是英文技术描述（如 hero_treemap_empty），
+# 直接透出到 QQ 对用户不友好，在 _fetch_image 统一改写，业务层无需逐个适配。
+# {mode} 会被替换为中文模式名（竞技/快速），无 details.mode 时回退为「该」。
+_MODE_LABELS = {'competitive': '竞技', 'quick': '快速'}
+
+_FRIENDLY_UPSTREAM_ERRORS = {
+    # 英雄云图无数据：该模式对局太少或数据未更新
+    'hero_treemap_empty': '暂无{mode}模式的英雄使用数据：可能该账号此模式对局较少或数据尚未更新。'
+                          '可尝试另一模式（/快速英雄云图、/竞技英雄云图）或指定其他赛季（如 24）后重试',
+}
+
 
 def _validate_image_bytes(body: bytes) -> str:
     """校验 bytes 是否为可上传 QQ 的图片数据；返回空字符串表示通过，否则为原因。"""
@@ -1634,6 +1646,11 @@ class OverstatsPlugin(Star):
                                     if resp.status == 429 or 'too many requests' in str(error_data.get('message', '')).lower():
                                         orig_msg = error_data.get('message', '')
                                         error_data['message'] = f'{orig_msg}。使用人数过多，请稍后再试或尝试自部署Overstats或astrbot_plugin_overstats'
+                                    _friendly = _FRIENDLY_UPSTREAM_ERRORS.get(str(error_data.get('error') or ''))
+                                    if _friendly:
+                                        _details = error_data.get('details')
+                                        _mode = str(_details.get('mode') or '') if isinstance(_details, dict) else ''
+                                        error_data['message'] = _friendly.format(mode=_MODE_LABELS.get(_mode, '该'))
                                 return (None, error_data, error_data.get('error', '') if isinstance(error_data, dict) else '')
                     except Exception as e:
                         if retry and attempt < 2:
@@ -2150,8 +2167,13 @@ class OverstatsPlugin(Star):
     # ===================== 事件监听器（必须保留在 main.py） =====================
 
     @filter.command('大神绑定', alias={'绑定'})
-    async def dashen_bind(self, event: AstrMessageEvent, bnet_id: str):
-        """绑定战网账号，格式：/绑定 Player#12345。"""
+    async def dashen_bind(self, event: AstrMessageEvent, bnet_id: str = ''):
+        """绑定战网账号，格式：/绑定 Player#12345。
+
+        bnet_id 必须带默认值：否则用户发送「/绑定」不带参数时，
+        AstrBot 核心会直接回复技术化的「必要参数缺失。该指令完整参数: bnet_id(str)」，
+        插件自身的友好提示（features/binding.dashen_bind）反而没有机会执行。
+        """
         async for r in features_binding.dashen_bind(self, event, bnet_id):
             yield r
 
