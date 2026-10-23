@@ -1,4 +1,4 @@
-"""domain 层：排队与提示的纯业务逻辑（无 IO、无框架依赖）。
+"""domain 层：并发准入与提示的纯业务逻辑（无 IO、无框架依赖）。
 
 分层约定：
 - domain 只描述「是什么 / 该怎么判」：值对象、策略纯函数、文案构造；
@@ -19,24 +19,21 @@ from .image_cache import (
     is_valid_image_head,
     most_recent,
 )
-from .notice import NoticeDecision, ReplyWindow, decide_queue_notice, decide_timeout_warning, should_skip_status_prompt
+from .notice import ReplyWindow, decide_timeout_warning, should_skip_status_prompt
 from .notice_text import (
     GET_IMAGE_TAG,
     build_cmd_tag,
-    build_queue_waiting_text,
     build_timeout_warning_text,
     command_label,
     extract_bnet_id,
 )
-from .queue_policy import (
+from .concurrency_policy import (
     AdmissionDecision,
-    QueueThresholds,
+    ConcurrencyThresholds,
+    ConcurrencyUsage,
     decide_admission,
-    should_pause_heavy,
-    should_pause_heavy_at,
-    should_reject_overflow,
 )
-from .queue_snapshot import QueueSnapshot
+from .concurrency_snapshot import ConcurrencySnapshot
 from .slot import SlotRejected, SlotRequest, SlotTicket
 
 __all__ = [
@@ -45,12 +42,12 @@ __all__ = [
     # slot
     "SlotRequest", "SlotTicket", "SlotRejected",
     # snapshot / policy
-    "QueueSnapshot", "QueueThresholds", "AdmissionDecision",
-    "decide_admission", "should_reject_overflow", "should_pause_heavy", "should_pause_heavy_at",
+    "ConcurrencySnapshot", "ConcurrencyThresholds", "ConcurrencyUsage", "AdmissionDecision",
+    "decide_admission",
     # notice
-    "ReplyWindow", "NoticeDecision",
-    "decide_queue_notice", "decide_timeout_warning", "should_skip_status_prompt",
-    "GET_IMAGE_TAG", "build_cmd_tag", "build_queue_waiting_text", "build_timeout_warning_text",
+    "ReplyWindow",
+    "decide_timeout_warning", "should_skip_status_prompt",
+    "GET_IMAGE_TAG", "build_cmd_tag", "build_timeout_warning_text",
     "command_label", "extract_bnet_id",
     # image cache
     "DEFAULT_TTL", "MAX_PER_USER", "ImageCacheEntry",

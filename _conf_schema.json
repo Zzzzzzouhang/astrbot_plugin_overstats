@@ -39,11 +39,23 @@
     "default": "second",
     "options": ["second", "third", "main"]
   },
-  "backend_concurrency_max": {
-    "description": "后端请求并发上限",
-    "type": "int",
-    "hint": "插件侧同时向后端发起的图片请求并发上限（兜底保护后端不被瞬时打满）。轻指令不走队列、直连后端，由此值兜底；重指令另受「全局并发容量」约束。默认 32，填 0 或负数表示不限制。",
-    "default": 32
+  "cmd_concurrency": {
+    "description": "指令并发控制",
+    "type": "text",
+    "hint": "JSON 格式：{\"enabled\":总开关true开false关,\"per_user_max\":单用户并发上限（轻/重合并计算）,\"light_max\":轻指令全局并发容量,\"heavy_max\":重指令全局并发容量}。三个容量字段 0 均表示不限制。默认 {\"enabled\":true,\"per_user_max\":2,\"light_max\":0,\"heavy_max\":10}。轻指令默认不限、无限直连后端（由后端自行调度）；重指令（仅「是区吗/开庭」）超出 heavy_max 直接拒绝并返回文案，不排队；轻/重两个全局池相互独立。enabled=false 时所有人不受单用户上限约束，但全局容量仍生效。修改后自动生效，无需重启。",
+    "default": "{\"enabled\":true,\"per_user_max\":2,\"light_max\":0,\"heavy_max\":10}"
+  },
+  "privileged_backend_enabled": {
+    "description": "特权独立后端地址开关",
+    "type": "bool",
+    "hint": "开启后，白名单群/个人与 AstrBot 管理员的指令发往下方独立后端地址，与普通用户流量隔离（仅 manual 独立链接模式生效；auto 模式只有一个本地托管后端，自动忽略）。",
+    "default": false
+  },
+  "privileged_backend_url": {
+    "description": "特权独立后端地址",
+    "type": "string",
+    "hint": "例如：http://127.0.0.1:18083/api/v2。留空则回退主地址。「是区吗结果/开庭结果」等取图请求同样走该地址，保证读写落在同一节点。",
+    "default": ""
   },
   "direct_message_handling_enabled": {
     "description": "直接消息处理",
@@ -94,12 +106,6 @@
     "hint": "维护模式下白名单内的个人可正常使用所有功能，跳过权限拦截。注意：QQ官方机器人需填写个人openid（而非QQ号），其他平台填用户ID。",
     "obvious_hint": true,
     "default": []
-  },
-  "cmd_rate_limit": {
-    "description": "指令并发限流（仅需访问后端的业务指令计入）",
-    "type": "text",
-    "hint": "全局指令并发优先级队列（真实队列）。JSON 格式：{\"enabled\":开true关false,\"per_user_max\":单普通用户并发上限,\"global_max\":全局同时执行上限}。默认 {\"enabled\":true,\"per_user_max\":3,\"global_max\":6}。per_user_max=0 表示不限制；global_max 为系统级并发容量（保护后端），所有用户（含特权）均受此全局容量约束，但白名单群/人/AstrBot 管理员会插队优先。开启后：单普通用户并发满 per_user_max 立即拒绝；全局排队等待数 >8 时「是区吗/开庭」对普通用户自动暂停（快速失败，不再干等 600s 排队超时）；等待数 ≥50 时普通指令全部拒绝。修改后自动生效，无需重启。",
-    "default": "{\"enabled\":true,\"per_user_max\":3,\"global_max\":6}"
   },
   "github_proxy_enabled": {
     "description": "是否启用 GitHub 加速",

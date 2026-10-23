@@ -74,7 +74,9 @@
 | `overstats_api_url_3` | String | — | 第三个后端地址（manual 模式可选） |
 | `shiqu_dedicated_address_enabled` | Bool | `false` | 开启后所有「是区吗」指令（含「是区吗结果」）只发往专属地址，其余指令仍走主地址（仅 manual 模式生效） |
 | `shiqu_dedicated_address` | String | `second` | 是区吗专属地址选择：`second`=第二个地址 / `third`=第三个地址 / `main`=主地址 |
-| `backend_concurrency_max` | Int | `32` | 插件侧后端请求并发上限（轻指令直连后端的兜底保护）；0 或负数表示不限制 |
+| `cmd_concurrency` | Text(JSON) | `{"enabled":true,"per_user_max":2,"light_max":0,"heavy_max":10}` | 指令并发控制。`per_user_max`=单用户并发上限（轻/重合并计算）；`light_max`=轻指令全局并发容量，`0`=不限制（默认，无限直连后端）；`heavy_max`=重指令（仅「是区吗/开庭」）全局并发容量，超出即拒绝并返回文案、不排队；轻/重两池相互独立。修改后热生效 |
+| `privileged_backend_enabled` | Bool | `false` | 开启后白名单群/个人与 AstrBot 管理员的指令发往独立后端地址，与普通用户流量隔离（仅 manual 模式生效） |
+| `privileged_backend_url` | String | — | 特权独立后端地址，如 `http://127.0.0.1:18083/api/v2`；留空回退主地址 |
 | `direct_message_handling_enabled` | Bool | `true` | 是否开启直接消息处理（群聊中真实@机器人识别战网ID、单局数字等，私聊直接识别） |
 | `full_adaptation_nickname` | String | — | 全量适配昵称兜底值。@昵称模式下，当群内未通过 `/全量适配开 昵称` 指定昵称、且未能自动探测到机器人昵称时使用。直接匹配模式无需昵称。留空则需先真实@一次机器人以自动获取昵称。 |
 

@@ -1,10 +1,11 @@
-"""群聊提示服务（service 层）：排队提示与超时预警的编排与发送。
+"""群聊提示服务（service 层）：4:50 超时预警的编排与发送。
 
 设计要点（针对线上 25 分钟内 105 次「msg_id 已过期」、11 次「被动回复超限」）：
-1. 告知动作前移——入队即推「排队中」提示，msg_id 仍然有效，送达率最高；
-2. 同义去重——排队提示发送成功后取消 4:50 预警，避免同一用户收到两条；
-3. 抑制注定失败的发送：已推过排队提示且窗口已过期时，跳过业务层状态提示
-   （由 domain.should_skip_status_prompt 判定），减少失败与平台限流压力；
+1. v3 重构取消等待队列（超限即拒）后，「排队中」前置提示一并移除——
+   没有排队就没有「排队中」；本服务只保留超时预警；
+2. 预警计时起点为「收到用户指令」时刻，与 QQ 被动回复 msg_id 的
+   5 分钟交互窗口对齐（4:50 发送，此时 msg_id 仍有效）；
+3. 同义去重——已推送过含取图指引的提示时不再重复发送；
 4. 战网 ID 解析带短 TTL 缓存：高峰期提示并发高，避免每次都抢文件锁读绑定表。
 """
 
@@ -15,23 +16,22 @@ import logging
 import time
 from typing import Any, Callable, Coroutine, Dict, Optional, Tuple
 
+from ..domain.concurrency_snapshot import ConcurrencySnapshot
 from ..domain.notice import ReplyWindow, decide_timeout_warning
 from ..domain.notice_text import (
     GET_IMAGE_TAG,
     build_cmd_tag,
-    build_queue_waiting_text,
     build_timeout_warning_text,
     extract_bnet_id,
 )
-from ..domain.queue_snapshot import QueueSnapshot
 
 logger = logging.getLogger("astrbot")
 
-CONGESTION_WAITING_THRESHOLD = 3   # 排队人数达到此值即视为拥堵（预警文案切换）
+CONGESTION_RUNNING_THRESHOLD = 3   # 在执行指令数达到此值即视为服务繁忙（预警文案切换）
 
 
 class ReplyNoticeService:
-    """「排队中」提示与 4:50 超时预警的发送编排。"""
+    """4:50 回复超时预警的发送编排。"""
 
     def __init__(
         self,
@@ -41,37 +41,20 @@ class ReplyNoticeService:
         send_timeout: float = 15.0,
         bnet_resolver: Optional[Callable[[str], Coroutine[Any, Any, str]]] = None,
         bind_cache_ttl: float = 60.0,
-        waiting_provider: Optional[Callable[[], QueueSnapshot]] = None,
-        congestion_threshold: int = CONGESTION_WAITING_THRESHOLD,
+        running_provider: Optional[Callable[[], ConcurrencySnapshot]] = None,
+        congestion_threshold: int = CONGESTION_RUNNING_THRESHOLD,
     ):
         self._platform = platform
         self._window = window or ReplyWindow()
         self._send_timeout = send_timeout
         self._bnet_resolver = bnet_resolver
         self._bind_cache_ttl = bind_cache_ttl
-        self._waiting_provider = waiting_provider
+        self._running_provider = running_provider
         self._congestion_threshold = congestion_threshold
         # user_id -> (bnet_id, 写入时刻)：高峰期提示并发高，缓存避免重复 IO
         self._bind_cache: Dict[str, Tuple[str, float]] = {}
 
-    # ── 对外：注册提示任务 ────────────────────────────────────
-
-    def schedule_queue_notice(
-        self,
-        *,
-        event: Any,
-        command_text: str,
-        waiting: int,
-        done_event: asyncio.Event,
-    ) -> "asyncio.Task | None":
-        """入队前推送「排队中」提示（后台任务，不阻塞入队）。"""
-        try:
-            return asyncio.ensure_future(
-                self._send_queue_notice(event, command_text, waiting, done_event)
-            )
-        except Exception as e:  # 事件循环不可用等极端情况
-            logger.error(f"排队中提示任务创建失败: {e}")
-            return None
+    # ── 对外：注册预警任务 ────────────────────────────────────
 
     def schedule_timeout_warning(
         self,
@@ -81,43 +64,16 @@ class ReplyNoticeService:
         started_at: float,
         done_event: asyncio.Event,
     ) -> "asyncio.Task | None":
-        """注册 4:50 超时预警（计时起点为「收到用户指令」时刻，含排队等待）。"""
+        """注册 4:50 超时预警（计时起点为「收到用户指令」时刻）。"""
         try:
             return asyncio.ensure_future(
                 self._maybe_warn_reply_timeout(event, command_text, started_at, done_event)
             )
-        except Exception as e:
+        except Exception as e:  # 事件循环不可用等极端情况
             logger.error(f"超时预警任务创建失败: {e}")
             return None
 
     # ── 内部：发送 ────────────────────────────────────────────
-
-    async def _send_queue_notice(
-        self,
-        event: Any,
-        command_text: str,
-        waiting: int,
-        done_event: asyncio.Event,
-    ) -> None:
-        try:
-            if done_event.is_set():
-                return
-            bnet_id = await self.resolve_bnet_id(event, command_text)
-            text = build_queue_waiting_text(
-                bnet_id=bnet_id,
-                cmd_tag=build_cmd_tag(command_text),
-                waiting=waiting,
-                get_tag=GET_IMAGE_TAG,
-            )
-            # 紧邻发送前再确认一次：缩小「检查 → 实际发出」之间的竞态窗口
-            if done_event.is_set():
-                return
-            await self._platform.send_notice(
-                event, self._platform.format_text(event, text), timeout=self._send_timeout
-            )
-            done_event.set()  # 已含取图指引，取消 4:50 的同义预警
-        except Exception as e:
-            logger.error(f"排队中提示发送失败: {e}")
 
     async def _maybe_warn_reply_timeout(
         self,
@@ -130,7 +86,7 @@ class ReplyNoticeService:
         if remaining > 0:
             try:
                 await asyncio.wait_for(done_event.wait(), timeout=remaining)
-                return  # 指令已正常返回（或已推送排队提示），无需预警
+                return  # 指令已正常返回，无需预警
             except asyncio.TimeoutError:
                 pass
         if not decide_timeout_warning(
@@ -142,18 +98,18 @@ class ReplyNoticeService:
         try:
             if not self._platform.is_qq_group_message(event):
                 return
-            waiting = 0
-            if self._waiting_provider is not None:
+            running = 0
+            if self._running_provider is not None:
                 try:
-                    waiting = int(self._waiting_provider().waiting)
+                    running = int(self._running_provider().total_running)
                 except Exception:
-                    waiting = 0
+                    running = 0
             bnet_id = await self.resolve_bnet_id(event, command_text)
             text = build_timeout_warning_text(
                 bnet_id=bnet_id,
                 cmd_tag=build_cmd_tag(command_text),
-                waiting=waiting,
-                congested=waiting >= self._congestion_threshold,
+                running=running,
+                congested=running >= self._congestion_threshold,
                 get_tag=GET_IMAGE_TAG,
             )
             await self._platform.send_notice(

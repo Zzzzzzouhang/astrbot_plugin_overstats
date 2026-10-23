@@ -2,6 +2,26 @@
 
 ## 未发布
 
+### ♻️ 重构：取消排队队列，轻/重指令独立并发池（v3）
+
+依据线上高峰期数据（是区吗单条 703.9s、600s 排队超时频发、25 分钟内 105 次「msg_id 已过期」）重构整个排队控制结构：**等待队列整体移除，获得不到槽位即拒绝**，与 domain/service 分层架构对齐。
+
+- **轻/重全局槽位相互独立**：重指令仅「是区吗 / 开庭」，走独立重指令池；其余全部业务指令走轻指令池；
+- **超限即拒，不再排队**：任一行程获得不到槽位立即返回文案——排队等待正是 QQ 群聊「msg_id 已过期」与后端被瞬时打满的主要来源；
+- **新配置 `cmd_concurrency`（JSON，热生效）取代 `cmd_rate_limit` + `backend_concurrency_max`**：
+  - `enabled`：总开关（关闭后所有人不受单用户上限约束，全局容量仍生效）；
+  - `per_user_max`：单用户并发上限，默认 3 → **2**，轻/重合并单一计数，特权用户豁免；
+  - `light_max`：轻指令全局并发容量，默认 **0 = 不限制**（无限直连后端，由后端自行调度）；
+  - `heavy_max`：重指令全局并发容量，默认 **10**（0 同样表示不限制）；
+- **用户槽位超时自动释放保留**：`_slot_reclaim_loop` 每 60s 回收占用超 1 小时的泄漏槽位，回收幂等（reclaimed 抵扣）；
+- **不变**：是区吗分级 CD、AI 锐评每日限次、跨功能并发守卫（`_ow_executing`）、违规封禁 12h、维护模式、白名单；
+- **新增特权独立后端地址**：`privileged_backend_enabled` + `privileged_backend_url`——开启后白名单群/个人与 AstrBot 管理员的指令（含「是区吗结果/开庭结果」取图）发往独立后端地址，与普通用户流量隔离；仅 manual 模式生效，留空回退主地址。地址经任务上下文（ContextVar）传递，异步生成器链内的 `_fetch_image` 自动读取，无需逐个调用点透传；
+- **架构调整**：`core/domain/`（`concurrency_policy` / `concurrency_snapshot` 取代 `queue_policy` / `queue_snapshot`）、`core/service/`（`CommandConcurrencyService` 取代 `CommandQueueService`）；「排队中」前置提示随队列一并移除，4:50 超时预警与 24h 图片缓存保留；删除弃用模块 `deploy/ops/priority_queue.py`、`deploy/ops/concurrency_limiter.py`。
+
+注意：`_conf_schema.json` 的默认值仅对新安装 / 配置项缺失生效；已有部署需在 AstrBot 插件配置面板将 `cmd_rate_limit`、`backend_concurrency_max` 删除或忽略（代码不再读取），并按需填写新的 `cmd_concurrency`（不填则回落默认：单用户 2 / 轻不限 / 重 10）。
+
+## 未发布（历史）
+
 ### 💬 体验优化：两条技术化错误提示改为面向用户的中文文案
 
 - **`/绑定` 不带参数**：不再回复 AstrBot 核心的「必要参数缺失。该指令完整参数: bnet_id(str)」。`dashen_bind` 的 `bnet_id` 改为带默认值 `''` 的可选参数，改由插件自身的友好提示接管（「❌ 绑定失败！请输入规范战网 ID…」）；

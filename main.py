@@ -10,6 +10,7 @@ import json
 import threading
 import time
 import inspect
+from contextvars import ContextVar
 from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
 from astrbot.api.all import *
@@ -24,57 +25,44 @@ except ImportError:
     # 兜底：插件作为顶层模块加载时相对导入可能失败
     from deploy import DeployManager  # type: ignore[no-redef]
 
-# 按用户粒度指令并发限制器（内聚实现，已弃用，仅保留导入以兼容旧测试）
-try:
-    from .deploy.ops.concurrency_limiter import UserConcurrencyLimiter
-except ImportError:
-    from deploy.ops.concurrency_limiter import UserConcurrencyLimiter  # type: ignore[no-redef]
-
-# 排队与提示的分层架构：domain（纯策略）/ service（编排）/ platform（平台适配）
-# 注意：SlotRejected 必须与 CommandQueueService 从同一模块树导入（.core.domain）——
-# 它正是 acquire() 抛出、_run_with_cmd_slot 需要 except 的异常类。
-# 切勿改从 deploy.ops.priority_queue 门面导入：该门面内部按顶层 `core.` 绝对导入
-# （回退分支还会把插件根目录插入 sys.path），会得到另一个模块树的同名类，
-# 导致 except SlotRejected 永远匹配不到、拒绝异常逃逸到 AstrBot（表现为回复":("）。
+# 指令并发与提示的分层架构：domain（纯策略）/ service（编排）/ platform（平台适配）
+# 注意：SlotRejected 必须与 CommandConcurrencyService 从同一模块树导入（.core.domain /
+# .core.service）——SlotRejected 正是 acquire() 抛出、_run_with_cmd_slot 需要 except 的
+# 异常类。切勿经过 deploy/ops 下的门面中转：那会按顶层 `core.` 绝对导入得到另一个模块树
+# 的同名类，导致 except SlotRejected 永远匹配不到、拒绝异常逃逸到 AstrBot（表现为回复":("）。
 try:
     from .core.domain import (
         GET_IMAGE_TAG,
+        ConcurrencyThresholds,
         ImageCacheEntry,
-        QueueThresholds,
         RejectReason,
         ReplyWindow,
         SlotRejected,
-        SlotRequest,
+        SlotTicket,
         build_cmd_tag,
-        decide_queue_notice,
         extract_bnet_id,
         is_alive,
         is_valid_image_head,
-        should_pause_heavy,
-        should_reject_overflow,
         should_skip_status_prompt,
     )
-    from .core.service import CommandQueueService, ImageCacheService, ReplyNoticeService
+    from .core.service import CommandConcurrencyService, ImageCacheService, ReplyNoticeService
     from .core.platform.astrbot import AstrBotPlatformAdapter
 except ImportError:  # 插件作为顶层模块加载时
     from core.domain import (  # type: ignore[no-redef]
         GET_IMAGE_TAG,
+        ConcurrencyThresholds,
         ImageCacheEntry,
-        QueueThresholds,
         RejectReason,
         ReplyWindow,
         SlotRejected,
-        SlotRequest,
+        SlotTicket,
         build_cmd_tag,
-        decide_queue_notice,
         extract_bnet_id,
         is_alive,
         is_valid_image_head,
-        should_pause_heavy,
-        should_reject_overflow,
         should_skip_status_prompt,
     )
-    from core.service import CommandQueueService, ImageCacheService, ReplyNoticeService  # type: ignore[no-redef]
+    from core.service import CommandConcurrencyService, ImageCacheService, ReplyNoticeService  # type: ignore[no-redef]
     from core.platform.astrbot import AstrBotPlatformAdapter  # type: ignore[no-redef]
 
 # OW 开庭模块（独立封装，避免主文件臃肿）
@@ -121,6 +109,14 @@ except ImportError:  # 插件作为顶层模块加载时
     from features import config as features_config  # type: ignore[no-redef]
 
 logger = logging.getLogger("astrbot")
+
+# 后端地址上下文：特权独立后端地址开启时，由 handler 入口（_run_with_cmd_slot /
+# 结果类指令）按指令身份写入，同任务内的 _fetch_image 经 _resolve_backend_url() 读取。
+# 选型依据：异步生成器链与 await 协程共享所在任务的任务上下文（已实测：
+# agen 内 set 后，嵌套 coro_factory / _fetch_image 均能读到），
+# 且每条指令由 AstrBot 以独立任务驱动，天然按指令隔离，无需在 30 个
+# features 调用点逐个透传 event/base_url。
+_ACTIVE_BACKEND_URL: ContextVar[str | None] = ContextVar('overstats_active_backend_url', default=None)
 
 # QQ 富媒体图片上传前的数据校验：只放行真实图片字节。
 # 背景：曾出现后端 200 + 空 body / 200 + JSON 错误体被当作 .png 写入并上传 QQ，
@@ -190,14 +186,12 @@ class OverstatsPlugin(Star):
     _GROUP_CONFIG_KV_KEY = "group_feature_config"
     _MAINTENANCE_KV_KEY = "maintenance_state"
     _RATE_LIMIT_USER_REJECT_MSG = '⏳ 你已有指令正在执行，请等待其返回结果后再发起新的指令'
-    # 重指令（是区吗 / 开庭）拥堵自动暂停文案：全局排队等待数 > 阈值（默认 8）时，
-    # 新请求在 acquire() 锁内被精确拒绝、直接返回本文案，不再入队；队列回落到阈值以下自动恢复。
-    _HEAVY_PAUSED_MSG = '⚠️ 当前用的人较多，服务自动暂停，稍后再试。'
-    # 拥堵暂停文案中「预计等待耗时」的单人预估分钟数：按当前是区吗实测约 4 分钟/人
-    # （703.9s 一次查询 / 全局容量）估算，仅供用户心理预期，不参与任何限流判定。
-    # 注意：_heavy_paused_text() 依赖此常量，缺失会导致拥堵暂停路径 AttributeError，
-    # 把友好提示变成 ":(" 崩溃——新增类似文案常量时务必确认引用点已定义。
-    _HEAVY_PAUSED_PER_PERSON_MINUTES = 4
+    # 全局并发已满拒绝文案（轻/重指令池超限即拒，不排队）：
+    # v3 重构取消等待队列后不再有「拥堵暂停 + 预计等待」概念——获得不到槽位直接失败，
+    # 让用户稍后重试，而不是进队列干等把 QQ 回复窗口耗光。
+    _CONCURRENCY_FULL_MSG = '⚠️ 当前使用人数过多（并发已满），请稍后再试。'
+    # 重指令（是区吗 / 开庭）并发已满拒绝文案：单独措辞，便于用户理解是高成本指令池满。
+    _HEAVY_FULL_MSG = '⚠️ 当前使用人数过多（是区吗/开庭并发已满），请稍后再试。'
     # 运行槽位兜底回收阈值（秒）：任何槽位占用超过该时长即视为异常，由 _slot_reclaim_loop
     # 周期调用 expire_all() 回收。回收是幂等的——对应指令日后真正结束时其 release 只抵扣、
     # 不重复递减，因此不会让并发计数永久偏低。
@@ -238,7 +232,7 @@ class OverstatsPlugin(Star):
     _REPLY_MSG_ID_TTL = 300                       # QQ 回复消息 msg_id 过期时间（秒）
     _TIMEOUT_WARN_BEFORE = 290                    # 4分50秒：仍未返回则主动预警
     _IMAGE_CACHE_TTL = 86400                       # 生成图片本地缓存保留时长（24 小时）
-    _CONGESTION_WAITING_THRESHOLD = 3              # 排队人数达到此值视为拥堵
+    _CONGESTION_RUNNING_THRESHOLD = 3              # 在执行指令数达到此值视为服务繁忙
     # 获取图片单次补发上限：单聊每条消息最多回复 4 张、群聊最多 5 张，
     # 规避 QQ 被动回复次数超限；超出部分仍保留 24 小时，可再次获取图片取回。
     # 「获取图片」补发上限：最多 4 张合并为一条富媒体消息（与「单局详细」一致）。
@@ -255,27 +249,21 @@ class OverstatsPlugin(Star):
         # 现改为惰性加载一次后常驻内存，读路径零 IO 零锁；写路径更新内存并落盘（见 _binds_cache_get_all 等）。
         self._binds_mem: dict | None = None
         self._violation_bans_mem: dict | None = None
-        # 排队相关阈值（供 domain 策略使用，集中一处避免多处真相）
-        # 是区吗拥堵提示/暂停阈值：全局队列等待数 > 此值时向「是区吗」发送者追加拥堵提示
-        self._shiqu_congestion_threshold = 8
-        # 全局队列溢出硬上限：整体排队等待数 >= 此值时，直接拒绝后续普通指令
-        self._cmd_queue_overflow_threshold = 50
-        # 排队服务（service 层）：内部委托 domain 的准入策略，对外保持旧 API
-        self._cmd_limiter = CommandQueueService(
-            capacity=5,
-            per_user_max=3,
-            thresholds=QueueThresholds(
-                overflow=self._cmd_queue_overflow_threshold,
-                heavy_pause=self._shiqu_congestion_threshold,
-                heavy_deprio=5,
-                queue_wait_timeout=600,
+        # 指令并发控制服务（service 层）：轻/重独立全局槽位 + 按用户并发 + 超时自动释放，
+        # 准入判定委托 domain 纯函数。此处默认值仅作占位，随后由 _load_concurrency_config()
+        # 按 cmd_concurrency 配置热加载（默认：轻 0 不限 / 重 10 / 单用户 2）。
+        self._cmd_concurrency = CommandConcurrencyService(
+            per_user_max=2,
+            light_max=0,
+            heavy_max=10,
+            thresholds=ConcurrencyThresholds(
                 slot_auto_release=self._CMD_SLOT_AUTO_RELEASE_SECONDS,
             ),
         )
         # 平台适配器：收敛 QQ 官方 markdown / @ 消息链 / 被动回复等平台差异
         self._platform = AstrBotPlatformAdapter()
-        self._load_rate_limit_config()
-        self._semaphore_reset_task = asyncio.create_task(self._daily_semaphore_reset_loop())
+        self._load_concurrency_config()
+        self._concurrency_reset_task = asyncio.create_task(self._daily_concurrency_reset_loop())
         # 运行槽位兜底回收：正常释放走 _run_with_cmd_slot 的 finally，本循环只兜「异常泄漏」
         self._slot_reclaim_task = asyncio.create_task(self._slot_reclaim_loop())
         self.daily_group_prompt_suffix = '[今日已提示，群内后续指令不再提示将直接返回结果]'
@@ -313,15 +301,6 @@ class OverstatsPlugin(Star):
         self.daily_prompt_state = self._load_daily_prompt_state()
         self.daily_prompt_reset_task = asyncio.create_task(self._daily_prompt_reset_loop())
         self._http_session: aiohttp.ClientSession | None = None
-        # 后端请求并发闸门：与重指令队列容量解耦。轻指令不走全局队列、直连后端，
-        # 若沿用队列容量（global_max=3）会把轻指令一并卡在 3 条，故单独由
-        # backend_concurrency_max 兜底保护后端。
-        self._backend_concurrency_max = self._read_backend_concurrency_max()
-        self.overstats_semaphore = asyncio.Semaphore(self._backend_concurrency_max)
-        self._overstats_inner_semaphore = asyncio.Semaphore(self._backend_concurrency_max)
-        # 轻指令按用户并发计数：轻指令不进全局队列，但仍受 per_user_max 约束，
-        # 故单独按用户记账（判定与自增之间无 await，单线程 asyncio 下天然原子）。
-        self._light_user_running: dict[str, int] = {}
         # 周度总结专属后端并发上限（单条指令会打一次后端，故等价于同时最多 2 条周度总结在跑）
         self._weekly_summary_semaphore = asyncio.Semaphore(2)
         # 是区吗后端并发上限：全局同时最多 2 条「是区吗」查询在打后端图片接口
@@ -355,8 +334,8 @@ class OverstatsPlugin(Star):
             self._platform,
             window=ReplyWindow(ttl=self._REPLY_MSG_ID_TTL, warn_before=self._TIMEOUT_WARN_BEFORE),
             bnet_resolver=self._get_user_bind_id,
-            waiting_provider=self._cmd_limiter.snapshot,
-            congestion_threshold=self._CONGESTION_WAITING_THRESHOLD,
+            running_provider=self._cmd_concurrency.snapshot,
+            congestion_threshold=self._CONGESTION_RUNNING_THRESHOLD,
         )
         self.court_manager = CourtManager(self)
         self.shiqu_manager = ShiquManager(self)
@@ -461,7 +440,7 @@ class OverstatsPlugin(Star):
         except Exception as e:
             logger.error(f'群聊每日首次提示重置任务异常: {e}')
 
-    async def _daily_semaphore_reset_loop(self):
+    async def _daily_concurrency_reset_loop(self):
         """每日凌晨 4 点重置指令并发计数器，防止槽位泄漏累积。"""
         try:
             while True:
@@ -471,12 +450,12 @@ class OverstatsPlugin(Star):
                     next4 += timedelta(days=1)
                 wait_sec = max(1, (next4 - now).total_seconds())
                 await asyncio.sleep(wait_sec)
-                await self._cmd_limiter.clear()
-                logger.info('[Overstats] 每日 4 点已重置指令限流计数器')
+                await self._cmd_concurrency.clear()
+                logger.info('[Overstats] 每日 4 点已重置指令并发计数器')
         except asyncio.CancelledError:
-            logger.info('指令限流每日重置任务已停止')
+            logger.info('指令并发每日重置任务已停止')
         except Exception as e:
-            logger.error(f'指令限流每日重置任务异常: {e}')
+            logger.error(f'指令并发每日重置任务异常: {e}')
 
     async def _slot_reclaim_loop(self):
         """周期回收运行超时的指令槽位（兜底）。
@@ -492,7 +471,7 @@ class OverstatsPlugin(Star):
             while True:
                 await asyncio.sleep(self._SLOT_RECLAIM_INTERVAL)
                 try:
-                    removed = await self._cmd_limiter.expire_all()
+                    removed = await self._cmd_concurrency.expire_all()
                 except Exception as e:
                     logger.warning(f'[Overstats] 运行槽位兜底回收异常: {e}')
                     continue
@@ -752,57 +731,57 @@ class OverstatsPlugin(Star):
                 pass
         return False
 
-    def _load_rate_limit_config(self):
-        """读取指令并发限流配置（支持热生效：配置内容变化时自动重载）。
+    def _load_concurrency_config(self):
+        """读取指令并发配置 cmd_concurrency（支持热生效：配置内容变化时自动重载）。
 
-        cmd_rate_limit 为 JSON 字符串，字段：
+        cmd_concurrency 为 JSON 字符串，字段（0 均表示不限制）：
           enabled:      总开关。严格布尔解析，`"false"/"0"/"off"/空` 一律视为关闭，
-                        避免 `bool("false") == True` 导致限流被意外开启。
-          per_user_max: 同一普通用户并发上限（默认 3；0 或负数表示不限制）。
-                        作用于全部业务指令：重指令在队列内受其约束，轻指令不进队列、
-                        但由插件按用户单独记账并同样受此上限约束。
-          global_max:   重指令（是区吗 / 开庭）的全局并发容量上限（schema 默认 6，
-                        配置缺失或非法时代码回退 3）。
-                        轻指令不走该队列（直连后端、由后端自行调度），不受此值限制；
-                        特权（白名单群/人/管理员）不受 per_user_max 约束，但仍受此全局容量约束并插队优先。
+                        避免 `bool("false") == True` 导致并发控制被意外开启。
+                        关闭后所有人视为特权（不受单用户上限约束），
+                        但轻/重全局槽位容量仍然生效。
+          per_user_max: 同一用户并发上限（默认 2，轻/重合并单一计数；
+                        特权用户不受约束）。
+          light_max:    轻指令（除 是区吗/开庭 外的全部业务指令）全局并发容量，
+                        默认 0 = 不限制，即无限直连后端、由后端自行调度。
+          heavy_max:    重指令（仅 是区吗 / 开庭）全局并发容量，默认 10；
+                        超出即拒绝并返回文案，不排队。轻/重两池相互独立。
         """
-        raw = str(self.config.get('cmd_rate_limit', '{}') or '{}').strip()
-        if getattr(self, '_rate_limit_cfg_raw', None) == raw:
+        raw = str(self.config.get('cmd_concurrency', '{}') or '{}').strip()
+        if getattr(self, '_concurrency_cfg_raw', None) == raw:
             return
-        self._rate_limit_cfg_raw = raw
+        self._concurrency_cfg_raw = raw
         try:
             cfg = json.loads(raw) if raw else {}
             if not isinstance(cfg, dict):
                 cfg = {}
         except Exception:
             cfg = {}
-        self._rate_limit_enabled = self._strict_bool(cfg.get('enabled'), False)
-        try:
-            per_user = int(cfg.get('per_user_max', 3))
-        except (TypeError, ValueError):
-            per_user = 3
-        self._rate_limit_per_user = max(0, per_user)
-        try:
-            global_max = int(cfg.get('global_max', 3))
-        except (TypeError, ValueError):
-            global_max = 3
-        self._rate_limit_global_max = max(1, global_max)
-        if getattr(self, '_cmd_limiter', None) is not None:
-            self._cmd_limiter.update_config(
-                self._rate_limit_per_user,
-                self._CMD_SLOT_AUTO_RELEASE_SECONDS,
-                capacity=self._rate_limit_global_max,
+        self._concurrency_enabled = self._strict_bool(cfg.get('enabled'), False)
+
+        def _int_field(key: str, default: int) -> int:
+            # 安全的整型读取：0 是合法值（表示不限制），不能用 `or` 覆盖
+            try:
+                return max(0, int(cfg.get(key, default)))
+            except (TypeError, ValueError):
+                return default
+
+        per_user = _int_field('per_user_max', 2)
+        light_max = _int_field('light_max', 0)
+        heavy_max = _int_field('heavy_max', 10)
+        self._concurrency_per_user = per_user
+        self._concurrency_light_max = light_max
+        self._concurrency_heavy_max = heavy_max
+        if getattr(self, '_cmd_concurrency', None) is not None:
+            self._cmd_concurrency.update_config(
+                enabled=self._concurrency_enabled,
+                per_user_max=per_user,
+                light_max=light_max,
+                heavy_max=heavy_max,
+                slot_auto_release=self._CMD_SLOT_AUTO_RELEASE_SECONDS,
             )
-            # 后端并发闸门与此处的重指令队列容量解耦：轻指令直连后端、不受 global_max
-            # 约束，只由 backend_concurrency_max 兜底，避免把轻指令一并卡在重指令上限上。
-            if hasattr(self, 'overstats_semaphore'):
-                n = self._read_backend_concurrency_max()
-                self._backend_concurrency_max = n
-                self.overstats_semaphore = asyncio.Semaphore(n)
-                self._overstats_inner_semaphore = asyncio.Semaphore(n)
         logger.info(
-            f'[Overstats] 指令限流配置生效: enabled={self._rate_limit_enabled} '
-            f'per_user_max={self._rate_limit_per_user} global_max={self._rate_limit_global_max}'
+            f'[Overstats] 指令并发配置生效: enabled={self._concurrency_enabled} '
+            f'per_user_max={per_user} light_max={light_max} heavy_max={heavy_max}'
         )
 
     @staticmethod
@@ -820,13 +799,13 @@ class OverstatsPlugin(Star):
         return default
 
     def _is_privileged(self, event: AstrMessageEvent) -> bool:
-        """白名单群/用户 或 AstrBot 管理员不受限流控制。限流关闭时所有人视为特权。"""
-        self._load_rate_limit_config()  # 热生效：面板修改配置后无需重启
-        return not self._rate_limit_enabled or self._is_whitelisted(event) or self._is_astrbot_admin(event)
+        """白名单群/用户 或 AstrBot 管理员不受单用户并发上限约束。并发关闭时所有人视为特权。"""
+        self._load_concurrency_config()  # 热生效：面板修改配置后无需重启
+        return not self._concurrency_enabled or self._is_whitelisted(event) or self._is_astrbot_admin(event)
 
     @staticmethod
     def _cmd_user_key(event: AstrMessageEvent | None) -> str | None:
-        """从事件提取限流用户键；event 为空或取 ID 失败时返回 None（不限制、不计数）。"""
+        """从事件提取并发计数用户键；event 为空或取 ID 失败时返回 None（不限制、不计数）。"""
         if event is None:
             return None
         try:
@@ -834,79 +813,35 @@ class OverstatsPlugin(Star):
         except Exception:
             return None
 
-    async def _try_acquire_cmd_slot(self, event: AstrMessageEvent | None = None, *, privileged: bool = False, heavy: bool = False) -> None:
-        """获取全局指令并发槽位（真实队列）。
+    async def _try_acquire_cmd_slot(self, event: AstrMessageEvent | None = None, *, privileged: bool = False, heavy: bool = False) -> SlotTicket:
+        """获取指令并发槽位（轻/重独立池，超限即拒）。
 
-        成功返回；被拒绝抛 SlotRejected（个人并发已满 / 排队超时）。
-        特权（白名单/管理员/限流关闭）插队优先。
-        heavy：重指令标记（是区吗/开庭），拥堵时降权优先放行轻指令。
+        成功返回槽位凭证；被拒绝抛 SlotRejected（个人并发已满 / 轻或重全局槽位已满）。
+        heavy：重指令标记（仅 是区吗/开庭），进入独立的重指令池。
         """
-        self._load_rate_limit_config()
-        return await self._cmd_limiter.acquire(self._cmd_user_key(event), privileged=privileged, heavy=heavy)
+        self._load_concurrency_config()
+        return await self._cmd_concurrency.acquire(self._cmd_user_key(event), privileged=privileged, heavy=heavy)
 
     async def _release_cmd_slot(self, event: AstrMessageEvent | None = None, slot_id: int = 0) -> None:
         """释放该用户的指令并发槽位。
 
         传入 slot_id（>0）时精确释放该槽位；否则按用户 FIFO 释放其最早占用的槽位。
         """
-        await self._cmd_limiter.release(self._cmd_user_key(event), slot_id)
+        await self._cmd_concurrency.release(self._cmd_user_key(event), slot_id)
 
-    def _is_per_user_saturated(self, event: AstrMessageEvent | None) -> bool:
-        """预检该用户个人并发是否已达上限（仅用于「是否先推排队提示」的决策）。
+    # ── 后端地址路由（主地址 / 第二、第三地址 / 是区吗专属地址 / 特权独立地址）──
 
-        真正准入仍由 acquire() 在锁内判断；此处无锁读取，结果可能瞬时偏差，故仅影响提示文案。
+    def _shiqu_dedicated_active(self) -> bool:
+        """是区吗专属地址分流是否实际生效（开启 + manual 模式 + 所选地址与主地址不同）。
+
+        生效时 shiqu 相关请求显式传 base_url；未生效时传 None，
+        让 _fetch_image 走默认解析链（上下文特权地址 → 主地址）。
         """
-        limiter = getattr(self, '_cmd_limiter', None)
-        if limiter is None:
+        if not self._strict_bool(self.config.get('shiqu_dedicated_address_enabled'), False):
             return False
-        try:
-            return bool(limiter.per_user_saturated(self._cmd_user_key(event)))
-        except Exception:
+        if getattr(self, 'deploy_manager', None) is not None and self.deploy_manager.is_auto_mode:
             return False
-
-    # ── 轻指令按用户并发记账（不进全局队列，但仍受 per_user_max 约束）──
-
-    def _try_take_light_user_slot(self, event: AstrMessageEvent) -> bool:
-        """轻指令按用户并发准入：同一用户并发数已达 per_user_max 则拒绝。
-
-        轻指令不进全局队列（无槽位、不排队），但仍受 per_user_max 约束，故在此单独按用户记账。
-        特权用户（白名单 / 管理员 / 限流总开关关闭）不受限；per_user_max<=0 表示不限制。
-        判定与自增之间无 await，单线程 asyncio 下天然原子，无需额外加锁。
-        """
-        self._load_rate_limit_config()
-        if self._is_privileged(event):
-            return True
-        if self._rate_limit_per_user <= 0:
-            return True
-        uk = self._cmd_user_key(event)
-        if uk is None:
-            return True
-        cur = self._light_user_running.get(uk, 0)
-        if cur >= self._rate_limit_per_user:
-            return False
-        self._light_user_running[uk] = cur + 1
-        return True
-
-    def _release_light_user_slot(self, event: AstrMessageEvent) -> None:
-        """释放该用户一个轻指令并发计数（与 _try_take_light_user_slot 配对，放在 finally）。"""
-        uk = self._cmd_user_key(event)
-        if uk is None:
-            return
-        cur = self._light_user_running.get(uk, 0)
-        if cur <= 1:
-            self._light_user_running.pop(uk, None)
-        else:
-            self._light_user_running[uk] = cur - 1
-
-    # ── 后端地址路由（主地址 / 第二、第三地址 / 是区吗专属地址）──
-
-    def _read_backend_concurrency_max(self) -> int:
-        """后端请求并发上限；<=0 表示不限制（用极大值构造信号量，避免 Semaphore(0) 永久阻塞）。"""
-        try:
-            n = int(self.config.get('backend_concurrency_max', 32))
-        except (TypeError, ValueError):
-            n = 32
-        return n if n > 0 else 10 ** 6
+        return bool(self.shiqu_base_url) and self.shiqu_base_url != self.base_url
 
     @property
     def shiqu_base_url(self) -> str:
@@ -928,51 +863,64 @@ class OverstatsPlugin(Star):
             url = str(self.config.get('overstats_api_url_2', '') or '').strip()
         return url or self.base_url
 
-    def _heavy_paused_text(self, waiting: int) -> str:
-        """重指令拥堵暂停文案：基础提示 + 当前排队人数 + 按每人约 4 分钟预估的等待耗时。
+    @property
+    def privileged_base_url(self) -> str:
+        """特权用户（白名单群/个人、AstrBot 管理员）的独立后端地址。
 
-        waiting 为全局队列当前等待人数；eta = waiting * _HEAVY_PAUSED_PER_PERSON_MINUTES，
-        超过 1 小时按「X 小时 Y 分」展示，否则按「X 分钟」。
+        开关开启且填写地址后生效；仅 manual（独立链接）模式支持——
+        auto 模式只有一个本地托管后端，自动忽略。留空或未开启时返回空串，
+        由 _fetch_image 回退主地址。
         """
-        try:
-            waiting = max(0, int(waiting))
-        except (TypeError, ValueError):
-            waiting = 0
-        eta_min = waiting * self._HEAVY_PAUSED_PER_PERSON_MINUTES
-        if eta_min >= 60:
-            h, m = divmod(eta_min, 60)
-            eta = f'{h} 小时 {m} 分' if m else f'{h} 小时'
-        else:
-            eta = f'{eta_min} 分钟'
-        return f'{self._HEAVY_PAUSED_MSG}当前排队约 {waiting} 人，预计还需约 {eta}。'
+        if not self._strict_bool(self.config.get('privileged_backend_enabled'), False):
+            return ''
+        if getattr(self, 'deploy_manager', None) is not None and self.deploy_manager.is_auto_mode:
+            return ''
+        return str(self.config.get('privileged_backend_url', '') or '').strip()
 
-    async def _run_with_cmd_slot(self, event: AstrMessageEvent, coro_factory, *, heavy: bool = False, congestion_hint: bool = False):
-        """业务指令并发限流包装器：在 main.py handler 层统一获取/释放全局槽位。
+    def _active_backend_url_for(self, privileged: bool) -> str | None:
+        """按指令特权身份解析本次命令的后端地址覆盖（None = 走默认解析链）。
+
+        在 handler 入口写入上下文变量；同任务内的 _fetch_image 自动读取
+        （异步生成器链共享任务上下文，已实测验证）。
+        """
+        if privileged:
+            return self.privileged_base_url or None
+        return None
+
+    def _resolve_backend_url(self) -> str:
+        """_fetch_image 用：上下文地址（特权分流）优先，其次主地址。"""
+        return _ACTIVE_BACKEND_URL.get() or self.base_url
+
+    def _concurrency_reject_text(self, reason, heavy: bool = False) -> str:
+        """并发拒绝文案：按拒绝原因区分个人上限 / 全局槽位已满。"""
+        if reason == RejectReason.PER_USER_FULL:
+            return self._RATE_LIMIT_USER_REJECT_MSG
+        if heavy or reason == RejectReason.HEAVY_FULL:
+            return self._HEAVY_FULL_MSG
+        return self._CONCURRENCY_FULL_MSG
+
+    async def _run_with_cmd_slot(self, event: AstrMessageEvent, coro_factory, *, heavy: bool = False):
+        """业务指令并发控制包装器：在 main.py handler 层统一获取/释放全局槽位。
 
         - 仅"需要访问后端且触发 LLM 生成"的业务指令使用本包装；绑定/帮助/管理/测试类指令、
           结果读取类（ow是区吗结果/ow开庭结果，use_db=True 快速读取，不触发 LLM 扇出）以及
-          「获取图片」（读本地缓存）均不经过限流。
-        - 重指令（heavy=True，是区吗 / 开庭）进入全局真实队列，容量为 global_max（默认 3）；
-          特权（白名单群/人/管理员，或限流关闭）插队优先，普通用户排队队尾并额外受 per_user_max 约束。
-        - 轻指令（heavy=False）不进队列：不占槽位、不排队、不做溢出/拥堵拒绝，直接打后端
-          由后端自行调度并发；仅按用户受 per_user_max 约束（见 _try_take_light_user_slot）。
-        - 仅「个人并发已满」立即返回拒绝文案；队列等待不拒绝，只 await 直至获得槽位。
-        - 槽位覆盖整个生成器生命周期，try/finally 保证任何中断（含 astrbot 取消）都会释放。
-        - 超时预警计时起点为「收到用户指令」的时刻（本方法入口，早于排队与后续所有 await），
-          排队等待同样计入——与 QQ 群聊被动回复 msg_id 的 5 分钟交互窗口对齐。
-        - heavy：重指令标记（是区吗/开庭），拥堵时降权优先放行轻指令。
-        - congestion_hint：拥堵提示标记（仅 是区吗 使用）。当全局队列等待数 >
-          self._shiqu_congestion_threshold 时，在获取槽位【之前】先向发送者追加一条
-          "同时人多/会优先处理其他指令/可能等待过长" 的提示，避免用户干等。
-        - 高峰排队提示：群聊下当指令无法立即获得全局槽位（等待队列非空，或运行槽位已满、
-          本指令入队后必然要等）时，在获取槽位【之前】以后台任务（不阻塞入队）向发送者
-          推送「⏳ 正在排队中…（约 N 人）回复即将超时，请稍后点 获取图片」提示——用户
-          入队后第一时间即可得知拥堵与超时风险，不再干等 4:50 的超时预警；该提示推送成功后
-          置位 done_event，4:50 的「仍在生成中」超时预警随之取消（避免同义重复）。
+          「获取图片」（读本地缓存）均不经过并发控制。
+        - 轻/重指令全局槽位相互独立（heavy=False / True）：
+          轻指令池默认 0 = 不限制，即无限直连后端、由后端自行调度并发；
+          重指令池（仅 是区吗 / 开庭）默认 10。
+        - 超限即拒：获得不到槽位立即返回拒绝文案，不排队、不干等——
+          排队等待正是 QQ 群聊「msg_id 已过期」与后端被瞬时打满的主要来源。
+        - 单用户并发上限（per_user_max，默认 2）跨轻/重单一计数；
+          特权（白名单群/人/管理员/并发关闭）不受约束，但仍受全局容量约束。
+        - 槽位覆盖整个生成器生命周期，try/finally 保证任何中断（含 astrbot 取消）都会释放；
+          另有 _slot_reclaim_loop 每 60s 兜底回收占用超 1 小时的泄漏槽位。
+        - 超时预警计时起点为「收到用户指令」的时刻（本方法入口，早于后续所有 await），
+          与 QQ 群聊被动回复 msg_id 的 5 分钟交互窗口对齐（4:50 发送）。
+        - 特权独立后端地址：开启后按指令身份写入地址上下文，同任务内的
+          _fetch_image 自动读到（普通用户不受影响，仍走主地址）。
         - coro_factory：无参可调用，返回 async generator。
         """
-        # 计时起点：收到用户指令即开始（早于排队与后续所有 await），使 4:50 超时预警
-        # 连同排队等待一并计算，仍在 msg_id 的 5 分钟交互窗口内发出。
+        # 计时起点：收到用户指令即开始，使 4:50 超时预警在 msg_id 的 5 分钟交互窗口内发出。
         started_at = time.monotonic()
         group_qq = bool(self._save_image_locally and self._is_qq_group_message(event))
         cmd_text = (getattr(event, 'message_str', '') or '').strip()[:60] if group_qq else ''
@@ -985,85 +933,16 @@ class OverstatsPlugin(Star):
             )
         self._mark_cmd_notice_state(event, started_at, done_event)
         try:
-            if not heavy:
-                # 轻指令：不走全局队列——不占槽位、不排队、不做溢出/拥堵拒绝，
-                # 直接打后端、由后端自行调度并发（避免重指令队列成为轻指令的瓶颈）。
-                # 仅保留「同一用户并发不超过 per_user_max」的按用户限流。
-                if not self._try_take_light_user_slot(event):
-                    yield event.plain_result(self._RATE_LIMIT_USER_REJECT_MSG)
-                    if self.monitor:
-                        try:
-                            uid = str(event.get_sender_id())
-                        except Exception:
-                            uid = ''
-                        asyncio.ensure_future(self.monitor.record_rate_limit('cmd', uid))
-                    return
-                try:
-                    async for r in coro_factory():
-                        yield r
-                finally:
-                    self._release_light_user_slot(event)
-                return
-            # ── 以下为重指令（是区吗 / 开庭）的全局队列路径 ──
             privileged = self._is_privileged(event)
-            request = SlotRequest.of(self._cmd_user_key(event), privileged=privileged, heavy=heavy)
-            # 全局队列快照与阈值（一次读取，供溢出保护 / 重指令暂停 / 高峰排队提示共用）
-            snapshot = self._cmd_limiter.snapshot()
-            thresholds = self._cmd_limiter.thresholds
-            # 全局队列溢出保护（domain 策略）：整体排队等待数 >= 硬上限时，直接拒绝后续普通指令，
-            # 避免队列无限堆积拖垮后端；管理员 / 白名单（privileged）不受限，可正常进入排队。
-            if should_reject_overflow(snapshot, request, thresholds):
-                yield event.plain_result(
-                    f"⚠️ 当前使用人数过多（队列＞{thresholds.overflow}），请稍后再试。"
-                )
-                return
-            # 重指令（是区吗 / 开庭）拥堵自动暂停：全局排队等待数 > 阈值（默认 10）时，
-            # 直接暂停该重指令并返回，不再入队等待——避免重指令在拥堵时持续挤占后端、拖垮全部用户。
-            # 等待数 > 5（heavy_deprio）时已由优先级队列让「轻普通」插队到「重普通」前面；
-            # 这里进一步在等待数 > 阈值（默认 8）时直接把「重普通」抛出。管理员 / 白名单（privileged）不受限。
-            # 队列回落到阈值以下后，普通用户新请求自动恢复正常（无需手动恢复）。
-            # 此处为「快照式早停」：等待数已明显超阈值时直接返回，省去后续提示任务调度；
-            # 权威判定在 acquire() 锁内（should_pause_heavy_at，实时计数），用于兜住并发超额——
-            # 快照读到 ≈阈值、到真正入队前计数又被推高的请求，会在 acquire 处被精确拒绝（见下方 SlotRejected 分支）。
-            if should_pause_heavy(snapshot, request, thresholds):
-                yield event.plain_result(self._heavy_paused_text(snapshot.waiting))
-                return
-            # 高峰排队前置提示（domain 决策）：指令无法立即获得槽位（等待队列非空，或运行槽位已满——
-            # 本指令入队后必然要等）时，不等 4:50 超时预警，入队前即向群内推送「排队中」提示
-            # （含排队人数与「回复即将超时，请稍后点 获取图片」），让用户入队后第一时间知情。
-            # 由提示服务以后台任务发送（不 await）：平台发送耗时（最坏 15s）不再占用入队关键路径
-            # ——否则这段耗时直接从用户的 5 分钟预算里扣除，且高峰期会被平台限流进一步放大。
-            # 发送成功后由该任务置位 done_event，取消 4:50 的超时预警（同义去重）。
-            # 先预检个人并发：已满时 acquire 会立即拒绝（"你已有指令正在执行"），
-            # 此时再推「排队中…请稍后点获取图片」会给出互相矛盾的两条指引。
-            notice_decision = decide_queue_notice(
-                group_message=group_qq,
-                privileged=privileged,
-                snapshot=snapshot,
-                per_user_saturated=self._is_per_user_saturated(event),
-            )
-            if notice_decision.should_send:
-                notice_task: asyncio.Task | None = self._notice_service.schedule_queue_notice(
-                    event=event, command_text=cmd_text, waiting=notice_decision.waiting, done_event=done_event
-                )
-            else:
-                notice_task = None
-            ticket = None
+            # 后端地址上下文：特权分流开启时指向独立地址，否则显式置 None（主地址），
+            # 避免同一任务内上一条特权指令的地址残留影响到本条普通指令。
+            _ACTIVE_BACKEND_URL.set(self._active_backend_url_for(privileged))
+            ticket: SlotTicket | None = None
             try:
                 ticket = await self._try_acquire_cmd_slot(event, privileged=privileged, heavy=heavy)
             except SlotRejected as rej:
-                # acquire 被立即拒绝：提示任务往往还没被事件循环调度（同一 tick 内锁的快速路径
-                # 不挂起、直接抛出），此时取消它即可，避免用户同时收到「正在排队中…请稍后点 获取图片」
-                # 与拒绝文案两条互相矛盾的指引；若提示已发出则不回收（已送达的消息无法撤回）。
-                if notice_task is not None and not notice_task.done():
-                    notice_task.cancel()
-                if getattr(rej, 'reason', None) == RejectReason.HEAVY_PAUSED:
-                    # 锁内精确判定：排队已超阈值，直接暂停（与上方快照早停同一文案）。
-                    # 这是兜住「超过阈值」上限的权威路径——快照读到 ≈阈值、入队前计数又被
-                    # 并发请求推高的请求，会在这里被精确抛掉，队列不会无限冲到远高于阈值。
-                    yield event.plain_result(self._heavy_paused_text(self._cmd_limiter.snapshot().waiting))
-                    return
-                yield event.plain_result(self._RATE_LIMIT_USER_REJECT_MSG)
+                # 超限即拒：个人并发已满 / 轻或重全局槽位已满，直接返回对应文案
+                yield event.plain_result(self._concurrency_reject_text(getattr(rej, 'reason', None), heavy))
                 try:
                     uid = str(event.get_sender_id())
                 except Exception:
@@ -1100,7 +979,7 @@ class OverstatsPlugin(Star):
         """以「被动回复」方式 @ 发送者发送提示——委托 platform 适配器。
 
         event.send 以原消息 msg_id 作回复目标，规避群内主动消息所需的 admin 权限
-        （v4.28.2 报错「主动消息失败, 无权限」）；入队提示与 4:50 超时预警均在 5 分钟
+        （v4.28.2 报错「主动消息失败, 无权限」）；4:50 超时预警在 5 分钟
         交互窗口内，被动回复不受主动消息权限限制。
         包一层超时：避免平台发送阻塞导致后台任务（及捕获的 event）被长期持有 → 内存泄漏。
         """
@@ -1434,7 +1313,7 @@ class OverstatsPlugin(Star):
             注意：指令并发限流槽位已上移至 main.py handler 层（_run_with_cmd_slot）统一管理，
             本方法不再获取/释放槽位，仅负责维护模式与每日首次提示。
 
-            拥堵场景优化：若该指令已推送过「排队中」提示且 msg_id 窗口已过期，
+            拥堵场景优化：若该指令已推送过含取图指引的提示且 msg_id 窗口已过期，
             则状态提示注定被动回复失败（线上高峰期大量「msg_id 已过期」失败即来自此处），
             此时返回 None 静默跳过——用户已持有取回方式，不必再发一条必然失败的消息。
             """
@@ -1525,7 +1404,7 @@ class OverstatsPlugin(Star):
                 self._image_cache_service.flush()
         except Exception as e:
             logger.warning(f'[Overstats] 停止图片缓存服务异常: {e}')
-        for task_attr in ('daily_prompt_reset_task', '_cleanup_task', '_semaphore_reset_task',
+        for task_attr in ('daily_prompt_reset_task', '_cleanup_task', '_concurrency_reset_task',
                           '_slot_reclaim_task', '_image_cache_flush_task'):
             task = getattr(self, task_attr, None)
             if task and (not task.done()):
@@ -1584,85 +1463,85 @@ class OverstatsPlugin(Star):
 
         retry=True（默认）：遇到 5xx/internal_error 等瞬时错误 10 秒后自动重试 1 次（共 2 次尝试）；
         retry=False：只尝试 1 次，失败直接返回（是区吗/开庭等 AI 生成类功能使用，避免重复高成本生成）。
-        base_url：覆盖默认主地址（用于「是区吗」分流到专属后端节点）；留空则走主地址 self.base_url。
+        base_url：显式覆盖地址（用于「是区吗」专属地址分流）；留空时按解析链取值——
+        上下文中的特权独立后端地址（若开启）→ 主地址 self.base_url。
+        并发控制不在本方法内：由 handler 层 _run_with_cmd_slot 的轻/重全局槽位统一把关。
         """
-        url = f'{base_url or self.base_url}{endpoint}'
+        url = f'{base_url or self._resolve_backend_url()}{endpoint}'
         payload = payload or {}
-        async with self.overstats_semaphore:
-            async with self._overstats_inner_semaphore:
-                for attempt in ((1, 2) if retry else (1,)):  # 最多 2 次尝试（1 次自动重试），间隔 10 秒
-                    start_ts = time.time()
-                    try:
-                        session = await self._get_http_session()
-                        req_timeout = aiohttp.ClientTimeout(total=timeout) if timeout != 600 else None
-                        async with session.post(url, json=payload, timeout=req_timeout) as resp:
-                            if resp.status == 200:
-                                body = await resp.read()
-                                # 200 不代表一定是图片：空 body / JSON 错误体一律按错误处理，
-                                # 避免把无效数据当 .png 上传 QQ（富媒体上传返回 None → 重试风暴）。
-                                # 先校验再记监控：无效响应不应计入成功 API 调用。
-                                invalid_reason = _validate_image_bytes(body)
-                                if invalid_reason:
-                                    logger.error(
-                                        f'Overstats API 返回无效图片数据(content_type={resp.content_type}, '
-                                        f'{invalid_reason}): {endpoint}'
-                                    )
-                                    return (
-                                        None,
-                                        {'error': 'invalid_image', 'message': f'后端返回的图片数据无效（{invalid_reason}），请稍后重试'},
-                                        'invalid_image',
-                                    )
-                                if self.monitor:
-                                    elapsed = int((time.time() - start_ts) * 1000)
-                                    asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
-                                return (body, None, '')
-                            else:
-                                try:
-                                    error_data = await resp.json()
-                                except Exception:
-                                    if self.monitor:
-                                        elapsed = int((time.time() - start_ts) * 1000)
-                                        asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
-                                    logger.error(f'Overstats API 返回了非 JSON 错误: {resp.status}')
-                                    return (None, {'error': 'non_json_error', 'message': 'API返回非JSON格式错误'}, 'non_json_error')
-                                _soft_errors = {'bnet_not_found', 'summary_empty'}
-                                _is_soft = isinstance(error_data, dict) and error_data.get('error') in _soft_errors
-                                _retryable = retry and self._is_retryable_backend_error(resp.status, error_data)
-                                if _retryable and attempt < 2:
-                                    if self.monitor:
-                                        elapsed = int((time.time() - start_ts) * 1000)
-                                        asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
-                                    logger.warning(f'Overstats API 瞬时错误({resp.status})，10秒后自动重试（第2/2次）: {endpoint}')
-                                    await asyncio.sleep(10)
-                                    continue
-                                if self.monitor:
-                                    elapsed = int((time.time() - start_ts) * 1000)
-                                    asyncio.ensure_future(self.monitor.record_api(endpoint, _is_soft, elapsed))
-                                logger.error(f'Overstats API 错误: {resp.status} - {error_data}')
-                                if isinstance(error_data, dict):
-                                    if error_data.get('error') == 'internal_error':
-                                        orig_msg = error_data.get('message', '')
-                                        error_data['message'] = f'{orig_msg}，网络波动，请重试'
-                                    if resp.status == 429 or 'too many requests' in str(error_data.get('message', '')).lower():
-                                        orig_msg = error_data.get('message', '')
-                                        error_data['message'] = f'{orig_msg}。使用人数过多，请稍后再试或尝试自部署Overstats或astrbot_plugin_overstats'
-                                    _friendly = _FRIENDLY_UPSTREAM_ERRORS.get(str(error_data.get('error') or ''))
-                                    if _friendly:
-                                        _details = error_data.get('details')
-                                        _mode = str(_details.get('mode') or '') if isinstance(_details, dict) else ''
-                                        error_data['message'] = _friendly.format(mode=_MODE_LABELS.get(_mode, '该'))
-                                return (None, error_data, error_data.get('error', '') if isinstance(error_data, dict) else '')
-                    except Exception as e:
-                        if retry and attempt < 2:
-                            logger.warning(f'网络请求异常，10秒后自动重试（第2/2次）: {e}')
+        for attempt in ((1, 2) if retry else (1,)):  # 最多 2 次尝试（1 次自动重试），间隔 10 秒
+            start_ts = time.time()
+            try:
+                session = await self._get_http_session()
+                req_timeout = aiohttp.ClientTimeout(total=timeout) if timeout != 600 else None
+                async with session.post(url, json=payload, timeout=req_timeout) as resp:
+                    if resp.status == 200:
+                        body = await resp.read()
+                        # 200 不代表一定是图片：空 body / JSON 错误体一律按错误处理，
+                        # 避免把无效数据当 .png 上传 QQ（富媒体上传返回 None → 重试风暴）。
+                        # 先校验再记监控：无效响应不应计入成功 API 调用。
+                        invalid_reason = _validate_image_bytes(body)
+                        if invalid_reason:
+                            logger.error(
+                                f'Overstats API 返回无效图片数据(content_type={resp.content_type}, '
+                                f'{invalid_reason}): {endpoint}'
+                            )
+                            return (
+                                None,
+                                {'error': 'invalid_image', 'message': f'后端返回的图片数据无效（{invalid_reason}），请稍后重试'},
+                                'invalid_image',
+                            )
+                        if self.monitor:
+                            elapsed = int((time.time() - start_ts) * 1000)
+                            asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
+                        return (body, None, '')
+                    else:
+                        try:
+                            error_data = await resp.json()
+                        except Exception:
+                            if self.monitor:
+                                elapsed = int((time.time() - start_ts) * 1000)
+                                asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
+                            logger.error(f'Overstats API 返回了非 JSON 错误: {resp.status}')
+                            return (None, {'error': 'non_json_error', 'message': 'API返回非JSON格式错误'}, 'non_json_error')
+                        _soft_errors = {'bnet_not_found', 'summary_empty'}
+                        _is_soft = isinstance(error_data, dict) and error_data.get('error') in _soft_errors
+                        _retryable = retry and self._is_retryable_backend_error(resp.status, error_data)
+                        if _retryable and attempt < 2:
+                            if self.monitor:
+                                elapsed = int((time.time() - start_ts) * 1000)
+                                asyncio.ensure_future(self.monitor.record_api(endpoint, True, elapsed))
+                            logger.warning(f'Overstats API 瞬时错误({resp.status})，10秒后自动重试（第2/2次）: {endpoint}')
                             await asyncio.sleep(10)
                             continue
                         if self.monitor:
                             elapsed = int((time.time() - start_ts) * 1000)
-                            asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
-                        logger.error(f'网络请求异常: {e}')
-                        return (None, {'error': 'network_error', 'message': str(e)}, 'network_error')
-                return (None, {'error': 'retry_exhausted', 'message': '重试耗尽'}, 'retry_exhausted')
+                            asyncio.ensure_future(self.monitor.record_api(endpoint, _is_soft, elapsed))
+                        logger.error(f'Overstats API 错误: {resp.status} - {error_data}')
+                        if isinstance(error_data, dict):
+                            if error_data.get('error') == 'internal_error':
+                                orig_msg = error_data.get('message', '')
+                                error_data['message'] = f'{orig_msg}，网络波动，请重试'
+                            if resp.status == 429 or 'too many requests' in str(error_data.get('message', '')).lower():
+                                orig_msg = error_data.get('message', '')
+                                error_data['message'] = f'{orig_msg}。使用人数过多，请稍后再试或尝试自部署Overstats或astrbot_plugin_overstats'
+                            _friendly = _FRIENDLY_UPSTREAM_ERRORS.get(str(error_data.get('error') or ''))
+                            if _friendly:
+                                _details = error_data.get('details')
+                                _mode = str(_details.get('mode') or '') if isinstance(_details, dict) else ''
+                                error_data['message'] = _friendly.format(mode=_MODE_LABELS.get(_mode, '该'))
+                        return (None, error_data, error_data.get('error', '') if isinstance(error_data, dict) else '')
+            except Exception as e:
+                if retry and attempt < 2:
+                    logger.warning(f'网络请求异常，10秒后自动重试（第2/2次）: {e}')
+                    await asyncio.sleep(10)
+                    continue
+                if self.monitor:
+                    elapsed = int((time.time() - start_ts) * 1000)
+                    asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
+                logger.error(f'网络请求异常: {e}')
+                return (None, {'error': 'network_error', 'message': str(e)}, 'network_error')
+        return (None, {'error': 'retry_exhausted', 'message': '重试耗尽'}, 'retry_exhausted')
 
     async def _periodic_cleanup_loop(self):
         """每日凌晨 4 点清理临时图片目录，保留最近 24 小时内的文件，并清理过期缓存索引"""
@@ -2696,16 +2575,18 @@ class OverstatsPlugin(Star):
     @filter.command('ow是区吗', alias={'是区吗'})
     async def ow_shiqu(self, event: AstrMessageEvent, arg1: str = '', arg2: str = '', arg3: str = ''):
         """OW 是区吗：展示上次判定结果。5 分钟内再次发送确认后开启新查询（分级 CD）。可加局数 1~25。"""
-        async for r in self._run_with_cmd_slot(event, lambda: features_court.ow_shiqu(self, event, arg1, arg2, arg3), heavy=True, congestion_hint=True):
+        async for r in self._run_with_cmd_slot(event, lambda: features_court.ow_shiqu(self, event, arg1, arg2, arg3), heavy=True):
             yield r
 
     @filter.command('ow是区吗结果', alias={'是区吗结果'})
     async def ow_shiqu_result(self, event: AstrMessageEvent):
         """OW 是区吗结果：返回上次生成的判定书图片。
 
-        不走全局队列（属 use_db=True 快速读取，不触发 LLM 扇出），与「获取图片」一致——
-        不受队列容量限制、拥堵时也不降权。
+        不走并发控制（属 use_db=True 快速读取，不触发 LLM 扇出），与「获取图片」一致——
+        不占全局槽位、超限也不拒绝。
+        但仍写入后端地址上下文：特权独立地址开启时，取图与生成落在同一后端节点。
         """
+        _ACTIVE_BACKEND_URL.set(self._active_backend_url_for(self._is_privileged(event)))
         async for r in features_court.ow_shiqu_result(self, event):
             yield r
 
@@ -2713,9 +2594,11 @@ class OverstatsPlugin(Star):
     async def ow_court_result(self, event: AstrMessageEvent):
         """OW 开庭结果：返回上次开庭审理的判决书图片。
 
-        不走全局队列（属 use_db=True 快速读取，不触发 LLM 扇出），与「获取图片」一致——
-        不受队列容量限制、拥堵时也不降权。
+        不走并发控制（属 use_db=True 快速读取，不触发 LLM 扇出），与「获取图片」一致——
+        不占全局槽位、超限也不拒绝。
+        但仍写入后端地址上下文：特权独立地址开启时，取图与生成落在同一后端节点。
         """
+        _ACTIVE_BACKEND_URL.set(self._active_backend_url_for(self._is_privileged(event)))
         async for r in features_court.ow_court_result(self, event):
             yield r
 
@@ -2944,7 +2827,13 @@ class OverstatsPlugin(Star):
         data['deploy'] = {'mode': dm.mode, 'state': status.state if status else 'unknown', 'process_alive': status.process_alive if status else False, 'backend_port': status.backend_port if status else 0, 'pid': status.process_pid if status else None, 'git_commit': status.git_commit if status else 'unknown', 'last_deploy_time': status.last_deploy_time if status else 0, 'last_error': status.last_error if status else ''} if status else {'mode': dm.mode, 'state': 'unknown'}
         rl_stats = await self.monitor.get_rate_limit_stats()
         data['rate_limit'] = rl_stats
-        data['rate_limit_config'] = {'cmd_enabled': getattr(self, '_rate_limit_enabled', False), 'cmd_per_user_max': getattr(self, '_rate_limit_per_user', 3)}
+        data['rate_limit_config'] = {
+            'cmd_enabled': getattr(self, '_concurrency_enabled', False),
+            'cmd_per_user_max': getattr(self, '_concurrency_per_user', 2),
+            'cmd_light_max': getattr(self, '_concurrency_light_max', 0),
+            'cmd_heavy_max': getattr(self, '_concurrency_heavy_max', 10),
+            'privileged_backend_enabled': bool(self.privileged_base_url),
+        }
         return json_response(data)
 
     async def _api_monitor_commands(self):
@@ -3044,7 +2933,13 @@ class OverstatsPlugin(Star):
         if not self.monitor:
             return json_response({'error': '监控未初始化'})
         stats = await self.monitor.get_rate_limit_stats()
-        return json_response({'stats': stats, 'config': {'cmd_enabled': getattr(self, '_rate_limit_enabled', False), 'cmd_per_user_max': getattr(self, '_rate_limit_per_user', 3)}})
+        return json_response({'stats': stats, 'config': {
+            'cmd_enabled': getattr(self, '_concurrency_enabled', False),
+            'cmd_per_user_max': getattr(self, '_concurrency_per_user', 2),
+            'cmd_light_max': getattr(self, '_concurrency_light_max', 0),
+            'cmd_heavy_max': getattr(self, '_concurrency_heavy_max', 10),
+            'privileged_backend_enabled': bool(self.privileged_base_url),
+        }})
 
     async def _api_monitor_clear(self):
         if not self.monitor:

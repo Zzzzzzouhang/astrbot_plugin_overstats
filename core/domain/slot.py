@@ -1,4 +1,4 @@
-"""槽位领域对象：请求、授予凭证与拒绝异常。"""
+"""并发槽位领域对象：请求、授予凭证与拒绝异常。"""
 
 from dataclasses import dataclass
 from typing import Optional
@@ -11,6 +11,7 @@ class SlotRequest:
     """一次槽位申请。
 
     user_key 为 None 表示不按用户计数（不限制、不占个人额度）。
+    command_class 决定进入哪个全局池（轻 / 重独立）。
     """
 
     user_key: Optional[str] = None
@@ -40,7 +41,7 @@ class SlotTicket:
 
 
 class SlotRejected(Exception):
-    """指令被拒绝：个人并发已满 / 排队等待超时 / 队列清空。"""
+    """指令被拒绝：个人并发已满 / 轻或重全局槽位已满（超限即拒，不排队）。"""
 
     def __init__(self, reason: "RejectReason | str"):
         self.reason = reason
