@@ -2404,13 +2404,16 @@ class OverstatsPlugin(Star):
         if not urls:
             yield self._plain_error_result(event, '❌ 图片落盘为公网链接失败。')
             return
-        # 可选并发度参数：`多图测试2 1` 强制串行（用于 A/B 对比），缺省全并发
-        concurrency = len(urls)
-        _m = re.search(r'多图测试2\s+(\d+)', str(getattr(event, 'message_str', '') or ''))
-        if _m:
-            concurrency = max(1, min(int(_m.group(1)), len(urls)))
+        # 默认串行（QQ files 接口并发会争抢并偶发上传超时）；`多图测试2 3` 显式开并发
+        _msg = str(getattr(event, 'message_str', '') or '')
+        _m = re.search(r'多图测试2\s+(\d+)', _msg)
+        concurrency = max(1, min(int(_m.group(1)), len(urls))) if _m else 1
+        # `多图测试2 srv`：让 files 接口直接发送，省掉 deliver 往返（占主动消息频次）
+        srv_send_msg = bool(re.search(r'\bsrv\b', _msg, re.I))
         logger.info(f'[Overstats] 多图测试2 URL 直传: {", ".join(urls)}')
-        result = await send_images_by_url(event, urls, concurrency=concurrency)
+        result = await send_images_by_url(
+            event, urls, concurrency=concurrency, srv_send_msg=srv_send_msg,
+        )
         if result.sent == 0:
             logger.warning(f'[Overstats] 多图测试2 URL 直传失败，回退 base64: {result.error}')
             yield event.plain_result(
@@ -2419,7 +2422,10 @@ class OverstatsPlugin(Star):
             async for r in self._send_multiple_images_result(event, [data for _n, data in imgs], '多图测试2'):
                 yield r
             return
-        detail = f'✅ URL 直传 {result.sent}/{result.total} 张成功\n' + '\n'.join(urls)
+        detail = (
+            f'✅ URL 直传 {result.sent}/{result.total} 张成功'
+            f'（并发={concurrency}, srv={"开" if srv_send_msg else "关"}）\n' + '\n'.join(urls)
+        )
         if result.error:
             detail += f'\n部分失败：{result.error}'
         detail += '\n若图片未收到，请用手机流量打开上面的链接确认公网可达。'

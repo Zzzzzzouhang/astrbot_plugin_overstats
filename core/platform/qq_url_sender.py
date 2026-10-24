@@ -61,19 +61,19 @@ def _new_msg_seq() -> int:
     return random.randint(1, 10000)
 
 
-async def _upload(api, *, group_openid: str, openid: str, url: str):
+async def _upload(api, *, group_openid: str, openid: str, url: str, srv_send_msg: bool = False):
     if group_openid:
         return await api.post_group_file(
             group_openid=group_openid,
             file_type=IMAGE_FILE_TYPE,
             url=url,
-            srv_send_msg=False,
+            srv_send_msg=srv_send_msg,
         )
     return await api.post_c2c_file(
         openid=openid,
         file_type=IMAGE_FILE_TYPE,
         url=url,
-        srv_send_msg=False,
+        srv_send_msg=srv_send_msg,
     )
 
 
@@ -91,12 +91,20 @@ async def send_images_by_url(
     urls: list[str],
     *,
     per_image_timeout: float = DEFAULT_TIMEOUT,
-    concurrency: int = 3,
+    concurrency: int = 1,
+    srv_send_msg: bool = False,
+    retry: int = 1,
 ) -> UrlSendResult:
     """以 URL 直传并投递；返回成功张数与失败原因。
 
-    一张 = 一次 files 上传 + 一次 message 投递，实测两段各约 2~3 秒固定耗时，
-    故默认并发发送（concurrency=3）让 RTT 重叠，明显快于串行。
+    一张 = 一次 files 上传 + 一次 message 投递。实测每段各约 2~3 秒固定 RTT。
+
+    - concurrency：默认 1（串行）。实测并发 2~3 虽能把 3 张从 16s 压到 10~11s，
+      但 QQ `/files` 接口会出现资源争抢（upload 从 2.5s 拉到 6~8s），并偶发
+      「富媒体文件上传超时」，故默认保守串行，由调用方显式开启。
+    - srv_send_msg：True 时 files 接口直接投递，省掉 message 往返（每张约省 2~3s），
+      但会占用主动消息频次，群内不一定有权限。
+    - retry：单张失败自动重试次数，默认 1（应对偶发上传超时）。
 
     副作用：并发投递时图片到达顺序不保证与 urls 顺序一致。
 
@@ -117,38 +125,63 @@ async def send_images_by_url(
 
     total = len(urls)
     concurrency = max(1, min(int(concurrency or 1), max(1, total)))
+    retry = max(0, int(retry))
     semaphore = asyncio.Semaphore(concurrency)
     started = time.monotonic()
-    logger.info(f"[Overstats] URL 直传开始: {total} 张, 并发={concurrency}")
+    logger.info(
+        f"[Overstats] URL 直传开始: {total} 张, 并发={concurrency}, "
+        f"srv_send_msg={srv_send_msg}, 重试={retry}"
+    )
 
     async def _send_one(index: int, url: str) -> None:
         async with semaphore:
-            upload_ms = deliver_ms = -1
-            try:
-                _t0 = time.monotonic()
-                media = await asyncio.wait_for(
-                    _upload(api, group_openid=group_openid, openid=openid, url=url),
-                    timeout=per_image_timeout,
-                )
-                upload_ms = int((time.monotonic() - _t0) * 1000)
-                if not media:
-                    raise RuntimeError("上传接口返回空 media")
-                _t1 = time.monotonic()
-                await asyncio.wait_for(
-                    _deliver(api, group_openid=group_openid, openid=openid, media=media, msg_id=msg_id),
-                    timeout=per_image_timeout,
-                )
-                deliver_ms = int((time.monotonic() - _t1) * 1000)
-                logger.info(
-                    f"[Overstats] URL 直传第{index}/{total}张: "
-                    f"upload(files)={upload_ms}ms, deliver(message)={deliver_ms}ms"
-                )
-            except Exception as exc:  # noqa: BLE001 - 任何失败都降级给调用方决定
-                logger.warning(
-                    f"[Overstats] URL 直传第{index}/{total}张失败: "
-                    f"upload={upload_ms}ms, deliver={deliver_ms}ms, err={exc}"
-                )
-                raise
+            last_exc: BaseException | None = None
+            for attempt in range(retry + 1):
+                upload_ms = deliver_ms = -1
+                try:
+                    _t0 = time.monotonic()
+                    media = await asyncio.wait_for(
+                        _upload(
+                            api,
+                            group_openid=group_openid,
+                            openid=openid,
+                            url=url,
+                            srv_send_msg=srv_send_msg,
+                        ),
+                        timeout=per_image_timeout,
+                    )
+                    upload_ms = int((time.monotonic() - _t0) * 1000)
+                    if not media:
+                        raise RuntimeError("上传接口返回空 media")
+                    # srv_send_msg=True 时 files 接口已直接投递，无需再调 message
+                    if not srv_send_msg:
+                        _t1 = time.monotonic()
+                        await asyncio.wait_for(
+                            _deliver(
+                                api,
+                                group_openid=group_openid,
+                                openid=openid,
+                                media=media,
+                                msg_id=msg_id,
+                            ),
+                            timeout=per_image_timeout,
+                        )
+                        deliver_ms = int((time.monotonic() - _t1) * 1000)
+                    suffix = f" (重试{attempt})" if attempt else ""
+                    logger.info(
+                        f"[Overstats] URL 直传第{index}/{total}张{suffix}: "
+                        f"upload(files)={upload_ms}ms, deliver(message)={deliver_ms}ms"
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001 - 失败后按配置重试
+                    last_exc = exc
+                    logger.warning(
+                        f"[Overstats] URL 直传第{index}/{total}张失败(第{attempt + 1}次): "
+                        f"upload={upload_ms}ms, deliver={deliver_ms}ms, err={exc}"
+                    )
+                    if attempt < retry:
+                        await asyncio.sleep(1.0 + attempt)
+            raise last_exc  # type: ignore[misc]
 
     results = await asyncio.gather(
         *(_send_one(index, url) for index, url in enumerate(urls, start=1)),
