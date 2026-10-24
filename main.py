@@ -2404,8 +2404,13 @@ class OverstatsPlugin(Star):
         if not urls:
             yield self._plain_error_result(event, '❌ 图片落盘为公网链接失败。')
             return
+        # 可选并发度参数：`多图测试2 1` 强制串行（用于 A/B 对比），缺省全并发
+        concurrency = len(urls)
+        _m = re.search(r'多图测试2\s+(\d+)', str(getattr(event, 'message_str', '') or ''))
+        if _m:
+            concurrency = max(1, min(int(_m.group(1)), len(urls)))
         logger.info(f'[Overstats] 多图测试2 URL 直传: {", ".join(urls)}')
-        result = await send_images_by_url(event, urls)
+        result = await send_images_by_url(event, urls, concurrency=concurrency)
         if result.sent == 0:
             logger.warning(f'[Overstats] 多图测试2 URL 直传失败，回退 base64: {result.error}')
             yield event.plain_result(

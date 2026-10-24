@@ -91,11 +91,17 @@ async def send_images_by_url(
     urls: list[str],
     *,
     per_image_timeout: float = DEFAULT_TIMEOUT,
+    concurrency: int = 3,
 ) -> UrlSendResult:
-    """逐张以 URL 直传并投递；返回成功张数与失败原因。
+    """以 URL 直传并投递；返回成功张数与失败原因。
 
-    注意：一张 = 一次上传 + 一次消息，QQ 对同一 msg_id 的被动回复有 5 条上限，
-    调用方需自行限制张数（当前业务上限为 4 张）。
+    一张 = 一次 files 上传 + 一次 message 投递，实测两段各约 2~3 秒固定耗时，
+    故默认并发发送（concurrency=3）让 RTT 重叠，明显快于串行。
+
+    副作用：并发投递时图片到达顺序不保证与 urls 顺序一致。
+
+    注意：QQ 对同一 msg_id 的被动回复有 5 条上限，调用方需自行限制张数
+    （当前业务上限为 4 张）。
     """
     api, reason = _resolve_api(event)
     if api is None:
@@ -109,41 +115,55 @@ async def send_images_by_url(
     if not group_openid and not openid:
         return UrlSendResult(len(urls), 0, "无法确定群 group_openid / 用户 openid")
 
-    sent = 0
-    errors: list[str] = []
+    total = len(urls)
+    concurrency = max(1, min(int(concurrency or 1), max(1, total)))
+    semaphore = asyncio.Semaphore(concurrency)
     started = time.monotonic()
-    for index, url in enumerate(urls, start=1):
-        upload_ms = deliver_ms = -1
-        try:
-            _t0 = time.monotonic()
-            media = await asyncio.wait_for(
-                _upload(api, group_openid=group_openid, openid=openid, url=url),
-                timeout=per_image_timeout,
-            )
-            upload_ms = int((time.monotonic() - _t0) * 1000)
-            if not media:
-                raise RuntimeError("上传接口返回空 media")
-            _t1 = time.monotonic()
-            await asyncio.wait_for(
-                _deliver(api, group_openid=group_openid, openid=openid, media=media, msg_id=msg_id),
-                timeout=per_image_timeout,
-            )
-            deliver_ms = int((time.monotonic() - _t1) * 1000)
-            sent += 1
-            logger.info(
-                f"[Overstats] URL 直传第{index}/{len(urls)}张: "
-                f"upload(files)={upload_ms}ms, deliver(message)={deliver_ms}ms"
-            )
-        except Exception as exc:  # noqa: BLE001 - 任何失败都降级给调用方决定
-            errors.append(f"第{index}张 {type(exc).__name__}: {exc}")
-            logger.warning(
-                f"[Overstats] URL 直传第{index}/{len(urls)}张失败: "
-                f"upload={upload_ms}ms, deliver={deliver_ms}ms, err={exc}"
-            )
+    logger.info(f"[Overstats] URL 直传开始: {total} 张, 并发={concurrency}")
+
+    async def _send_one(index: int, url: str) -> None:
+        async with semaphore:
+            upload_ms = deliver_ms = -1
+            try:
+                _t0 = time.monotonic()
+                media = await asyncio.wait_for(
+                    _upload(api, group_openid=group_openid, openid=openid, url=url),
+                    timeout=per_image_timeout,
+                )
+                upload_ms = int((time.monotonic() - _t0) * 1000)
+                if not media:
+                    raise RuntimeError("上传接口返回空 media")
+                _t1 = time.monotonic()
+                await asyncio.wait_for(
+                    _deliver(api, group_openid=group_openid, openid=openid, media=media, msg_id=msg_id),
+                    timeout=per_image_timeout,
+                )
+                deliver_ms = int((time.monotonic() - _t1) * 1000)
+                logger.info(
+                    f"[Overstats] URL 直传第{index}/{total}张: "
+                    f"upload(files)={upload_ms}ms, deliver(message)={deliver_ms}ms"
+                )
+            except Exception as exc:  # noqa: BLE001 - 任何失败都降级给调用方决定
+                logger.warning(
+                    f"[Overstats] URL 直传第{index}/{total}张失败: "
+                    f"upload={upload_ms}ms, deliver={deliver_ms}ms, err={exc}"
+                )
+                raise
+
+    results = await asyncio.gather(
+        *(_send_one(index, url) for index, url in enumerate(urls, start=1)),
+        return_exceptions=True,
+    )
+    errors = [
+        f"第{index}张 {type(result).__name__}: {result}"
+        for index, result in enumerate(results, start=1)
+        if isinstance(result, BaseException)
+    ]
+    sent = total - len(errors)
 
     total_ms = int((time.monotonic() - started) * 1000)
     logger.info(
-        f"[Overstats] URL 直传结束: {sent}/{len(urls)} 张, total={total_ms}ms, "
-        f"平均={total_ms // max(1, len(urls))}ms/张"
+        f"[Overstats] URL 直传结束: {sent}/{total} 张, total={total_ms}ms, "
+        f"并发={concurrency}, 平均={total_ms // max(1, total)}ms/张"
     )
-    return UrlSendResult(len(urls), sent, "; ".join(errors))
+    return UrlSendResult(total, sent, "; ".join(errors))
