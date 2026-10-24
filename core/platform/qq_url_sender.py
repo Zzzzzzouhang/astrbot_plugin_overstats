@@ -94,6 +94,8 @@ async def send_images_by_url(
     concurrency: int = 1,
     srv_send_msg: bool = False,
     retry: int = 1,
+    label: str = "",
+    user: str = "",
 ) -> UrlSendResult:
     """以 URL 直传并投递；返回成功张数与失败原因。
 
@@ -128,16 +130,15 @@ async def send_images_by_url(
     retry = max(0, int(retry))
     semaphore = asyncio.Semaphore(concurrency)
     started = time.monotonic()
-    logger.info(
-        f"[Overstats] URL 直传开始: {total} 张, 并发={concurrency}, "
-        f"srv_send_msg={srv_send_msg}, 重试={retry}"
-    )
+    details: dict[int, tuple[int, int]] = {}
 
     async def _send_one(index: int, url: str) -> None:
         async with semaphore:
             last_exc: BaseException | None = None
+            stage = "upload"
             for attempt in range(retry + 1):
                 upload_ms = deliver_ms = -1
+                stage = "upload"
                 try:
                     _t0 = time.monotonic()
                     media = await asyncio.wait_for(
@@ -155,6 +156,7 @@ async def send_images_by_url(
                         raise RuntimeError("上传接口返回空 media")
                     # srv_send_msg=True 时 files 接口已直接投递，无需再调 message
                     if not srv_send_msg:
+                        stage = "deliver"
                         _t1 = time.monotonic()
                         await asyncio.wait_for(
                             _deliver(
@@ -167,36 +169,41 @@ async def send_images_by_url(
                             timeout=per_image_timeout,
                         )
                         deliver_ms = int((time.monotonic() - _t1) * 1000)
-                    suffix = f" (重试{attempt})" if attempt else ""
-                    logger.info(
-                        f"[Overstats] URL 直传第{index}/{total}张{suffix}: "
-                        f"upload(files)={upload_ms}ms, deliver(message)={deliver_ms}ms"
-                    )
+                    details[index] = (upload_ms, deliver_ms)
                     return
                 except Exception as exc:  # noqa: BLE001 - 失败后按配置重试
                     last_exc = exc
-                    logger.warning(
-                        f"[Overstats] URL 直传第{index}/{total}张失败(第{attempt + 1}次): "
-                        f"upload={upload_ms}ms, deliver={deliver_ms}ms, err={exc}"
-                    )
                     if attempt < retry:
                         await asyncio.sleep(1.0 + attempt)
-            raise last_exc  # type: ignore[misc]
+            raise RuntimeError(
+                f"第{index}张({stage}) {type(last_exc).__name__}: {last_exc}"
+            )
 
     results = await asyncio.gather(
         *(_send_one(index, url) for index, url in enumerate(urls, start=1)),
         return_exceptions=True,
     )
-    errors = [
-        f"第{index}张 {type(result).__name__}: {result}"
-        for index, result in enumerate(results, start=1)
-        if isinstance(result, BaseException)
-    ]
+    errors = [str(result) for result in results if isinstance(result, BaseException)]
     sent = total - len(errors)
-
     total_ms = int((time.monotonic() - started) * 1000)
-    logger.info(
-        f"[Overstats] URL 直传结束: {sent}/{total} 张, total={total_ms}ms, "
-        f"并发={concurrency}, 平均={total_ms // max(1, total)}ms/张"
-    )
+    tag = f"[{label}]" if label else ""
+    who = f"用户={user} " if user else ""
+
+    # 一次调用只留一条日志：成功给结果与耗时，失败把逐张原因拼在后面
+    if errors:
+        logger.warning(
+            f"[Overstats] URL 直传{tag} {who}{sent}/{total} 张成功, total={total_ms}ms, "
+            f"失败: {'; '.join(errors)}"
+        )
+    elif total == 1:
+        upload_ms, deliver_ms = details.get(1, (-1, -1))
+        tail = f"upload={upload_ms}ms, srv 直发" if srv_send_msg else (
+            f"upload={upload_ms}ms, deliver={deliver_ms}ms"
+        )
+        logger.info(f"[Overstats] URL 直传{tag} {who}1/1 张成功, total={total_ms}ms ({tail})")
+    else:
+        logger.info(
+            f"[Overstats] URL 直传{tag} {who}{total}/{total} 张成功, total={total_ms}ms, "
+            f"平均={total_ms // max(1, total)}ms/张, 并发={concurrency}"
+        )
     return UrlSendResult(total, sent, "; ".join(errors))

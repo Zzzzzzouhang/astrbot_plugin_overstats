@@ -1523,23 +1523,19 @@ class OverstatsPlugin(Star):
                 return False
             urls.append(url)
         stale = self._event_age_seconds(event) >= self._TIMEOUT_WARN_BEFORE
+        # label 带上「主动」标记：超时场景走 srv_send_msg=True 直发
         result = await send_images_by_url(
-            event, urls, concurrency=1, srv_send_msg=stale,
+            event,
+            urls,
+            concurrency=1,
+            srv_send_msg=stale,
+            label=f"{command}/主动" if stale else command,
+            user=self._user_key(event),
         )
+        # 成功与失败的明细均由 send_images_by_url 汇总成一条日志，此处只在回退时补记动作
         if result.sent <= 0:
-            logger.warning(
-                f'[Overstats] URL 直传失败[{command}]，回退原生发送: {result.error}'
-            )
+            logger.debug(f'[Overstats] URL 直传不可用[{command}]，回退原生发送')
             return False
-        if result.sent < result.total:
-            logger.warning(
-                f'[Overstats] URL 直传部分失败[{command}] {result.sent}/{result.total}: {result.error}'
-            )
-        else:
-            logger.info(
-                f'[Overstats] URL 直传成功[{command}] {result.total} 张，'
-                f'主动消息={"是" if stale else "否"}'
-            )
         if record_cache:
             # URL 直传绕过了 _build_image_chain，需补登记本地缓存，
             # 否则回复超时后用户点「获取图片」取不回这张图。
