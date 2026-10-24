@@ -15,8 +15,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
+import time
 from dataclasses import dataclass
+
+logger = logging.getLogger("astrbot")
 
 # QQ 图片（file_type=1）只认 png/jpg
 IMAGE_FILE_TYPE = 1
@@ -107,20 +111,39 @@ async def send_images_by_url(
 
     sent = 0
     errors: list[str] = []
+    started = time.monotonic()
     for index, url in enumerate(urls, start=1):
+        upload_ms = deliver_ms = -1
         try:
+            _t0 = time.monotonic()
             media = await asyncio.wait_for(
                 _upload(api, group_openid=group_openid, openid=openid, url=url),
                 timeout=per_image_timeout,
             )
+            upload_ms = int((time.monotonic() - _t0) * 1000)
             if not media:
                 raise RuntimeError("上传接口返回空 media")
+            _t1 = time.monotonic()
             await asyncio.wait_for(
                 _deliver(api, group_openid=group_openid, openid=openid, media=media, msg_id=msg_id),
                 timeout=per_image_timeout,
             )
+            deliver_ms = int((time.monotonic() - _t1) * 1000)
             sent += 1
+            logger.info(
+                f"[Overstats] URL 直传第{index}/{len(urls)}张: "
+                f"upload(files)={upload_ms}ms, deliver(message)={deliver_ms}ms"
+            )
         except Exception as exc:  # noqa: BLE001 - 任何失败都降级给调用方决定
             errors.append(f"第{index}张 {type(exc).__name__}: {exc}")
+            logger.warning(
+                f"[Overstats] URL 直传第{index}/{len(urls)}张失败: "
+                f"upload={upload_ms}ms, deliver={deliver_ms}ms, err={exc}"
+            )
 
+    total_ms = int((time.monotonic() - started) * 1000)
+    logger.info(
+        f"[Overstats] URL 直传结束: {sent}/{len(urls)} 张, total={total_ms}ms, "
+        f"平均={total_ms // max(1, len(urls))}ms/张"
+    )
     return UrlSendResult(len(urls), sent, "; ".join(errors))
