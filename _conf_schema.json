@@ -85,6 +85,31 @@
     "obvious_hint": true,
     "default": false
   },
+  "media_url_server_host": {
+    "description": "图片直传服务监听地址",
+    "type": "string",
+    "hint": "插件侧静态图片服务的监听地址，供 QQ 服务器拉取图片用。0.0.0.0 表示所有网卡（公网必须如此），127.0.0.1 仅本机可访问（QQ 拉不到）。",
+    "default": "0.0.0.0"
+  },
+  "media_url_server_port": {
+    "description": "图片直传服务端口",
+    "type": "int",
+    "hint": "插件侧静态图片服务监听端口，需在防火墙/安全组放行（QQ 服务器要从公网访问它）。默认 18357。端口被占用时启动会失败并提示。",
+    "default": 18357
+  },
+  "media_public_base_url": {
+    "description": "图片直传服务公网地址",
+    "type": "string",
+    "hint": "形如 http://1.2.3.4:18357 或 https://img.example.com（不要带结尾斜杠）。留空则自动探测服务器出口公网 IP。QQ 服务器必须能访问该地址才能拉取图片，回环/内网地址不可用。",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "media_url_ttl": {
+    "description": "图片直传链接有效期（秒）",
+    "type": "int",
+    "hint": "静态图片文件的保留时长，过期文件在下次发布时自动清理。QQ 侧拉取通常几秒内完成，默认 900 秒足够。",
+    "default": 900
+  },
   "shiqu_cd_map": {
     "description": "是区吗分级配置（JSON）",
     "type": "text",

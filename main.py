@@ -47,6 +47,8 @@ try:
     )
     from .core.service import CommandConcurrencyService, ImageCacheService, ReplyNoticeService
     from .core.platform.astrbot import AstrBotPlatformAdapter
+    from .core.platform.media_url import MediaURLServer
+    from .core.platform.qq_url_sender import send_images_by_url
 except ImportError:  # 插件作为顶层模块加载时
     from core.domain import (  # type: ignore[no-redef]
         GET_IMAGE_TAG,
@@ -64,6 +66,8 @@ except ImportError:  # 插件作为顶层模块加载时
     )
     from core.service import CommandConcurrencyService, ImageCacheService, ReplyNoticeService  # type: ignore[no-redef]
     from core.platform.astrbot import AstrBotPlatformAdapter  # type: ignore[no-redef]
+    from core.platform.media_url import MediaURLServer  # type: ignore[no-redef]
+    from core.platform.qq_url_sender import send_images_by_url  # type: ignore[no-redef]
 
 # OW 开庭模块（独立封装，避免主文件臃肿）
 try:
@@ -320,7 +324,7 @@ class OverstatsPlugin(Star):
         self._bot_nickname_cache: str | None = None
         self._full_adapt_map: dict | None = None
         self._full_cmd_map: dict | None = None
-        self._admin_cmd_set: set[str] = {'多图测试', '单图测试', 'ow开庭', '开庭', 'ow是区吗', '是区吗', 'ow是区吗结果', '是区吗结果', 'ow开庭结果', '开庭结果', 'owAI检测', 'AI检测', '维护', 'ow违禁封禁', 'ow违禁解封', 'ow连接测试', 'ow部署', 'ow部署状态', 'ow更新后端', 'ow停止后端', 'ow重启后端', 'ow部署日志', 'ow后端日志', 'ow卸载后端', 'ow卸载后端执行确认', 'ow卸载后端执行仅代码', 'ow卸载后端执行仅venv', 'ow卸载后端执行强制', '群设置', '全量适配开', '全量适配开完全匹配', '全量适配关', '管理'}
+        self._admin_cmd_set: set[str] = {'多图测试', '多图测试2', '单图测试', 'ow开庭', '开庭', 'ow是区吗', '是区吗', 'ow是区吗结果', '是区吗结果', 'ow开庭结果', '开庭结果', 'owAI检测', 'AI检测', '维护', 'ow违禁封禁', 'ow违禁解封', 'ow连接测试', 'ow部署', 'ow部署状态', 'ow更新后端', 'ow停止后端', 'ow重启后端', 'ow部署日志', 'ow后端日志', 'ow卸载后端', 'ow卸载后端执行确认', 'ow卸载后端执行仅代码', 'ow卸载后端执行仅venv', 'ow卸载后端执行强制', '群设置', '全量适配开', '全量适配开完全匹配', '全量适配关', '管理'}
         # 图片缓存索引（本地保留 24 小时，供群聊回复超时后 @机器人 取回）
         self._image_cache_index_path = self.plugin_data_dir / self._IMAGE_CACHE_INDEX_FILE
         # 图片缓存服务（service 层）：内存权威 + 合并落盘，省去每条指令的全量 JSON 读写
@@ -339,6 +343,9 @@ class OverstatsPlugin(Star):
         )
         self.court_manager = CourtManager(self)
         self.shiqu_manager = ShiquManager(self)
+        # 图片直传静态服务（懒启动）：把图片暴露成公网 URL，供 QQ 开放接口自行拉取，
+        # 绕开 AstrBot 图片分支写死的 base64 上传（详见 core/platform/media_url.py）。
+        self._media_url_server: MediaURLServer | None = None
         self._register_monitor_apis()
         try:
             _monitor_db = self.plugin_data_dir / 'monitor_stats.sqlite3'
@@ -1419,12 +1426,42 @@ class OverstatsPlugin(Star):
                 logging.getLogger('astrbot').removeHandler(_handler)
             except Exception:
                 pass
+        try:
+            _media_server = getattr(self, '_media_url_server', None)
+            if _media_server is not None:
+                await _media_server.stop()
+        except Exception as e:
+            logger.warning(f'[Overstats] 停止图片直传服务异常: {e}')
         if self._http_session and (not self._http_session.closed):
             await self._http_session.close()
 
     def _is_qq_official(self, event: AstrMessageEvent) -> bool:
         """判断当前消息是否来自 QQ 官方机器人平台——委托 platform 适配器。"""
         return self._platform.is_qq_official(event)
+
+    def _ensure_media_url_server(self) -> MediaURLServer:
+        """懒创建插件侧图片静态服务（供 QQ URL 直传使用）。
+
+        配置项填错（端口非整数等）时回退默认值，不抛异常打断指令。
+        """
+        if self._media_url_server is not None:
+            return self._media_url_server
+
+        def _as_int(key: str, default: int) -> int:
+            try:
+                return int(self.config.get(key, default) or default)
+            except (TypeError, ValueError):
+                logger.warning(f'[Overstats] 配置项 {key} 不是合法整数，回退默认值 {default}')
+                return default
+
+        self._media_url_server = MediaURLServer(
+            self.plugin_data_dir / 'media_url',
+            host=str(self.config.get('media_url_server_host', '0.0.0.0') or '0.0.0.0'),
+            port=_as_int('media_url_server_port', 18357),
+            public_base=str(self.config.get('media_public_base_url', '') or ''),
+            ttl=_as_int('media_url_ttl', 900),
+        )
+        return self._media_url_server
 
     def _format_markdown_by_platform(self, event: AstrMessageEvent, text: str) -> str:
         """
@@ -2318,6 +2355,70 @@ class OverstatsPlugin(Star):
             return
         async for r in self._send_multiple_images_result(event, imgs_list, '多图测试'):
             yield r
+
+    @filter.command('多图测试2')
+    async def multi_image_test_by_url(self, event: AstrMessageEvent):
+        """多图测试2：走「URL 直传」发送测试图片。
+
+        与「多图测试」的区别：本指令不经过 AstrBot 的图片发送分支（该分支固定以
+        file_data(base64) 上传），而是把图片落盘为插件侧静态服务链接，再直接调
+        QQ 开放接口 /v2/{groups|users}/.../files 以 url 上传，最后由 botpy 用原消息
+        msg_id 做被动回复。链路失败时自动回退到原有的 base64 发送。
+        """
+        if not self._is_qq_official(event):
+            yield self._plain_error_result(event, '❌ 多图测试2 仅支持 QQ 官方机器人（需直连 QQ 开放接口）')
+            return
+        imgs: list[tuple[str, bytes]] = []
+        for img_name in ['test1.png', 'test2.png', 'test3.png']:
+            img_path = self.plugin_data_dir / img_name
+            if not img_path.exists():
+                continue
+            try:
+                imgs.append((img_name, img_path.read_bytes()))
+            except Exception as e:
+                logger.error(f'读取测试图片 {img_name} 失败: {e}')
+        if not imgs:
+            yield self._plain_error_result(event, '❌ 未能读取到测试图片（需 test1.png/test2.png/test3.png）。')
+            return
+        # QQ 对同一 msg_id 的被动回复有 5 条上限：最多 4 张图 + 1 条结果文本
+        imgs = imgs[:4]
+        server = self._ensure_media_url_server()
+        try:
+            public_base = await server.start()
+        except Exception as e:
+            logger.error(f'[Overstats] 图片直传服务启动失败: {e}')
+            yield self._plain_error_result(event, f'❌ 图片直传服务启动失败：{e}')
+            return
+        if not public_base:
+            yield self._plain_error_result(
+                event,
+                '❌ 未能确定公网地址：请在插件配置填写「图片直传服务公网地址」'
+                '（如 http://1.2.3.4:18357 或 https://img.example.com）。',
+            )
+            return
+        urls: list[str] = []
+        for _name, data in imgs:
+            url = await server.publish(data)
+            if url:
+                urls.append(url)
+        if not urls:
+            yield self._plain_error_result(event, '❌ 图片落盘为公网链接失败。')
+            return
+        logger.info(f'[Overstats] 多图测试2 URL 直传: {", ".join(urls)}')
+        result = await send_images_by_url(event, urls)
+        if result.sent == 0:
+            logger.warning(f'[Overstats] 多图测试2 URL 直传失败，回退 base64: {result.error}')
+            yield event.plain_result(
+                f'❌ URL 直传全部失败，已回退 base64 发送。\n原因：{result.error}\n图片链接：{urls[0]}'
+            )
+            async for r in self._send_multiple_images_result(event, [data for _n, data in imgs], '多图测试2'):
+                yield r
+            return
+        detail = f'✅ URL 直传 {result.sent}/{result.total} 张成功\n' + '\n'.join(urls)
+        if result.error:
+            detail += f'\n部分失败：{result.error}'
+        detail += '\n若图片未收到，请用手机流量打开上面的链接确认公网可达。'
+        yield event.plain_result(detail)
 
     @filter.command('单图测试')
     async def single_image_test(self, event: AstrMessageEvent):
