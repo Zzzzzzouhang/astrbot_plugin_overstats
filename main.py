@@ -1463,6 +1463,120 @@ class OverstatsPlugin(Star):
         )
         return self._media_url_server
 
+    def _image_url_upload_enabled(self) -> bool:
+        """图片 URL 直传总开关（配置项，默认关闭）。"""
+        try:
+            return bool(self.config.get('image_url_upload_enabled', False))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _event_age_seconds(event: AstrMessageEvent) -> float:
+        """当前事件距现在多少秒，用于判断被动回复的 msg_id 是否已过期。"""
+        try:
+            ts = float(getattr(getattr(event, 'message_obj', None), 'timestamp', 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, time.time() - ts) if ts > 0 else 0.0
+
+    async def _try_send_images_by_url(
+        self,
+        event: AstrMessageEvent,
+        imgs: list[bytes],
+        command: str,
+        *,
+        force: bool = False,
+        record_cache: bool = True,
+    ) -> bool:
+        """尝试以 URL 直传发送图片；返回 True 表示调用方无需再走原生链路。
+
+        返回 False 的任一情形（调用方据此回退 base64）：开关未开、非 QQ 官方平台、
+        静态服务未就绪、全部上传失败。部分成功也返回 True，避免重复发送。
+
+        注意：面向用户的文案/异常一律不带图片直链，避免暴露服务器公网地址。
+
+        超时语义：距原始消息超过被动回复窗口（msg_id 约 5 分钟过期）时改走
+        srv_send_msg=True 的主动消息——被动回复此时注定失败，与「超时后补发」
+        的既有策略一致。
+        """
+        if not (force or self._image_url_upload_enabled()):
+            return False
+        if not self._is_qq_official(event):
+            return False
+        payload = [data for data in imgs if data]
+        if not payload:
+            return False
+        server = self._ensure_media_url_server()
+        try:
+            public_base = await server.start()
+        except Exception as e:
+            logger.warning(f'[Overstats] 图片直传服务启动失败，回退原生发送: {e}')
+            return False
+        if not public_base:
+            logger.warning('[Overstats] 图片直传服务缺少公网地址，回退原生发送')
+            return False
+        urls: list[str] = []
+        for data in payload:
+            url = await server.publish(data)
+            if not url:
+                logger.warning('[Overstats] 图片落盘为公网链接失败，回退原生发送')
+                return False
+            urls.append(url)
+        stale = self._event_age_seconds(event) >= self._TIMEOUT_WARN_BEFORE
+        result = await send_images_by_url(
+            event, urls, concurrency=1, srv_send_msg=stale,
+        )
+        if result.sent <= 0:
+            logger.warning(
+                f'[Overstats] URL 直传失败[{command}]，回退原生发送: {result.error}'
+            )
+            return False
+        if result.sent < result.total:
+            logger.warning(
+                f'[Overstats] URL 直传部分失败[{command}] {result.sent}/{result.total}: {result.error}'
+            )
+        else:
+            logger.info(
+                f'[Overstats] URL 直传成功[{command}] {result.total} 张，'
+                f'主动消息={"是" if stale else "否"}'
+            )
+        if record_cache:
+            # URL 直传绕过了 _build_image_chain，需补登记本地缓存，
+            # 否则回复超时后用户点「获取图片」取不回这张图。
+            await self._cache_images_for_recovery(event, payload, command)
+        return True
+
+    async def _cache_images_for_recovery(
+        self, event: AstrMessageEvent, imgs: list[bytes], command: str
+    ) -> None:
+        """把已通过 URL 直传发出的图片补登记到本地图片缓存索引。"""
+        if not (self._save_image_locally and self.temp_image_dir):
+            return
+        for data in imgs:
+            try:
+                digest = hashlib.sha1(data).hexdigest()[:16]
+                img_path = self.temp_image_dir / f'{digest}_{time.time_ns()}.png'
+                await self._write_image_atomic(img_path, data)
+                self._record_image_cache_sync(self._user_key(event), str(img_path), command)
+            except Exception as e:
+                logger.warning(f'[Overstats] URL 直传后登记图片缓存失败: {e}')
+
+    @staticmethod
+    async def _read_image_files(paths) -> list[bytes]:
+        """批量读取本地图片（图片直传需要 bytes）；读失败的文件跳过。"""
+        def _read() -> list[bytes]:
+            out: list[bytes] = []
+            for path in paths:
+                try:
+                    data = Path(path).read_bytes()
+                except OSError:
+                    continue
+                if data:
+                    out.append(data)
+            return out
+
+        return await asyncio.to_thread(_read)
+
     def _format_markdown_by_platform(self, event: AstrMessageEvent, text: str) -> str:
         """
             根据平台环境动态处理文本：
@@ -1673,6 +1787,8 @@ class OverstatsPlugin(Star):
 
     async def _send_image_result(self, event: AstrMessageEvent, img_bytes: bytes, command: str, fallback_text: str=''):
         """发送单张图片，自动捕获违规异常并封禁该指令。"""
+        if await self._try_send_images_by_url(event, [img_bytes], command):
+            return
         result = await self._build_image_chain(event, img_bytes, fallback_text, command)
         try:
             yield result
@@ -1697,6 +1813,11 @@ class OverstatsPlugin(Star):
         调用方需确保 path 已通过 _is_valid_cached_image_file 校验。
         """
         try:
+            cached_bytes = await self._read_image_files([path])
+            if cached_bytes and await self._try_send_images_by_url(
+                event, cached_bytes, command, record_cache=False
+            ):
+                return
             # 富媒体消息（图片，msg_type=7）不支持 @，故不带 @（同 _build_image_chain）。
             chain = [Comp.Plain('\n'), Comp.Image.fromFileSystem(path)]
             yield event.chain_result(chain)
@@ -1723,6 +1844,11 @@ class OverstatsPlugin(Star):
         调用方需确保 paths 均通过 _is_valid_cached_image_file 校验。
         """
         try:
+            cached_bytes = await self._read_image_files(paths)
+            if cached_bytes and await self._try_send_images_by_url(
+                event, cached_bytes, command, record_cache=False
+            ):
+                return
             # 富媒体消息（图片，msg_type=7）不支持 @，故不带 @（同 _build_image_chain）。
             chain = [Comp.Plain('\n')]
             for path in paths:
@@ -1737,7 +1863,11 @@ class OverstatsPlugin(Star):
             else:
                 yield event.plain_result('❌ 发送图片失败，请稍后重试。')
 
-    async def _send_multiple_images_result(self, event: AstrMessageEvent, imgs_list: list[bytes], command: str):
+    async def _send_multiple_images_result(
+        self, event: AstrMessageEvent, imgs_list: list[bytes], command: str, *, use_url: bool = True
+    ):
+        if use_url and imgs_list and await self._try_send_images_by_url(event, imgs_list, command):
+            return
         try:
             valid_images = [img for img in imgs_list if img]
             if not valid_images:
@@ -2364,6 +2494,9 @@ class OverstatsPlugin(Star):
         file_data(base64) 上传），而是把图片落盘为插件侧静态服务链接，再直接调
         QQ 开放接口 /v2/{groups|users}/.../files 以 url 上传，最后由 botpy 用原消息
         msg_id 做被动回复。链路失败时自动回退到原有的 base64 发送。
+
+        本指令不受 image_url_upload_enabled 开关限制（用于验证链路）；多图固定串行，
+        结果文案不含图片直链，避免向用户暴露服务器公网地址。
         """
         if not self._is_qq_official(event):
             yield self._plain_error_result(event, '❌ 多图测试2 仅支持 QQ 官方机器人（需直连 QQ 开放接口）')
@@ -2382,54 +2515,14 @@ class OverstatsPlugin(Star):
             return
         # QQ 对同一 msg_id 的被动回复有 5 条上限：最多 4 张图 + 1 条结果文本
         imgs = imgs[:4]
-        server = self._ensure_media_url_server()
-        try:
-            public_base = await server.start()
-        except Exception as e:
-            logger.error(f'[Overstats] 图片直传服务启动失败: {e}')
-            yield self._plain_error_result(event, f'❌ 图片直传服务启动失败：{e}')
+        payload = [data for _name, data in imgs]
+        # 测试指令不受开关限制，强制走 URL 直传；结果文案不回显图片直链（避免暴露公网地址）
+        if await self._try_send_images_by_url(event, payload, '多图测试2', force=True):
+            yield event.plain_result(f'✅ URL 直传完成（{len(payload)} 张，串行）')
             return
-        if not public_base:
-            yield self._plain_error_result(
-                event,
-                '❌ 未能确定公网地址：请在插件配置填写「图片直传服务公网地址」'
-                '（如 http://1.2.3.4:18357 或 https://img.example.com）。',
-            )
-            return
-        urls: list[str] = []
-        for _name, data in imgs:
-            url = await server.publish(data)
-            if url:
-                urls.append(url)
-        if not urls:
-            yield self._plain_error_result(event, '❌ 图片落盘为公网链接失败。')
-            return
-        # 默认串行（QQ files 接口并发会争抢并偶发上传超时）；`多图测试2 3` 显式开并发
-        _msg = str(getattr(event, 'message_str', '') or '')
-        _m = re.search(r'多图测试2\s+(\d+)', _msg)
-        concurrency = max(1, min(int(_m.group(1)), len(urls))) if _m else 1
-        # `多图测试2 srv`：让 files 接口直接发送，省掉 deliver 往返（占主动消息频次）
-        srv_send_msg = bool(re.search(r'\bsrv\b', _msg, re.I))
-        logger.info(f'[Overstats] 多图测试2 URL 直传: {", ".join(urls)}')
-        result = await send_images_by_url(
-            event, urls, concurrency=concurrency, srv_send_msg=srv_send_msg,
-        )
-        if result.sent == 0:
-            logger.warning(f'[Overstats] 多图测试2 URL 直传失败，回退 base64: {result.error}')
-            yield event.plain_result(
-                f'❌ URL 直传全部失败，已回退 base64 发送。\n原因：{result.error}\n图片链接：{urls[0]}'
-            )
-            async for r in self._send_multiple_images_result(event, [data for _n, data in imgs], '多图测试2'):
-                yield r
-            return
-        detail = (
-            f'✅ URL 直传 {result.sent}/{result.total} 张成功'
-            f'（并发={concurrency}, srv={"开" if srv_send_msg else "关"}）\n' + '\n'.join(urls)
-        )
-        if result.error:
-            detail += f'\n部分失败：{result.error}'
-        detail += '\n若图片未收到，请用手机流量打开上面的链接确认公网可达。'
-        yield event.plain_result(detail)
+        yield event.plain_result('❌ URL 直传不可用，已回退原生发送（详细原因见日志）。')
+        async for r in self._send_multiple_images_result(event, payload, '多图测试2', use_url=False):
+            yield r
 
     @filter.command('单图测试')
     async def single_image_test(self, event: AstrMessageEvent):

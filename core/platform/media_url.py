@@ -193,11 +193,17 @@ class MediaURLServer:
         return ""
 
     def _prune_sync(self) -> None:
+        """清理过期图片文件。
+
+        保留时长取 max(ttl, 300s)：TTL 配得过小时，QQ 可能还在下载就被删掉，
+        表现为「链接 404 / 上传超时」。300s 下限覆盖 QQ 侧拉取与重试的窗口。
+        """
+        keep_seconds = max(self._ttl, 300)
         now = time.time()
         try:
             for entry in self._root.iterdir():
                 try:
-                    if entry.is_file() and (now - entry.stat().st_mtime) > self._ttl:
+                    if entry.is_file() and (now - entry.stat().st_mtime) > keep_seconds:
                         entry.unlink(missing_ok=True)
                 except OSError:
                     continue

@@ -85,6 +85,13 @@
     "obvious_hint": true,
     "default": false
   },
+  "image_url_upload_enabled": {
+    "description": "图片走 URL 直传（实验功能）",
+    "type": "bool",
+    "hint": "开启后，QQ 官方机器人发送图片时先把图片放到插件侧静态服务，再让 QQ 服务器按 URL 拉取转存，可突破 base64 直传的 5MB 限制并节省插件上行带宽。默认关闭；关闭时走 AstrBot 原生 base64 上传。开启前必须先配好下方「图片直传服务」的端口与公网地址，并放行防火墙。仅对 QQ 官方机器人生效，其他平台自动走原生链路。",
+    "obvious_hint": true,
+    "default": false
+  },
   "media_url_server_host": {
     "description": "图片直传服务监听地址",
     "type": "string",
