@@ -2563,15 +2563,13 @@ class OverstatsPlugin(Star):
         """补发本地缓存中未过期图片（图片本地保留 24 小时，群聊回复超时未收到时使用）。
 
         群聊回复 msg_id 过期会导致图片投递失败，但图片已在本地生成并缓存；用户稍后 @机器人
-        发送「获取图片」可一次性取回此前因超时未送达的图片（可能来自多条不同指令）。
-        补发只读已存文件（_send_cached_images_result），不重复落盘、不重复登记索引，
+        发送「获取图片」即可取回此前因超时未送达的**最近一张**图片。
+        补发只读已存文件（_send_cached_image_result），不重复落盘、不重复登记索引，
         故不会因反复补发把同一图片追加进索引、占满每用户配额。
 
-        发送策略（最多取最近 4 张）：
-        - 1 张：走标准单图发送路径（_send_cached_image_result），与普通指令的单图消息结构一致；
-        - ≥2 张：合并为一条富媒体消息一次发送（_send_cached_images_result，与「单局详细」一致）。
-        逐张单独发时每条消息各触发一次富媒体上传，任一失败都会进入 AstrBot 的
-        5×30s 重试并阻塞流水线；合并后上传/发送各只有一次，失败面最小化。
+        发送策略：只补发最新 1 张，走标准单图路径。多张补发在 QQ 侧不稳定
+        （富媒体上传返回空 / 同一 msg_id 被动回复额度耗尽都会让后几张丢失），
+        故不再补发多张；其余条目仍保留 24 小时，但不再发出。
         """
         user_key = self._user_key(event)
         # list_alive 已按「保留期内 + 文件真实存在」过滤；这里直接取，无需在同一时刻再 stat 一遍
@@ -2584,8 +2582,7 @@ class OverstatsPlugin(Star):
             return
         # cached 按生成时间升序（旧→新）。发送前逐一校验：存在 + 非空 + 文件头合法。
         # 历史 bug 可能已在索引里留下 0 字节 / JSON 错误体落盘的损坏文件（且往往正是
-        # 最新的条目），合并消息场景下一张坏图会拖垮整条上传，必须在此拦下；
-        # 同时从「最新的有效图」开始取满 4 张，不让坏图挤占有效旧图的补发机会。
+        # 最新的条目），必须在选「最新的一张」之前拦下，否则补发必然失败。
         valid_paths: list[str] = []
         vanished = 0
         for entry in cached:
@@ -2605,23 +2602,19 @@ class OverstatsPlugin(Star):
 💡 图片仅在本地保留 24 小时，请重新发起指令"""
             yield event.plain_result(self._format_markdown_by_platform(event, text))
             return
-        max_replies = self._GET_IMAGE_MAX_PER_MESSAGE
-        # 去重后再取最近 N 张：旧实现以 hash(img_bytes) 命名，相同内容会记录多条
-        # 同 path 条目（历史索引文件里可能有残留）；合并消息场景下重复 path 会让
-        # 同一张图在一根链里出现两次。dict.fromkeys 保序去重。
-        to_send = list(dict.fromkeys(valid_paths))[-max_replies:]
-        text = f"""🖼️ **正在补发 {len(to_send)} 张图片**
+        # 去重后只取最近 1 张：多张补发（无论合并成一条链还是逐张）在 QQ 侧都容易
+        # 撞上富媒体上传返回空 / 被动回复额度耗尽，最终也只有一张能到；故固定只补发
+        # 最新的一张，其余条目继续留在缓存里，24 小时内不再补发。
+        # dict.fromkeys 保序去重（旧实现以 hash(img_bytes) 命名，相同内容可能留下
+        # 多条同 path 条目），[-1:] 即「最新的一张」。
+        to_send = list(dict.fromkeys(valid_paths))[-1:]
+        text = """🖼️ **正在补发最近 1 张图片**
 • 来自此前因回复超时未送达的指令
 💡 本地保留 24 小时"""
         yield event.plain_result(self._format_markdown_by_platform(event, text))
-        # 按张数分流：1 张走标准单图发送路径（与普通指令的单图消息结构一致）；
-        # ≥2 张才合并为一条富媒体消息，由 AstrBot 框架统一上传与投递。
-        if len(to_send) == 1:
-            async for r in self._send_cached_image_result(event, to_send[0], '获取图片'):
-                yield r
-        else:
-            async for r in self._send_cached_images_result(event, to_send, '获取图片'):
-                yield r
+        # 单图发送路径：与普通指令的单图消息结构一致（Plain + 一张 Image）。
+        async for r in self._send_cached_image_result(event, to_send[0], '获取图片'):
+            yield r
 
     @filter.command('今日总结', alias={'今日', '今日数据'})
     async def dashen_today(self, event: AstrMessageEvent, bnet_id: str = ''):
