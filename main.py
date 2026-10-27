@@ -2566,10 +2566,6 @@ class OverstatsPlugin(Star):
         发送「获取图片」即可取回此前因超时未送达的**最近一张**图片。
         补发只读已存文件（_send_cached_image_result），不重复落盘、不重复登记索引，
         故不会因反复补发把同一图片追加进索引、占满每用户配额。
-
-        发送策略：只补发最新 1 张，走标准单图路径。多张补发在 QQ 侧不稳定
-        （富媒体上传返回空 / 同一 msg_id 被动回复额度耗尽都会让后几张丢失），
-        故不再补发多张；其余条目仍保留 24 小时，但不再发出。
         """
         user_key = self._user_key(event)
         # list_alive 已按「保留期内 + 文件真实存在」过滤；这里直接取，无需在同一时刻再 stat 一遍
@@ -2582,7 +2578,7 @@ class OverstatsPlugin(Star):
             return
         # cached 按生成时间升序（旧→新）。发送前逐一校验：存在 + 非空 + 文件头合法。
         # 历史 bug 可能已在索引里留下 0 字节 / JSON 错误体落盘的损坏文件（且往往正是
-        # 最新的条目），必须在选「最新的一张」之前拦下，否则补发必然失败。
+        # 最新的条目），必须在此拦下。
         valid_paths: list[str] = []
         vanished = 0
         for entry in cached:
@@ -2602,17 +2598,11 @@ class OverstatsPlugin(Star):
 💡 图片仅在本地保留 24 小时，请重新发起指令"""
             yield event.plain_result(self._format_markdown_by_platform(event, text))
             return
-        # 去重后只取最近 1 张：多张补发（无论合并成一条链还是逐张）在 QQ 侧都容易
-        # 撞上富媒体上传返回空 / 被动回复额度耗尽，最终也只有一张能到；故固定只补发
-        # 最新的一张，其余条目继续留在缓存里，24 小时内不再补发。
-        # dict.fromkeys 保序去重（旧实现以 hash(img_bytes) 命名，相同内容可能留下
-        # 多条同 path 条目），[-1:] 即「最新的一张」。
         to_send = list(dict.fromkeys(valid_paths))[-1:]
         text = """🖼️ **正在补发最近 1 张图片**
 • 来自此前因回复超时未送达的指令
 💡 本地保留 24 小时"""
         yield event.plain_result(self._format_markdown_by_platform(event, text))
-        # 单图发送路径：与普通指令的单图消息结构一致（Plain + 一张 Image）。
         async for r in self._send_cached_image_result(event, to_send[0], '获取图片'):
             yield r
 
