@@ -307,15 +307,13 @@ class ShiquManager:
 
         # 单次请求后端图片接口（违规时由 _send_image_result 自动封禁 12h）
         # 是区吗为 AI 生成类功能：失败不重试，避免重复高成本生成，直接提示用户重发。
-        # 全局并发护栏：同时最多 2 条「是区吗」查询在打后端图片接口
-        # （单条是区吗在后端放大成数百次 LLM 子请求，必须全局收住，否则拖垮后端）。
+        # 并发不在此处限制：由 handler 层 _run_with_cmd_slot 的重指令池（heavy_max）统一把关。
         # 地址解析：专属分流生效时显式走专属地址；否则传 None，由 _fetch_image
         # 按解析链取值（特权独立后端地址 → 主地址）。
-        async with self._plugin._shiqu_backend_semaphore:
-            img_bytes, error_data, _err_code = await self._plugin._fetch_image(
-                _SHIQU_IMAGE_ENDPOINT, payload, timeout=630, retry=False,
-                base_url=self._plugin.shiqu_base_url if self._plugin._shiqu_dedicated_active() else None
-            )
+        img_bytes, error_data, _err_code = await self._plugin._fetch_image(
+            _SHIQU_IMAGE_ENDPOINT, payload, timeout=630, retry=False,
+            base_url=self._plugin.shiqu_base_url if self._plugin._shiqu_dedicated_active() else None
+        )
         if not img_bytes:
             msg = ""
             if isinstance(error_data, dict):

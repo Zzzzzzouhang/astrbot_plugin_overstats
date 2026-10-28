@@ -307,9 +307,7 @@ class OverstatsPlugin(Star):
         self._http_session: aiohttp.ClientSession | None = None
         # 周度总结专属后端并发上限（单条指令会打一次后端，故等价于同时最多 2 条周度总结在跑）
         self._weekly_summary_semaphore = asyncio.Semaphore(2)
-        # 是区吗后端并发上限：全局同时最多 2 条「是区吗」查询在打后端图片接口
-        # （单条是区吗 = 一次 HTTP 请求，但后端内部放大成数百次 LLM 子请求，必须收住）。
-        self._shiqu_backend_semaphore = asyncio.Semaphore(2)
+        # 是区吗不再单独限并发：由 handler 层 _run_with_cmd_slot 的重指令池（heavy_max）统一把关。
         # 高峰排队提示：群聊业务指令无法立即获得全局槽位（等待队列非空 / 运行槽位已满）时，
         # 入队前即以后台任务推送「排队中」提示（含排队人数与「回复即将超时，请稍后点 获取图片」），
         # 不再等到 4:50 超时预警才告知；提示推送成功后，4:50 的超时预警不再重复发送。管理员/白名单不受限。
