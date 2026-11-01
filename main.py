@@ -102,6 +102,8 @@ try:
     from .features import court as features_court
     from .features import admin as features_admin
     from .features import config as features_config
+    from .features import wiki as features_wiki
+    from .features import guess as features_guess
 except ImportError:  # 插件作为顶层模块加载时
     from features import binding as features_binding  # type: ignore[no-redef]
     from features import summary as features_summary  # type: ignore[no-redef]
@@ -111,6 +113,8 @@ except ImportError:  # 插件作为顶层模块加载时
     from features import court as features_court  # type: ignore[no-redef]
     from features import admin as features_admin  # type: ignore[no-redef]
     from features import config as features_config  # type: ignore[no-redef]
+    from features import wiki as features_wiki  # type: ignore[no-redef]
+    from features import guess as features_guess  # type: ignore[no-redef]
 
 logger = logging.getLogger("astrbot")
 
@@ -1903,7 +1907,7 @@ class OverstatsPlugin(Star):
             """
         if self._full_adapt_map is not None:
             return self._full_adapt_map
-        table = [(['owhelp', 'ow菜单', 'ow帮助', 'OW帮助', 'help'], self.ow_help), (['所有指令', '别称'], self.show_aliases), (['快速指南', '快捷指令'], self.quick_guide_command), (['大神绑定', '绑定'], self.dashen_bind), (['今日总结', '今日', '今日数据'], self.dashen_today), (['昨日总结', '昨日', '昨日数据', '昨天数据'], self.dashen_yesterday), (['周度总结', '本周总结', '本周数据', '本周'], self.dashen_week), (['大神数据', '详情卡片', '战绩查询', '数据'], self.dashen_profile), (['大神对局', '最近对局', '战绩', '对局'], self.dashen_match), (['单局详细', '单局详情', '单局'], self.dashen_match_detail), (['历史段位', '历届段位'], self.dashen_rank_history), (['同玩查询', '开黑胜率'], self.dashen_sameplay), (['快速强度', '快速强度指数'], self.quick_strength), (['竞技强度', '竞技强度指数'], self.competitive_strength), (['快速英雄云图', '快速云图'], self.quick_hero_treemap), (['竞技英雄云图', '竞技云图'], self.competitive_hero_treemap), (['威能'], self.ow_hero_perk), (['ow英雄'], self.ow_hero_pick), (['商店', 'ow商店'], self.ow_shop), (['ow赛事', '赛事'], self.ow_esports), (['获取段位分布'], self.get_rank_distribution), (['ow活动', '活动'], self.ow_activities), (['banpick', '全英雄排行'], self.ban_pick_stats), (['mappick'], self.map_pick_stats), (['皮肤搜索'], self.skin_search), (['ow更新', '版本更新'], self.ow_patch_notes), (['省榜', '排行'], self.ow_rank_leaderboard), (['绝活榜', '英雄省榜'], self.ow_hero_leaderboard)]
+        table = [(['owhelp', 'ow菜单', 'ow帮助', 'OW帮助', 'help'], self.ow_help), (['所有指令', '别称'], self.show_aliases), (['快速指南', '快捷指令'], self.quick_guide_command), (['大神绑定', '绑定'], self.dashen_bind), (['今日总结', '今日', '今日数据'], self.dashen_today), (['昨日总结', '昨日', '昨日数据', '昨天数据'], self.dashen_yesterday), (['周度总结', '本周总结', '本周数据', '本周'], self.dashen_week), (['大神数据', '详情卡片', '战绩查询', '数据'], self.dashen_profile), (['大神对局', '最近对局', '战绩', '对局'], self.dashen_match), (['单局详细', '单局详情', '单局'], self.dashen_match_detail), (['历史段位', '历届段位'], self.dashen_rank_history), (['同玩查询', '开黑胜率'], self.dashen_sameplay), (['快速强度', '快速强度指数'], self.quick_strength), (['竞技强度', '竞技强度指数'], self.competitive_strength), (['快速英雄云图', '快速云图'], self.quick_hero_treemap), (['竞技英雄云图', '竞技云图'], self.competitive_hero_treemap), (['威能'], self.ow_hero_perk), (['ow英雄'], self.ow_hero_pick), (['商店', 'ow商店'], self.ow_shop), (['ow赛事', '赛事'], self.ow_esports), (['获取段位分布'], self.get_rank_distribution), (['ow活动', '活动'], self.ow_activities), (['banpick', '全英雄排行'], self.ban_pick_stats), (['mappick'], self.map_pick_stats), (['皮肤搜索'], self.skin_search), (['ow更新', '版本更新'], self.ow_patch_notes), (['省榜', '排行'], self.ow_rank_leaderboard), (['绝活榜', '英雄省榜'], self.ow_hero_leaderboard), (['ow百科', '英雄百科', 'ow英雄百科', '百科'], self.ow_hero_wiki), (['英雄对比', 'ow英雄对比'], self.ow_hero_compare), (['ow猜猜', '猜猜', 'ow猜'], self.ow_guess)]
         m = {}
         for names, method in table:
             for n in names:
@@ -2452,6 +2456,11 @@ class OverstatsPlugin(Star):
 • <qqbot-cmd-input text="绝活榜 " show="绝活榜" reference="false" /> (别称：<qqbot-cmd-input text="英雄省榜 " show="英雄省榜" reference="false" />)
 • <qqbot-cmd-input text="banpick " show="banpick" reference="false" /> (别称：<qqbot-cmd-input text="全英雄排行 " show="全英雄排行" reference="false" />)
 
+🔹 **英雄资料与互动类：**
+• <qqbot-cmd-input text="ow百科 " show="ow百科" reference="false" /> (别称：<qqbot-cmd-input text="英雄百科 " show="英雄百科" reference="false" />, <qqbot-cmd-input text="ow英雄百科 " show="ow英雄百科" reference="false" />, <qqbot-cmd-input text="百科 " show="百科" reference="false" />)
+• <qqbot-cmd-input text="英雄对比 " show="英雄对比" reference="false" /> (别称：<qqbot-cmd-input text="ow英雄对比 " show="ow英雄对比" reference="false" />)
+• <qqbot-cmd-input text="ow猜猜 " show="ow猜猜" reference="false" /> (别称：<qqbot-cmd-input text="猜猜 " show="猜猜" reference="false" />, <qqbot-cmd-input text="ow猜 " show="ow猜" reference="false" />)
+
 🔹 **游戏资讯类：**
 • <qqbot-cmd-input text="威能 " show="威能" reference="false" />, <qqbot-cmd-input text="ow英雄 " show="ow英雄" reference="false" />, <qqbot-cmd-input text="获取段位分布 " show="获取段位分布" reference="false" />, <qqbot-cmd-input text="mappick " show="mappick" reference="false" />, <qqbot-cmd-input text="皮肤搜索 " show="皮肤搜索" reference="false" />
 • <qqbot-cmd-input text="商店 " show="商店" reference="false" /> (别称：<qqbot-cmd-input text="ow商店 " show="ow商店" reference="false" />)
@@ -2546,6 +2555,7 @@ class OverstatsPlugin(Star):
 🗺️ ➤ <qqbot-cmd-input text="快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="竞技英雄云图 " show="竞技云图" reference="false" /> ➤ <qqbot-cmd-input text="历史段位 " show="历史段位" reference="false" />
 🏆 ➤ <qqbot-cmd-input text="省榜 " show="省榜" reference="false" />省份 位置 ➤ <qqbot-cmd-input text="绝活榜 " show="绝活榜" reference="false" />省份 英雄 开放
 ⚔️ ➤ <qqbot-cmd-input text="威能 " show="威能" reference="false" />英雄名 ➤ <qqbot-cmd-input text="ow英雄 " show="ow 英雄" reference="false" />英雄名 快速/竞技 段位 ➤ <qqbot-cmd-input text="banpick " show="banpick" reference="false" />可选 快速/竞技 段位 ➤ <qqbot-cmd-input text="mappick " show="mappick" reference="false" />
+📚 ➤ <qqbot-cmd-input text="ow百科 " show="ow百科" reference="false" />英雄名 可选问题 ➤ <qqbot-cmd-input text="英雄对比 " show="英雄对比" reference="false" />玩家1 玩家2 可选英雄/模式/赛季 ➤ <qqbot-cmd-input text="ow猜猜 " show="ow猜猜" reference="false" />可选题型
 🌍 ➤ <qqbot-cmd-input text="同玩查询 " show="同玩查询" reference="false" />ID1 ID2 ➤ <qqbot-cmd-input text="商店 " show="商店" reference="false" /> ➤ <qqbot-cmd-input text="皮肤搜索 " show="皮肤搜索" reference="false" /> ➤ <qqbot-cmd-input text="ow赛事 " show="ow 赛事" reference="false" />
 📰 ➤ <qqbot-cmd-input text="ow更新 " show="ow更新" reference="false" />latest/small/big
 🧪 ➤ <qqbot-cmd-input text="ow是区吗 " show="ow是区吗" reference="false" />战网ID ➤ <qqbot-cmd-input text="ow是区吗结果 " show="ow是区吗结果" reference="false" />
@@ -2698,6 +2708,28 @@ class OverstatsPlugin(Star):
     async def ow_hero_leaderboard(self, event: AstrMessageEvent, province: str, hero: str, arg3: str = ''):
         """获取指定地区特定英雄的大神专精绝活榜（可选开放队列模式）。"""
         async for r in self._run_with_cmd_slot(event, lambda: features_info.ow_hero_leaderboard(self, event, province, hero, arg3)):
+            yield r
+
+    @filter.command('ow百科', alias={'英雄百科', 'ow英雄百科', '百科'})
+    async def ow_hero_wiki(self, event: AstrMessageEvent, arg1: str = '', arg2: str = '', arg3: str = ''):
+        """查看英雄百科概览卡；追加问题则生成英雄问答卡。"""
+        async for r in self._run_with_cmd_slot(event, lambda: features_wiki.ow_hero_wiki(self, event, arg1, arg2, arg3)):
+            yield r
+
+    @filter.command('英雄对比', alias={'ow英雄对比'})
+    async def ow_hero_compare(self, event: AstrMessageEvent, arg1: str = '', arg2: str = '', arg3: str = '', arg4: str = '', arg5: str = ''):
+        """对比两名玩家指定英雄（缺省为双方时长前三）的核心指标。"""
+        async for r in self._run_with_cmd_slot(event, lambda: features_wiki.ow_hero_compare(self, event, arg1, arg2, arg3, arg4, arg5)):
+            yield r
+
+    @filter.command('ow猜猜', alias={'猜猜', 'ow猜'})
+    async def ow_guess(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
+        """发一道 OW 猜猜题：题面每 15 秒放出一张，最后揭晓答案。
+
+        不经过并发槽位：整条指令含 45 秒等待期，占用轻指令槽位会平白挤掉同用户其它查询，
+        且本指令只打一次后端、无持续资源占用。
+        """
+        async for r in features_guess.ow_guess(self, event, arg1, arg2):
             yield r
 
     @filter.command('商店', alias={'ow商店'})

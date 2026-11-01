@@ -216,8 +216,11 @@ class CourtManager:
             # 6. 调后端图片接口取图并发送（违规时由 _send_image_result 自动封禁 12h）
             # 开庭为 AI 生成类功能：失败不重试，避免重复高成本生成，直接提示用户重发。
             payload = {"bnet_id": target_id, "index": index, "use_db": False}
+            # timeout=1800：与是区吗对齐——开庭走后端同一管线（抓取 + LLM + 渲染），
+            # 上游限流时端到端可超 10 分钟，旧值 900s 下服务端已成功但客户端提前断开
+            # 会丢图并报 network_error。
             img_bytes, error_data, _err_code = await self._plugin._fetch_image(
-                _COURT_IMAGE_ENDPOINT, payload, timeout=900, retry=False
+                _COURT_IMAGE_ENDPOINT, payload, timeout=1800, retry=False
             )
             if not img_bytes:
                 msg = ""

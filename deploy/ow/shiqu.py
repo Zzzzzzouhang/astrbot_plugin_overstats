@@ -307,11 +307,15 @@ class ShiquManager:
 
         # 单次请求后端图片接口（违规时由 _send_image_result 自动封禁 12h）
         # 是区吗为 AI 生成类功能：失败不重试，避免重复高成本生成，直接提示用户重发。
+        # timeout=1800：后端抓取（上游限流时可达 10 分钟级）+ LLM + 渲染的端到端最坏
+        # 耗时远超旧值 630s——旧值下服务端已成功生成（RENDER DONE ~738s）但客户端
+        # 提前断开，用户收到 network_error 且图片丢失。放到 1800s 让"能成功的请求"
+        # 不再被客户端掐死；真正的解法是服务端抓取时限预算（见 Overstats 侧）。
         # 并发不在此处限制：由 handler 层 _run_with_cmd_slot 的重指令池（heavy_max）统一把关。
         # 地址解析：专属分流生效时显式走专属地址；否则传 None，由 _fetch_image
         # 按解析链取值（特权独立后端地址 → 主地址）。
         img_bytes, error_data, _err_code = await self._plugin._fetch_image(
-            _SHIQU_IMAGE_ENDPOINT, payload, timeout=630, retry=False,
+            _SHIQU_IMAGE_ENDPOINT, payload, timeout=1800, retry=False,
             base_url=self._plugin.shiqu_base_url if self._plugin._shiqu_dedicated_active() else None
         )
         if not img_bytes:
