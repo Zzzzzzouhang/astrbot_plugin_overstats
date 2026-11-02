@@ -104,6 +104,7 @@ try:
     from .features import config as features_config
     from .features import wiki as features_wiki
     from .features import guess as features_guess
+    from .features import season as features_season
 except ImportError:  # 插件作为顶层模块加载时
     from features import binding as features_binding  # type: ignore[no-redef]
     from features import summary as features_summary  # type: ignore[no-redef]
@@ -115,6 +116,7 @@ except ImportError:  # 插件作为顶层模块加载时
     from features import config as features_config  # type: ignore[no-redef]
     from features import wiki as features_wiki  # type: ignore[no-redef]
     from features import guess as features_guess  # type: ignore[no-redef]
+    from features import season as features_season  # type: ignore[no-redef]
 
 logger = logging.getLogger("astrbot")
 
@@ -1692,6 +1694,31 @@ class OverstatsPlugin(Star):
                 return (None, {'error': 'network_error', 'message': str(e)}, 'network_error')
         return (None, {'error': 'retry_exhausted', 'message': '重试耗尽'}, 'retry_exhausted')
 
+    async def _post_json(self, endpoint: str, payload: dict = None, timeout: int = 60) -> tuple[dict | None, dict | None]:
+        """请求后端 JSON 接口，返回 (data, error)。
+
+        与 _fetch_image 的区别：不校验图片，直接把 JSON 体交回调用方；
+        error 沿用后端错误体结构（含 error/message），便于复用既有提示逻辑。
+        不做重试：调用方都是「先解析再请求」的短链路，重试收益低且会放大延迟。
+        """
+        url = f'{self._resolve_backend_url()}{endpoint}'
+        try:
+            session = await self._get_http_session()
+            async with session.post(url, json=payload or {}, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                try:
+                    data = await resp.json()
+                except Exception:
+                    logger.error(f'后端 JSON 接口返回非 JSON: {endpoint} HTTP {resp.status}')
+                    return None, {'error': 'non_json_error', 'message': f'后端返回非 JSON 数据（HTTP {resp.status}）'}
+                if resp.status == 200 and isinstance(data, dict):
+                    return data, None
+                if isinstance(data, dict):
+                    return None, data
+                return None, {'error': 'http_error', 'message': f'后端接口响应异常，状态码: {resp.status}'}
+        except Exception as e:
+            logger.error(f'后端 JSON 请求异常: {endpoint} | {e}')
+            return None, {'error': 'network_error', 'message': str(e)}
+
     async def _periodic_cleanup_loop(self):
         """每日凌晨 4 点清理临时图片目录，保留最近 24 小时内的文件，并清理过期缓存索引"""
         try:
@@ -1907,7 +1934,7 @@ class OverstatsPlugin(Star):
             """
         if self._full_adapt_map is not None:
             return self._full_adapt_map
-        table = [(['owhelp', 'ow菜单', 'ow帮助', 'OW帮助', 'help'], self.ow_help), (['所有指令', '别称'], self.show_aliases), (['快速指南', '快捷指令'], self.quick_guide_command), (['大神绑定', '绑定'], self.dashen_bind), (['今日总结', '今日', '今日数据'], self.dashen_today), (['昨日总结', '昨日', '昨日数据', '昨天数据'], self.dashen_yesterday), (['周度总结', '本周总结', '本周数据', '本周'], self.dashen_week), (['大神数据', '详情卡片', '战绩查询', '数据'], self.dashen_profile), (['大神对局', '最近对局', '战绩', '对局'], self.dashen_match), (['单局详细', '单局详情', '单局'], self.dashen_match_detail), (['历史段位', '历届段位'], self.dashen_rank_history), (['同玩查询', '开黑胜率'], self.dashen_sameplay), (['快速强度', '快速强度指数'], self.quick_strength), (['竞技强度', '竞技强度指数'], self.competitive_strength), (['快速英雄云图', '快速云图'], self.quick_hero_treemap), (['竞技英雄云图', '竞技云图'], self.competitive_hero_treemap), (['威能'], self.ow_hero_perk), (['ow英雄'], self.ow_hero_pick), (['商店', 'ow商店'], self.ow_shop), (['ow赛事', '赛事'], self.ow_esports), (['获取段位分布'], self.get_rank_distribution), (['ow活动', '活动'], self.ow_activities), (['banpick', '全英雄排行'], self.ban_pick_stats), (['mappick'], self.map_pick_stats), (['皮肤搜索'], self.skin_search), (['ow更新', '版本更新'], self.ow_patch_notes), (['省榜', '排行'], self.ow_rank_leaderboard), (['绝活榜', '英雄省榜'], self.ow_hero_leaderboard), (['ow百科', '英雄百科', 'ow英雄百科', '百科'], self.ow_hero_wiki), (['英雄对比', 'ow英雄对比'], self.ow_hero_compare), (['ow猜猜', '猜猜', 'ow猜'], self.ow_guess)]
+        table = [(['owhelp', 'ow菜单', 'ow帮助', 'OW帮助', 'help'], self.ow_help), (['所有指令', '别称'], self.show_aliases), (['快速指南', '快捷指令'], self.quick_guide_command), (['大神绑定', '绑定'], self.dashen_bind), (['今日总结', '今日', '今日数据'], self.dashen_today), (['昨日总结', '昨日', '昨日数据', '昨天数据'], self.dashen_yesterday), (['周度总结', '本周总结', '本周数据', '本周'], self.dashen_week), (['大神数据', '详情卡片', '战绩查询', '数据'], self.dashen_profile), (['大神对局', '最近对局', '战绩', '对局'], self.dashen_match), (['单局详细', '单局详情', '单局'], self.dashen_match_detail), (['历史段位', '历届段位'], self.dashen_rank_history), (['同玩查询', '开黑胜率'], self.dashen_sameplay), (['快速强度', '快速强度指数'], self.quick_strength), (['竞技强度', '竞技强度指数'], self.competitive_strength), (['快速英雄云图', '快速云图'], self.quick_hero_treemap), (['竞技英雄云图', '竞技云图'], self.competitive_hero_treemap), (['威能'], self.ow_hero_perk), (['ow英雄'], self.ow_hero_pick), (['商店', 'ow商店'], self.ow_shop), (['ow赛事', '赛事'], self.ow_esports), (['获取段位分布'], self.get_rank_distribution), (['ow活动', '活动'], self.ow_activities), (['banpick', '全英雄排行'], self.ban_pick_stats), (['mappick'], self.map_pick_stats), (['皮肤搜索'], self.skin_search), (['ow更新', '版本更新'], self.ow_patch_notes), (['省榜', '排行'], self.ow_rank_leaderboard), (['绝活榜', '英雄省榜'], self.ow_hero_leaderboard), (['ow百科', '英雄百科', 'ow英雄百科', '百科'], self.ow_hero_wiki), (['英雄对比', 'ow英雄对比'], self.ow_hero_compare), (['ow猜猜', '猜猜', 'ow猜'], self.ow_guess), (['赛季总结', '赛季报告', 'ow赛季总结'], self.ow_season_summary)]
         m = {}
         for names, method in table:
             for n in names:
@@ -2445,6 +2472,7 @@ class OverstatsPlugin(Star):
 • <qqbot-cmd-input text="今日总结 " show="今日总结" reference="false" /> (别称：<qqbot-cmd-input text="今日 " show="今日" reference="false" />, <qqbot-cmd-input text="今日数据 " show="今日数据" reference="false" />)
 • <qqbot-cmd-input text="昨日总结 " show="昨日总结" reference="false" /> (别称：<qqbot-cmd-input text="昨日 " show="昨日" reference="false" />, <qqbot-cmd-input text="昨日数据 " show="昨日数据" reference="false" />, <qqbot-cmd-input text="昨天数据 " show="昨天数据" reference="false" />)
 • <qqbot-cmd-input text="周度总结 " show="周度总结" reference="false" /> (别称：<qqbot-cmd-input text="本周总结 " show="本周总结" reference="false" />, <qqbot-cmd-input text="本周数据 " show="本周数据" reference="false" />, <qqbot-cmd-input text="本周 " show="本周" reference="false" />)
+• <qqbot-cmd-input text="赛季总结 " show="赛季总结" reference="false" /> (别称：<qqbot-cmd-input text="赛季报告 " show="赛季报告" reference="false" />, <qqbot-cmd-input text="ow赛季总结 " show="ow赛季总结" reference="false" />)
 
 🔹 **图表与排行类：**
 • <qqbot-cmd-input text="历史段位 " show="历史段位" reference="false" /> (别称：<qqbot-cmd-input text="历届段位 " show="历届段位" reference="false" />)
@@ -2549,7 +2577,7 @@ class OverstatsPlugin(Star):
         """显示 Overstats 查询菜单，列出所有常用指令入口。"""
         help_text = """📌 Overstats 查询菜单
 🔗 ➤ <qqbot-cmd-input text="绑定 " show="绑定" reference="false" />示例：绑定 Player#12345
-📋 ➤ <qqbot-cmd-input text="今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="周度总结 " show="本周" reference="false" />
+📋 ➤ <qqbot-cmd-input text="今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="周度总结 " show="本周" reference="false" /> ➤ <qqbot-cmd-input text="赛季总结 " show="赛季总结" reference="false" />可选赛季号
 📊 ➤ <qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" /> ➤ <qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />数字 锐评关/全员关
 📈 ➤ <qqbot-cmd-input text="快速强度 " show="快速强度" reference="false" />可选对局数 ➤ <qqbot-cmd-input text="竞技强度 " show="竞技强度" reference="false" />可选对局数 ➤ <qqbot-cmd-input text="获取段位分布 " show="获取段位分布" reference="false" />可选 快速/竞技 段位
 🗺️ ➤ <qqbot-cmd-input text="快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="竞技英雄云图 " show="竞技云图" reference="false" /> ➤ <qqbot-cmd-input text="历史段位 " show="历史段位" reference="false" />
@@ -2630,6 +2658,12 @@ class OverstatsPlugin(Star):
     async def dashen_week(self, event: AstrMessageEvent, bnet_id: str = ''):
         """统计本周战绩大数据总结，耗时较长（约 30-60 秒）。"""
         async for r in self._run_with_cmd_slot(event, lambda: features_summary.dashen_week(self, event, bnet_id)):
+            yield r
+
+    @filter.command('赛季总结', alias={'赛季报告', 'ow赛季总结'})
+    async def ow_season_summary(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
+        """生成指定赛季的赛季报告卡片（赛季号省略时默认上一赛季）。"""
+        async for r in self._run_with_cmd_slot(event, lambda: features_season.ow_season_summary(self, event, arg1, arg2)):
             yield r
 
     @filter.command('大神数据', alias={'详情卡片', '战绩查询', '数据'})
