@@ -121,6 +121,7 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
         resp_data = None
         # 最多 2 次尝试：后端瞬时错误（500/internal_error 超时等）10 秒后自动重试一次
         for attempt in (1, 2):
+            plugin._log_backend_send('/dashen-match/detail/replies', payload, attempt)
             async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=600)) as resp:
                 if resp.status == 200:
                     resp_data = await resp.json()

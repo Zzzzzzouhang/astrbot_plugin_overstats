@@ -76,6 +76,7 @@ async def ow_guess(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = 
         data = None
         session = await plugin._get_http_session()
         url = f'{plugin._resolve_backend_url()}/ow-guess/replies'
+        plugin._log_backend_send('/ow-guess/replies', payload)
         try:
             async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status == 200:

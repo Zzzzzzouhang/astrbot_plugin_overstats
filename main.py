@@ -1609,6 +1609,16 @@ class OverstatsPlugin(Star):
                'connectionreset', 'connectionrefused', 'remotedisconnected', 'econnreset', 'econnrefused')
         return any(k in text for k in _kw)
 
+    def _log_backend_send(self, endpoint: str, payload: dict, attempt: int = 1) -> None:
+        """向后端发请求时打一行 [SEND]（与后端 [RECV] 行毫秒级对齐，测量链路耗时）。
+
+        at= 字段含毫秒，与后端 [RECV] 行的 at= 直接相减即得 插件→后端 的传输开销
+        （同机部署时两端时钟一致，可直接对比）。
+        """
+        bnet = str(payload.get('bnet_id') or payload.get('bnetId') or payload.get('player1_bnet_id') or '-')
+        at = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        logger.info(f'[Overstats][SEND] {endpoint} bnet={bnet} attempt={attempt} at={at}')
+
     async def _fetch_image(self, endpoint: str, payload: dict=None, timeout: int=600, retry: bool=True, base_url: str | None=None) -> tuple[bytes | None, dict | None, str]:
         """请求后端图片接口。
 
@@ -1622,6 +1632,7 @@ class OverstatsPlugin(Star):
         payload = payload or {}
         for attempt in ((1, 2) if retry else (1,)):  # 最多 2 次尝试（1 次自动重试），间隔 10 秒
             start_ts = time.time()
+            self._log_backend_send(endpoint, payload, attempt)
             try:
                 session = await self._get_http_session()
                 req_timeout = aiohttp.ClientTimeout(total=timeout) if timeout != 600 else None
@@ -1702,6 +1713,7 @@ class OverstatsPlugin(Star):
         不做重试：调用方都是「先解析再请求」的短链路，重试收益低且会放大延迟。
         """
         url = f'{self._resolve_backend_url()}{endpoint}'
+        self._log_backend_send(endpoint, payload or {})
         try:
             session = await self._get_http_session()
             async with session.post(url, json=payload or {}, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
