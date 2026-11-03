@@ -3020,7 +3020,7 @@ class OverstatsPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command('ow后端日志')
     async def ow_backend_logs_cmd(self, event: AstrMessageEvent):
-        """查看 Overstats 后端持久化日志文件（仅 AstrBot 管理员可用，auto 模式生效）。"""
+        """查看后端日志（仅 AstrBot 管理员可用）：auto 读持久化日志，manual 读配置指定的日志文件。"""
         async for r in features_admin.ow_backend_logs_cmd(self, event):
             yield r
 
@@ -3116,7 +3116,7 @@ class OverstatsPlugin(Star):
 • <qqbot-cmd-input text="ow停止后端 " show="ow停止后端" reference="false" /> 停止后端进程
 • <qqbot-cmd-input text="ow重启后端 " show="ow重启后端" reference="false" /> 重启后端（修改配置后需执行）
 • <qqbot-cmd-input text="ow部署日志 " show="ow部署日志" reference="false" /> 查看后端运行日志（内存，最近50行）
-• <qqbot-cmd-input text="ow后端日志 " show="ow后端日志" reference="false" /> 查看 Overstats 后端持久化日志（文件，最新30条）
+• <qqbot-cmd-input text="ow后端日志 " show="ow后端日志" reference="false" /> 查看后端日志（auto: 持久化日志最新30条；manual: 指定文件最后10行）
 
 🗑️ **后端卸载（仅 auto 托管模式）：**
 • <qqbot-cmd-input text="ow卸载后端 " show="ow卸载后端" reference="false" /> 预览卸载影响（空间/数据库/进程）

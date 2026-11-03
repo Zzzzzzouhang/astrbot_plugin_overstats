@@ -171,6 +171,12 @@
     "obvious_hint": true,
     "default": ""
   },
+  "backend_log_extra_file": {
+    "description": "【MANUAL】后端日志文件路径（/ow后端日志 输出该文件最后 10 行）",
+    "type": "string",
+    "hint": "manual（独立链接）模式下生效；auto 模式下 /ow后端日志 仍读取插件自带的持久化日志，此项不生效。填写后 /ow后端日志 会读取并输出该文件的最后 10 行，便于查看自建后端的日志。建议填写绝对路径（如 /root/overstats/backend.log 或 D:\\overstats\\backend.log）；相对路径按后端代码目录解析。留空则 /ow后端日志 提示到服务器查看日志。",
+    "default": ""
+  },
   "backend_repo_url": {
     "description": "【AUTO】后端仓库地址",
     "type": "string",

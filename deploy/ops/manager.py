@@ -27,6 +27,42 @@ STATE_FAILED = "failed"            # 部署或运行失败
 # AstrBot 默认 PyPI 镜像源
 _DEFAULT_PYPI_INDEX = "https://mirrors.aliyun.com/pypi/simple/"
 
+# 读取文件尾部时单次最多读取的字节数（避免大日志文件整体载入内存）
+_TAIL_READ_BYTES = 256 * 1024
+
+
+def _read_tail_lines(path: Path, lines: int) -> list[str]:
+    """从文件末尾读取最后 N 行。
+
+    Args:
+        path: 文件路径
+        lines: 行数，<=0 表示返回可见范围内的全部行
+
+    Returns:
+        行列表（最旧在前），文件不存在或读取失败时返回空列表。
+    """
+    try:
+        if not path.is_file():
+            return []
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            read_size = min(size, _TAIL_READ_BYTES)
+            f.seek(size - read_size)
+            data = f.read(read_size)
+    except OSError as e:
+        logger.debug(f"[OverstatsDeploy] 读取日志文件失败 {path}: {e}")
+        return []
+
+    text = data.decode("utf-8", errors="replace")
+    result = text.splitlines()
+    if read_size < size and result:
+        # 从字节中间截断，首行可能不完整，丢弃
+        result = result[1:]
+    if lines <= 0:
+        return result
+    return result[-lines:]
+
 
 @dataclass
 class DeployResult:
@@ -222,6 +258,33 @@ class DeployManager:
     def log_file_path(self) -> Path:
         """持久化日志文件路径。"""
         return self._log_file
+
+    @property
+    def extra_log_file_path(self) -> Optional[Path]:
+        """配置项 backend_log_extra_file 指定的额外日志文件路径。
+
+        未配置时返回 None；相对路径按后端代码目录解析。
+        """
+        raw = str(self._config.get("backend_log_extra_file", "") or "").strip()
+        if not raw:
+            return None
+        try:
+            path = Path(raw).expanduser()
+        except (OSError, ValueError):
+            return None
+        if not path.is_absolute():
+            path = self._backend_dir / path
+        return path
+
+    def get_extra_log_lines(self, lines: int = 10) -> list[str]:
+        """读取配置项指定日志文件的最后 N 行。
+
+        未配置或文件不可读时返回空列表。
+        """
+        path = self.extra_log_file_path
+        if path is None:
+            return []
+        return _read_tail_lines(path, lines)
 
     def _set_state(self, state: str, error: str = ""):
         self._state = state

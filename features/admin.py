@@ -200,15 +200,27 @@ async def ow_deploy_logs_cmd(plugin, event: AstrMessageEvent):
 async def ow_backend_logs_cmd(plugin, event: AstrMessageEvent):
     if plugin.monitor:
         asyncio.ensure_future(plugin.monitor.record_command('ow后端日志', True))
-    '查看 Overstats 后端持久化日志文件（仅 AstrBot 管理员可用，auto 模式生效）。\n\n        从专用日志文件中提取最新的 30 条记录。与 /ow部署日志 不同，\n        此指令读取持久化日志文件，日志跨后端重启保留。\n        '
-    if not plugin.deploy_manager.is_auto_mode:
-        yield event.plain_result('⚠️ 当前为独立链接模式，后端日志请到您部署后端的服务器查看。')
+    '查看后端日志（仅 AstrBot 管理员可用）。\n\n        auto 模式：从专用日志文件中提取最新 30 条记录（与以往一致）；\n        manual 模式：读取配置项「额外日志文件路径」指定文件的最后 10 行。\n        '
+    manager = plugin.deploy_manager
+    if not manager.is_auto_mode:
+        extra_path = manager.extra_log_file_path
+        if extra_path is None:
+            yield event.plain_result('⚠️ 当前为独立链接模式，后端日志请到您部署后端的服务器查看。\n如需在群内查看日志，请在插件配置中填写「额外日志文件路径」。')
+            return
+        extra_logs = manager.get_extra_log_lines(10)
+        if not extra_logs:
+            yield event.plain_result(f'📋 指定日志文件暂无内容或不可读取。\n📂 文件: {extra_path}')
+            return
+        lines = [f'📋 后端日志（最后 {len(extra_logs)} 行）：', f'📂 文件: {extra_path}', '']
+        lines.extend(extra_logs)
+        yield event.plain_result('\n'.join(lines))
         return
-    logs = plugin.deploy_manager.get_backend_logs(30)
+
+    logs = manager.get_backend_logs(30)
     if not logs:
-        yield event.plain_result(f'📋 暂无 Overstats 后端持久化日志。\n日志文件路径: {plugin.deploy_manager.log_file_path}\n后端启动并产生输出后日志将写入该文件。')
+        yield event.plain_result(f'📋 暂无 Overstats 后端持久化日志。\n日志文件路径: {manager.log_file_path}\n后端启动并产生输出后日志将写入该文件。')
         return
-    lines = [f'📋 Overstats 后端持久化日志（最新 {len(logs)} 条）：', f'📂 文件: {plugin.deploy_manager.log_file_path}', '']
+    lines = [f'📋 Overstats 后端持久化日志（最新 {len(logs)} 条）：', f'📂 文件: {manager.log_file_path}', '']
     lines.extend(logs)
     yield event.plain_result('\n'.join(lines))
 
