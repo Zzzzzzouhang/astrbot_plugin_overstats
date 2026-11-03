@@ -8,10 +8,12 @@ today/week 完全不同：不认 bnet_id，必须在 payload 里自带
 - ``season``：可选，缺省等于「当前赛季 - 1」。
 
 插件手上只有 ``Name#1234``，所以先用 ``/dashen-profile``（JSON，不渲染）换出
-``resolved.bnet_id`` 作为 roleId；token 直接取账号池里第一个可用值，
-账号与角色是否匹配交给上游判定，失败时把后端错误原样抛给用户。
+``resolved.bnet_id`` 作为 roleId；token 从账号池随机挑选，账号相关失败时自动
+换下一个账号重试（与后端 DashenAPIClient「随机选可用账号」的语义对齐），
+账号与角色是否匹配交给上游判定，其余业务错误原样抛给用户。
 """
 import logging
+import random
 
 from astrbot.api.event import AstrMessageEvent
 
@@ -23,6 +25,13 @@ _NO_ACCOUNT_HINT = (
     '❌ 赛季总结需要大神账号 token，当前插件配置里没有可用账号。\n'
     '请在插件配置 →「大神账号配置」中填写至少一个账号（role_id + token）后重试。'
 )
+# 单次指令最多尝试的账号数（随机选取）：全部账号都试会在上游故障时拖长等待
+_SEASON_TOKEN_ATTEMPTS = 3
+# 仅「账号相关」失败才换号重试；无报告 / 赛季不存在等业务错误换号也无意义
+_RETRY_WITH_OTHER_ACCOUNT = {
+    'season_report_unavailable',
+    'season_report_upstream_error',
+}
 
 
 def _parse_accounts(plugin) -> list[dict]:
@@ -44,13 +53,16 @@ def _parse_accounts(plugin) -> list[dict]:
     return accounts
 
 
-def _first_token(plugin) -> str:
-    """取账号池里第一个可用 token；没有则返回空串。"""
+def _account_tokens(plugin) -> list[str]:
+    """账号池全部可用 token（去重，保持配置顺序）；空列表表示未配置账号。"""
+    seen: set[str] = set()
+    tokens: list[str] = []
     for account in _parse_accounts(plugin):
         token = str(account.get('token') or '').strip()
-        if token:
-            return token
-    return ''
+        if token and token not in seen:
+            seen.add(token)
+            tokens.append(token)
+    return tokens
 
 
 async def ow_season_summary(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
@@ -73,8 +85,8 @@ async def ow_season_summary(plugin, event: AstrMessageEvent, arg1: str = '', arg
         yield _gate
         return
 
-    token = _first_token(plugin)
-    if not token:
+    tokens = _account_tokens(plugin)
+    if not tokens:
         yield plugin._plain_error_result(event, _NO_ACCOUNT_HINT)
         return
 
@@ -107,13 +119,31 @@ async def ow_season_summary(plugin, event: AstrMessageEvent, arg1: str = '', arg
             )
             return
 
-        # 2) 请求赛季报告图片；账号与角色是否匹配由上游判定，失败原样透出
-        payload = {'token': token, 'roleId': role_id}
-        if season is not None:
-            payload['season'] = season
-        img_bytes, error_data, err_code = await plugin._fetch_image(
-            '/dashen-summary/season/image', payload, timeout=180,
-        )
+        # 2) 请求赛季报告图片：账号随机打散 + 账号相关失败自动换号重试。
+        # 后端普通 dashen 请求是随机选可用账号（失效冷却），赛季接口却由调用方直传
+        # token——写死第一个账号时，该账号过期会让整个功能失效（其他指令不受影响）。
+        attempt_tokens = tokens[:]
+        random.shuffle(attempt_tokens)
+        attempt_limit = min(len(attempt_tokens), _SEASON_TOKEN_ATTEMPTS)
+        img_bytes = None
+        error_data = None
+        for attempt_index, token in enumerate(attempt_tokens[:attempt_limit], start=1):
+            payload = {'token': token, 'roleId': role_id}
+            if season is not None:
+                payload['season'] = season
+            # retry=False：换号本身就是重试，避免每个账号再叠一次 10s 自动重试
+            img_bytes, error_data, err_code = await plugin._fetch_image(
+                '/dashen-summary/season/image', payload, timeout=180, retry=False,
+            )
+            if img_bytes:
+                break
+            if str((error_data or {}).get('error') or '') not in _RETRY_WITH_OTHER_ACCOUNT:
+                break
+            if attempt_index < attempt_limit:
+                logger.warning(
+                    f'[Overstats] 赛季总结第 {attempt_index}/{attempt_limit} 个账号失败'
+                    f'（{(error_data or {}).get("error")}），换号重试'
+                )
         if img_bytes:
             success = True
             async for r in plugin._send_image_result(event, img_bytes, CMD_NAME):
