@@ -2735,8 +2735,10 @@ class OverstatsPlugin(Star):
     @filter.command('赛季总结', alias={'赛季报告', 'ow赛季总结'})
     async def ow_season_summary(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
         """生成指定赛季的赛季报告卡片（赛季号省略时默认上一赛季）。"""
-        async for r in self._run_with_cmd_slot(event, lambda: features_season.ow_season_summary(self, event, arg1, arg2)):
-            yield r
+        # 暂时屏蔽：上游赛季报告接口鉴权失效（401 Token Invalid），代码保留在
+        # features/season.py。恢复时删除下面这一行提示、还原原调用即可：
+        #   async for r in self._run_with_cmd_slot(event, lambda: features_season.ow_season_summary(...)):
+        yield event.plain_result('⚠️ 赛季总结功能暂时不可用，请登录网易大神查看。')
 
     @filter.command('大神数据', alias={'详情卡片', '战绩查询', '数据'})
     async def dashen_profile(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
