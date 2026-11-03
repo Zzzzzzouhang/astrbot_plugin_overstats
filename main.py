@@ -147,6 +147,39 @@ _FRIENDLY_UPSTREAM_ERRORS = {
 }
 
 
+def _ensure_backend_base(url: str) -> str:
+    """把后端地址归一化为「含 /api/v2 的 base」；空串原样返回。
+
+    仅当 URL 没有路径（scheme://host:port）时自动补 /api/v2——面板漏填
+    /api/v2 会让该地址上的所有请求 404（特权白名单地址 / 分流地址最易漏填）。
+    带自定义路径的地址（反代前缀）保持原样，不猜测用户的反代规则。
+    """
+    text = str(url or '').strip().rstrip('/')
+    if not text:
+        return ''
+    try:
+        from urllib.parse import urlsplit
+        if '://' in text and urlsplit(text).path in ('', '/'):
+            return f'{text}/api/v2'
+    except ValueError:
+        return text
+    return text
+
+
+def _as_id_list(value) -> list[str]:
+    """白名单配置归一化：列表原样取串；字符串按逗号/中文逗号/空白拆分。
+
+    面板字段为 list，但手改配置时可能存成 "id1,id2"，直接 `in` 判断会退化成
+    子串匹配（误判/漏判），这里统一拆成 ID 列表。
+    """
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    text = str(value or '').strip()
+    if not text:
+        return []
+    return [part for part in re.split(r'[,，\s]+', text) if part]
+
+
 def _validate_image_bytes(body: bytes) -> str:
     """校验 bytes 是否为可上传 QQ 的图片数据；返回空字符串表示通过，否则为原因。"""
     if not body:
@@ -725,8 +758,8 @@ class OverstatsPlugin(Star):
 
     def _is_whitelisted(self, event: AstrMessageEvent) -> bool:
         """检查当前消息的群聊或发送者是否在白名单中。"""
-        group_whitelist = self.config.get('group_whitelist', []) or []
-        user_whitelist = self.config.get('user_whitelist', []) or []
+        group_whitelist = _as_id_list(self.config.get('group_whitelist', []))
+        user_whitelist = _as_id_list(self.config.get('user_whitelist', []))
         if not group_whitelist and (not user_whitelist):
             return False
         if group_whitelist:
@@ -872,7 +905,7 @@ class OverstatsPlugin(Star):
             url = ''
         else:
             url = str(self.config.get('overstats_api_url_2', '') or '').strip()
-        return url or self.base_url
+        return _ensure_backend_base(url) or self.base_url
 
     @property
     def privileged_base_url(self) -> str:
@@ -886,7 +919,7 @@ class OverstatsPlugin(Star):
             return ''
         if getattr(self, 'deploy_manager', None) is not None and self.deploy_manager.is_auto_mode:
             return ''
-        return str(self.config.get('privileged_backend_url', '') or '').strip()
+        return _ensure_backend_base(str(self.config.get('privileged_backend_url', '') or '').strip())
 
     def _active_backend_url_for(self, privileged: bool) -> str | None:
         """按指令特权身份解析本次命令的后端地址覆盖（None = 走默认解析链）。
@@ -943,21 +976,30 @@ class OverstatsPlugin(Star):
                 event=event, command_text=cmd_text, started_at=started_at, done_event=done_event
             )
         self._mark_cmd_notice_state(event, started_at, done_event)
+        _backend_token = None
         try:
             privileged = self._is_privileged(event)
             # 后端地址上下文：特权分流开启时指向独立地址，否则显式置 None（主地址），
             # 避免同一任务内上一条特权指令的地址残留影响到本条普通指令。
-            _ACTIVE_BACKEND_URL.set(self._active_backend_url_for(privileged))
+            _backend_token = _ACTIVE_BACKEND_URL.set(self._active_backend_url_for(privileged))
             ticket: SlotTicket | None = None
             try:
                 ticket = await self._try_acquire_cmd_slot(event, privileged=privileged, heavy=heavy)
             except SlotRejected as rej:
-                # 超限即拒：个人并发已满 / 轻或重全局槽位已满，直接返回对应文案
-                yield event.plain_result(self._concurrency_reject_text(getattr(rej, 'reason', None), heavy))
+                # 超限即拒：个人并发已满 / 轻或重全局槽位已满，直接返回对应文案。
+                # 诊断日志：白名单命中情况在此暴露——填的是 QQ 号而非 openid 时
+                # 会出现 privileged=False whitelist=False，可直接定位白名单失效原因。
                 try:
                     uid = str(event.get_sender_id())
                 except Exception:
                     uid = ''
+                logger.warning(
+                    f'[Overstats] 指令并发拒绝: cmd={cmd_text or "-"} reason={getattr(rej, "reason", "-")} '
+                    f'user={uid or "-"} group={self._get_group_id(event) or "-"} '
+                    f'privileged={privileged} whitelist={self._is_whitelisted(event)} '
+                    f'admin={self._is_astrbot_admin(event)}'
+                )
+                yield event.plain_result(self._concurrency_reject_text(getattr(rej, 'reason', None), heavy))
                 if self.monitor:
                     asyncio.ensure_future(self.monitor.record_rate_limit('cmd', uid))
                 return
@@ -968,7 +1010,13 @@ class OverstatsPlugin(Star):
                 # 精确释放本指令占用的槽位（ticket 缺失时退回按用户 FIFO 释放）
                 await self._release_cmd_slot(event, getattr(ticket, 'slot_id', 0) or 0)
         finally:
-            # 指令结束（含各提前 return 分支）：置位以取消超时预警后台任务
+            # 指令结束（含各提前 return 分支）：恢复地址上下文，取消超时预警后台任务
+            if _backend_token is not None:
+                try:
+                    _ACTIVE_BACKEND_URL.reset(_backend_token)
+                except ValueError:
+                    # 跨上下文消费兜底：reset 只在 set 所在上下文有效，异常不阻断收尾
+                    pass
             done_event.set()
             self._clear_cmd_notice_state(event)
 
@@ -1395,7 +1443,20 @@ class OverstatsPlugin(Star):
         return self._http_session
 
     async def terminate(self):
-        """插件卸载/停用时清理资源（AstrBot 生命周期方法）"""
+        """插件卸载/停用时清理资源（AstrBot 生命周期方法）。
+
+        顺序原则：先释放监听端口（图片直传服务），再做可能耗时/阻塞的清理
+        （停后端进程、落盘缓存）。否则热重载时端口迟迟不释放，新实例抢不到。
+        """
+        logger.info('[Overstats] 插件卸载中：开始清理资源')
+        # 1) 最先释放端口：热重载后新实例可能立刻启动并争抢同一端口
+        try:
+            _media_server = getattr(self, '_media_url_server', None)
+            if _media_server is not None:
+                await _media_server.stop()
+            self._media_url_server = None
+        except Exception as e:
+            logger.warning(f'[Overstats] 停止图片直传服务异常: {e}')
         auto_task = getattr(self, '_auto_start_task', None)
         if auto_task and (not auto_task.done()):
             auto_task.cancel()
@@ -1430,14 +1491,9 @@ class OverstatsPlugin(Star):
                 logging.getLogger('astrbot').removeHandler(_handler)
             except Exception:
                 pass
-        try:
-            _media_server = getattr(self, '_media_url_server', None)
-            if _media_server is not None:
-                await _media_server.stop()
-        except Exception as e:
-            logger.warning(f'[Overstats] 停止图片直传服务异常: {e}')
         if self._http_session and (not self._http_session.closed):
             await self._http_session.close()
+        logger.info('[Overstats] 插件卸载完成：资源清理结束')
 
     def _is_qq_official(self, event: AstrMessageEvent) -> bool:
         """判断当前消息是否来自 QQ 官方机器人平台——委托 platform 适配器。"""
@@ -1617,7 +1673,11 @@ class OverstatsPlugin(Star):
         """
         bnet = str(payload.get('bnet_id') or payload.get('bnetId') or payload.get('player1_bnet_id') or '-')
         at = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-        logger.info(f'[Overstats][SEND] {endpoint} bnet={bnet} attempt={attempt} at={at}')
+        # base= 打实际目标地址（特权分流失效/地址漏填 /api/v2 时可直接看出打错节点）
+        logger.info(
+            f'[Overstats][SEND] {endpoint} bnet={bnet} attempt={attempt} '
+            f'base={self._resolve_backend_url()} at={at}'
+        )
 
     async def _fetch_image(self, endpoint: str, payload: dict=None, timeout: int=600, retry: bool=True, base_url: str | None=None) -> tuple[bytes | None, dict | None, str]:
         """请求后端图片接口。
@@ -2846,9 +2906,15 @@ class OverstatsPlugin(Star):
         不占全局槽位、超限也不拒绝。
         但仍写入后端地址上下文：特权独立地址开启时，取图与生成落在同一后端节点。
         """
-        _ACTIVE_BACKEND_URL.set(self._active_backend_url_for(self._is_privileged(event)))
-        async for r in features_court.ow_shiqu_result(self, event):
-            yield r
+        _token = _ACTIVE_BACKEND_URL.set(self._active_backend_url_for(self._is_privileged(event)))
+        try:
+            async for r in features_court.ow_shiqu_result(self, event):
+                yield r
+        finally:
+            try:
+                _ACTIVE_BACKEND_URL.reset(_token)
+            except ValueError:
+                pass
 
     @filter.command('ow开庭结果', alias={'开庭结果'})
     async def ow_court_result(self, event: AstrMessageEvent):
@@ -2858,9 +2924,15 @@ class OverstatsPlugin(Star):
         不占全局槽位、超限也不拒绝。
         但仍写入后端地址上下文：特权独立地址开启时，取图与生成落在同一后端节点。
         """
-        _ACTIVE_BACKEND_URL.set(self._active_backend_url_for(self._is_privileged(event)))
-        async for r in features_court.ow_court_result(self, event):
-            yield r
+        _token = _ACTIVE_BACKEND_URL.set(self._active_backend_url_for(self._is_privileged(event)))
+        try:
+            async for r in features_court.ow_court_result(self, event):
+                yield r
+        finally:
+            try:
+                _ACTIVE_BACKEND_URL.reset(_token)
+            except ValueError:
+                pass
 
     @filter.command('owAI检测', alias={'AI检测'})
     async def ow_ai_test(self, event: AstrMessageEvent):

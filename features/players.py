@@ -113,7 +113,7 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
     if _maintenance_stop:
         return
     payload = {'bnet_id': target_id, 'index': str(index), 'limit': '20', 'include_fight': True, 'include_previous_season': True, 'show_all_heroes': kw.get('show_all_heroes', True), 'analyze': analyze}
-    url = f'{plugin.base_url}/dashen-match/detail/replies'
+    url = f'{plugin._resolve_backend_url()}/dashen-match/detail/replies'
     success = False
     err_code = ''
     try:
@@ -181,7 +181,7 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
                     except Exception:
                         pass
                 if not img_data:
-                    full_img_url = img_str if img_str.startswith('http') else f"{plugin.base_url.rstrip('/').removesuffix('/api/v2')}{(img_str if img_str.startswith('/') else '/' + img_str)}"
+                    full_img_url = img_str if img_str.startswith('http') else f"{plugin._resolve_backend_url().rstrip('/').removesuffix('/api/v2')}{(img_str if img_str.startswith('/') else '/' + img_str)}"
                     async with session.get(full_img_url, timeout=aiohttp.ClientTimeout(total=30), ssl=False) as img_resp:
                         if img_resp.status == 200:
                             img_data = await img_resp.read()

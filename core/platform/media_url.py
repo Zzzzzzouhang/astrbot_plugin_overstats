@@ -87,6 +87,9 @@ class MediaURLServer:
         self.public_base = (public_base or "").strip().rstrip("/")
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
+        # 端口被旧实例占用且旧实例仍在服务同一 media 目录时置 True：本实例不再监听，
+        # 只负责落盘与生成 URL（插件热重载期间 terminate 未执行/未完成时的兜底）。
+        self._reused_external = False
         self._lock = asyncio.Lock()
         self._last_prune = 0.0
 
@@ -94,25 +97,38 @@ class MediaURLServer:
 
     @property
     def running(self) -> bool:
-        return self._runner is not None
+        return self._runner is not None or self._reused_external
 
     async def start(self) -> str:
         """启动服务并返回公网基地址；返回空串表示公网地址不可得。"""
         async with self._lock:
-            if self._runner is not None:
+            if self._runner is not None or self._reused_external:
                 if not self.public_base:
                     self.public_base = await self._detect_base()
                 return self.public_base
             await asyncio.to_thread(self._root.mkdir, parents=True, exist_ok=True)
             app = web.Application()
             app.router.add_get("/media/{name}", self._handle_get)
-            runner = web.AppRunner(app, access_log=None)
+            # shutdown_timeout=2：插件卸载时不等待在途下载（默认 60s 会让端口迟迟不释放）
+            runner = web.AppRunner(app, access_log=None, shutdown_timeout=2)
             await runner.setup()
             site = web.TCPSite(runner, self._host, self._port, reuse_address=True)
             try:
                 await site.start()
             except OSError as exc:
                 await runner.cleanup()
+                # 端口被占用（典型：插件热重载，旧实例的 terminate 未执行或未完成）。
+                # 旧实例服务的是同一 media 目录，直接复用即可，不必让新实例启动失败。
+                if await self._probe_existing_server():
+                    self._reused_external = True
+                    if not self.public_base:
+                        self.public_base = await self._detect_base()
+                    logger.warning(
+                        "[Overstats] 图片直传端口 %s:%s 已被占用，复用既有实例（不再监听）",
+                        self._host,
+                        self._port,
+                    )
+                    return self.public_base
                 raise RuntimeError(
                     f"监听 {self._host}:{self._port} 失败（端口被占用或无权限）: {exc}"
                 ) from exc
@@ -132,9 +148,26 @@ class MediaURLServer:
             runner = self._runner
             self._runner = None
             self._site = None
+            self._reused_external = False
         if runner is not None:
-            await runner.cleanup()
-            logger.info("[Overstats] 图片直传服务已停止")
+            try:
+                await runner.cleanup()
+                logger.info("[Overstats] 图片直传服务已停止")
+            except Exception as exc:
+                # 停止失败不能让 terminate 中断——否则后续资源清理与端口释放全被跳过
+                logger.warning("[Overstats] 图片直传服务停止异常: %s", exc)
+
+    async def _probe_existing_server(self) -> bool:
+        """端口上是否已有同款静态服务在跑：命中 404（服务在但文件不存在）即视为在跑。"""
+        host = "127.0.0.1" if self._host in ("0.0.0.0", "", "::") else self._host
+        url = f"http://{host}:{self._port}/media/{'0' * 32}.png"
+        timeout = aiohttp.ClientTimeout(total=1.5)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as resp:
+                    return resp.status == 404
+        except Exception:
+            return False
 
     # ── 发布 ──────────────────────────────────────────────────
 
