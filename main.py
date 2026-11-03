@@ -2355,7 +2355,7 @@ class OverstatsPlugin(Star):
         # ponytail: 原生 @filter.command 已匹配该事件（斜杠指令），交给原生处理器，避免重复响应
         if event.get_extra("handlers_parsed_params"):
             return
-        if msg.isdigit():
+        if msg.isdigit() and not features_guess.is_answering(event):
             num = int(msg)
             if 0 < num <= 20:
                 async for result in self.dashen_match_detail(event, arg1=str(num)):
@@ -2383,6 +2383,9 @@ class OverstatsPlugin(Star):
             if not is_group or self._is_real_at_bot(event):
                 cmd_first_token = msg.split()[0].lstrip('/')
                 if cmd_first_token not in self._admin_cmd_set and cmd_first_token not in self._ensure_full_adapt_map():
+                    # 猜猜答题窗口内：该用户的自由文本是答案，不是未识别指令，静默放行
+                    if features_guess.is_answering(event):
+                        return
                     yield event.plain_result(self._get_quick_guide(event, unmatched_cmd=msg))
                     event.stop_event()
 
@@ -2411,6 +2414,8 @@ class OverstatsPlugin(Star):
         if cmd_first_token in self._admin_cmd_set or cmd_first_token in self._ensure_full_adapt_map():
             return
         if cmd_first_token.isdigit() and 0 < int(cmd_first_token) <= 20:
+            return
+        if features_guess.is_answering(event):
             return
         yield event.plain_result(self._get_quick_guide(event, unmatched_cmd=msg))
         event.stop_event()

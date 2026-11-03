@@ -8,6 +8,7 @@ import asyncio
 import base64
 import logging
 import random
+import time
 
 import aiohttp
 from astrbot.api.event import AstrMessageEvent
@@ -18,6 +19,52 @@ CMD_NAME = 'ow猜猜'
 
 # 题目阶段间隔（秒）：后端 stages 的 at_seconds 同样是 15 的整数倍
 _STAGE_INTERVAL = 15
+
+# 答题窗口：用户键 -> 本局截止 monotonic 时间。
+# 窗口内该用户发送的「非指令文本」视为猜猜答案，由未匹配兜底逻辑静默跳过，
+# 避免被回复成「❌ xxx 暂时未匹配到指令」。
+_ACTIVE_ANSWERS: dict[str, float] = {}
+
+
+def _answer_key(event: AstrMessageEvent) -> str:
+    try:
+        return str(event.get_sender_id())
+    except Exception:
+        return ''
+
+
+def mark_answering(event: AstrMessageEvent, seconds: float) -> float:
+    """登记该用户的答题窗口，返回本局截止时间（作为清理票据）。"""
+    deadline = time.monotonic() + float(seconds)
+    key = _answer_key(event)
+    if key and seconds > 0:
+        _ACTIVE_ANSWERS[key] = deadline
+    return deadline
+
+
+def clear_answering(event: AstrMessageEvent, deadline: float | None = None) -> None:
+    """清理答题窗口；传 deadline 时只清理自己那一局，避免误清用户新开的一局。"""
+    key = _answer_key(event)
+    if not key:
+        return
+    if deadline is None:
+        _ACTIVE_ANSWERS.pop(key, None)
+    elif _ACTIVE_ANSWERS.get(key) == deadline:
+        _ACTIVE_ANSWERS.pop(key, None)
+
+
+def is_answering(event: AstrMessageEvent) -> bool:
+    """该用户是否处于猜猜答题窗口内（过期条目顺手清理）。"""
+    key = _answer_key(event)
+    if not key:
+        return False
+    deadline = _ACTIVE_ANSWERS.get(key)
+    if deadline is None:
+        return False
+    if time.monotonic() >= deadline:
+        _ACTIVE_ANSWERS.pop(key, None)
+        return False
+    return True
 
 # 随机出题池：排除 map_music / hero_conversation。
 # 这两类需要服务器额外安装扩展包，且题面与答案都是音频，
@@ -62,6 +109,7 @@ async def ow_guess(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = 
         return
 
     success = False
+    answer_deadline = None
     try:
         qtype = ' '.join(x for x in ((arg1 or '').strip(), (arg2 or '').strip()) if x)
         if qtype in _AUDIO_TYPE_ALIASES:
@@ -104,6 +152,9 @@ async def ow_guess(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = 
         if not stages:
             stages = [{'replies': data.get('replies') or []}]
 
+        # 答题窗口 = 出题到揭晓的时长（阶段间隔 × 阶段数 + 最后一段等待）
+        answer_deadline = mark_answering(event, _STAGE_INTERVAL * len(stages) + _STAGE_INTERVAL)
+
         sent_any = False
         for index, stage in enumerate(stages):
             if index > 0:
@@ -130,6 +181,7 @@ async def ow_guess(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = 
         if not sent_any:
             yield plugin._plain_error_result(event, '❌ 未能生成猜猜题目，请换一个题型重试。')
     finally:
+        clear_answering(event, answer_deadline)
         # 本指令不经过 _run_with_cmd_slot / _finalize_business_status_prompt，
         # 监控记录需在此补齐，否则「ow猜猜」永远不出现在指令统计里。
         monitor = getattr(plugin, 'monitor', None)
