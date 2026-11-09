@@ -1439,7 +1439,7 @@ class OverstatsPlugin(Star):
     async def _get_http_session(self) -> aiohttp.ClientSession:
         """获取复用的 aiohttp.ClientSession（懒加载，自动重建已关闭的会话）"""
         if self._http_session is None or self._http_session.closed:
-            self._http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600), connector=aiohttp.TCPConnector(limit=10, ttl_dns_cache=300))
+            self._http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600), connector=aiohttp.TCPConnector(limit=0, ttl_dns_cache=300))
         return self._http_session
 
     async def terminate(self):
