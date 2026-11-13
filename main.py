@@ -104,7 +104,6 @@ try:
     from .features import config as features_config
     from .features import wiki as features_wiki
     from .features import guess as features_guess
-    from .features import season as features_season
 except ImportError:  # 插件作为顶层模块加载时
     from features import binding as features_binding  # type: ignore[no-redef]
     from features import summary as features_summary  # type: ignore[no-redef]
@@ -116,7 +115,6 @@ except ImportError:  # 插件作为顶层模块加载时
     from features import config as features_config  # type: ignore[no-redef]
     from features import wiki as features_wiki  # type: ignore[no-redef]
     from features import guess as features_guess  # type: ignore[no-redef]
-    from features import season as features_season  # type: ignore[no-redef]
 
 logger = logging.getLogger("astrbot")
 
@@ -127,6 +125,11 @@ logger = logging.getLogger("astrbot")
 # 且每条指令由 AstrBot 以独立任务驱动，天然按指令隔离，无需在 30 个
 # features 调用点逐个透传 event/base_url。
 _ACTIVE_BACKEND_URL: ContextVar[str | None] = ContextVar('overstats_active_backend_url', default=None)
+
+# 在途指令上下文：_run_with_cmd_slot 为每条指令写入 job_id/用户/会话/指令/开始时间，
+# _fetch_image 读取后把「已发出但尚未返回」的图片请求登记到插件实例。
+# 插件重载/进程退出时由 terminate() 落盘，新实例启动后自动重放，避免在途请求被直接抛弃。
+_ACTIVE_JOB: ContextVar[dict | None] = ContextVar('overstats_active_job', default=None)
 
 # QQ 富媒体图片上传前的数据校验：只放行真实图片字节。
 # 背景：曾出现后端 200 + 空 body / 200 + JSON 错误体被当作 .png 写入并上传 QQ，
@@ -283,6 +286,15 @@ class OverstatsPlugin(Star):
     # AstrBot 框架统一处理，上传/发送次数降到最低。超出部分保留 24 小时可再次取回。
     _GET_IMAGE_MAX_PER_MESSAGE = 4
     _IMAGE_CACHE_INDEX_FILE = "image_cache_index.json"
+    # 重载保护：在途图片请求落盘后，新实例最多重放多久内的请求（秒）与并发数
+    _PENDING_REQUESTS_FILE = "pending_requests.json"
+    _RESUME_MAX_AGE = 900                         # 超过 15 分钟的旧请求不再重放
+    _RESUME_CONCURRENCY = 2                       # 启动恢复时的后端并发，避免打满
+    _RESUME_START_DELAY = 3.0                     # 等插件/图片缓存服务初始化完成再开始
+    # 重载窗口标记：新实例启动时写入，旧实例据此把「连接被断开」视为重载而非业务失败，
+    # 静默中断并交给新实例重放，避免向用户推送 ❌ 提示。TTL 覆盖 __init__ 的同步阻塞时长。
+    _RELOAD_MARKER_FILE = "reload_marker.json"
+    _RELOAD_MARKER_TTL = 180
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -370,6 +382,16 @@ class OverstatsPlugin(Star):
             self._image_cache_index_path,
             ttl=self._IMAGE_CACHE_TTL,
         )
+        # 重载保护：登记「已发往后端、尚未返回」的图片请求；terminate 时落盘，
+        # 新实例启动后重放并写入图片缓存，用户点「获取图片」即可取回。
+        self._pending_requests_path = self.plugin_data_dir / self._PENDING_REQUESTS_FILE
+        self._reload_marker_path = self.plugin_data_dir / self._RELOAD_MARKER_FILE
+        self._inflight_requests: dict[str, dict] = {}
+        self._shutting_down = False
+        self._resume_task: asyncio.Task | None = None
+        # 尽早写重载标记：__init__ 含同步 IO，旧实例的请求可能在此期间超时断开，
+        # 标记要先于这些耗时操作落盘，旧实例才能识别为「重载中断」。
+        self._mark_reload_window()
         # 提示服务（service 层）：排队提示 / 超时预警的编排与去重
         self._notice_service = ReplyNoticeService(
             self._platform,
@@ -421,6 +443,11 @@ class OverstatsPlugin(Star):
             self._image_cache_flush_task = asyncio.create_task(self._image_cache_service.start())
         except Exception as e:
             logger.warning(f'[Overstats] 图片缓存服务启动失败: {e}')
+        # 重载/重启前落盘的在途请求：等初始化稳定后由后台重放
+        try:
+            self._resume_task = asyncio.create_task(self._resume_pending_requests())
+        except Exception as e:
+            logger.warning(f'[Overstats] 启动重载恢复任务失败: {e}')
 
     def _current_prompt_cycle_date(self, now: datetime | None=None) -> str:
         now = now or datetime.now()
@@ -977,6 +1004,7 @@ class OverstatsPlugin(Star):
             )
         self._mark_cmd_notice_state(event, started_at, done_event)
         _backend_token = None
+        _job_token = None
         try:
             privileged = self._is_privileged(event)
             # 后端地址上下文：特权分流开启时指向独立地址，否则显式置 None（主地址），
@@ -1003,6 +1031,15 @@ class OverstatsPlugin(Star):
                 if self.monitor:
                     asyncio.ensure_future(self.monitor.record_rate_limit('cmd', uid))
                 return
+            # 在途指令上下文：_fetch_image 读取它登记「已发出、未返回」的图片请求。
+            # started_at 用 wall time（落盘后新实例要判断请求年龄）。
+            _job_token = _ACTIVE_JOB.set({
+                'job_id': f'{time.time_ns()}-{id(event)}',
+                'user_key': self._user_key(event),
+                'session_id': str(getattr(event, 'unified_msg_origin', '') or ''),
+                'command': (getattr(event, 'message_str', '') or '').strip()[:60],
+                'started_at': time.time(),
+            })
             try:
                 async for r in coro_factory():
                     yield r
@@ -1016,6 +1053,11 @@ class OverstatsPlugin(Star):
                     _ACTIVE_BACKEND_URL.reset(_backend_token)
                 except ValueError:
                     # 跨上下文消费兜底：reset 只在 set 所在上下文有效，异常不阻断收尾
+                    pass
+            if _job_token is not None:
+                try:
+                    _ACTIVE_JOB.reset(_job_token)
+                except ValueError:
                     pass
             done_event.set()
             self._clear_cmd_notice_state(event)
@@ -1449,6 +1491,18 @@ class OverstatsPlugin(Star):
         （停后端进程、落盘缓存）。否则热重载时端口迟迟不释放，新实例抢不到。
         """
         logger.info('[Overstats] 插件卸载中：开始清理资源')
+        self._shutting_down = True
+        # 重载保护：先把「已发出、未返回」的图片请求落盘，新实例启动后会重放并写入
+        # 图片缓存（用户点「获取图片」可取）。必须在关闭 http session / 停后端之前执行。
+        self._persist_inflight_requests()
+        # 本实例的恢复任务随实例退出；未完成的恢复请求仍留在 pending 文件中由下次接手
+        resume_task = getattr(self, '_resume_task', None)
+        if resume_task and (not resume_task.done()):
+            resume_task.cancel()
+            try:
+                await resume_task
+            except asyncio.CancelledError:
+                pass
         # 1) 最先释放端口：热重载后新实例可能立刻启动并争抢同一端口
         try:
             _media_server = getattr(self, '_media_url_server', None)
@@ -1494,6 +1548,182 @@ class OverstatsPlugin(Star):
         if self._http_session and (not self._http_session.closed):
             await self._http_session.close()
         logger.info('[Overstats] 插件卸载完成：资源清理结束')
+
+    # ── 重载保护：在途请求登记 / 落盘 / 启动重放 ──────────────
+
+    def _mark_reload_window(self) -> None:
+        """写入重载窗口标记（新实例初始化时调用）。"""
+        try:
+            self._reload_marker_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._reload_marker_path.with_name(self._reload_marker_path.name + '.tmp')
+            tmp.write_text(json.dumps({'at': time.time()}), encoding='utf-8')
+            tmp.replace(self._reload_marker_path)
+        except Exception as e:
+            logger.debug(f'[Overstats] 写入重载标记失败: {e}')
+
+    def _is_reload_window(self) -> bool:
+        """是否处于重载窗口：本实例已开始卸载，或刚被新实例接管。"""
+        if getattr(self, '_shutting_down', False):
+            return True
+        try:
+            data = json.loads(self._reload_marker_path.read_text(encoding='utf-8'))
+            at = float(data.get('at') or 0)
+            return at > 0 and (time.time() - at) <= self._RELOAD_MARKER_TTL
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_resumable_endpoint(endpoint: str) -> bool:
+        """只重放普通图片接口；跳过是区吗/开庭等 AI 生成类，避免重复高成本生成。"""
+        if not endpoint or not endpoint.endswith('/image'):
+            return False
+        return not any(x in endpoint for x in ('/dashen-shiqu/', '/dashen-court/'))
+
+    @staticmethod
+    def _sanitize_inflight_payload(payload: dict) -> dict:
+        """落盘前剔除 token 类字段，只保留重放必需的查询参数。"""
+        if not isinstance(payload, dict):
+            return {}
+        blocked = {'token', 'customer_token', 'customertoken', 'xcxtoken'}
+        return {k: v for k, v in payload.items() if str(k).lower() not in blocked}
+
+    def _register_inflight_request(self, endpoint: str, payload: dict, base_url: str | None) -> str | None:
+        """登记一条在途图片请求；返回清理用的 key（不可恢复的端点返回 None）。"""
+        job = _ACTIVE_JOB.get()
+        if not job or not self._is_resumable_endpoint(endpoint):
+            return None
+        key = str(job.get('job_id') or '')
+        if not key:
+            return None
+        self._inflight_requests[key] = {
+            'job_id': key,
+            'user_key': str(job.get('user_key') or ''),
+            'session_id': str(job.get('session_id') or ''),
+            'command': str(job.get('command') or ''),
+            'started_at': float(job.get('started_at') or time.time()),
+            'endpoint': str(endpoint),
+            'payload': self._sanitize_inflight_payload(payload),
+            'base_url': str(base_url or ''),
+        }
+        return key
+
+    def _clear_inflight_request(self, key: str | None) -> None:
+        if key:
+            self._inflight_requests.pop(key, None)
+
+    def _persist_inflight_requests(self) -> None:
+        """把未完成的在途请求写入 pending_requests.json，供新实例重放。
+
+        与磁盘上已有条目合并：连续重载时，前一次尚未重放的请求不会被后一次覆盖。
+        """
+        try:
+            existing: list = []
+            if self._pending_requests_path.exists():
+                try:
+                    raw = json.loads(self._pending_requests_path.read_text(encoding='utf-8'))
+                    if isinstance(raw, dict) and isinstance(raw.get('requests'), list):
+                        existing = raw['requests']
+                except Exception:
+                    existing = []
+            merged: dict[str, dict] = {}
+            for item in existing + list(self._inflight_requests.values()):
+                if not isinstance(item, dict):
+                    continue
+                key = f"{item.get('job_id') or ''}::{item.get('endpoint') or ''}"
+                merged[key] = item
+            if not merged:
+                return
+            self._pending_requests_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._pending_requests_path.with_name(self._pending_requests_path.name + '.tmp')
+            tmp.write_text(
+                json.dumps({'saved_at': time.time(), 'requests': list(merged.values())}, ensure_ascii=False),
+                encoding='utf-8',
+            )
+            tmp.replace(self._pending_requests_path)
+            logger.info(f'[Overstats] 已保存在途请求 {len(merged)} 条，等待新实例恢复')
+        except Exception as e:
+            logger.warning(f'[Overstats] 保存在途请求失败: {e}')
+
+    async def _resume_pending_requests(self) -> None:
+        """新实例启动后重放重载前未完成的图片请求，成功后写入图片缓存供「获取图片」取回。"""
+        await asyncio.sleep(self._RESUME_START_DELAY)
+        try:
+            # 本实例已接管，清除重载标记，恢复请求的连接错误按正常业务处理
+            self._reload_marker_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        path = self._pending_requests_path
+        if not path.exists():
+            return
+        processing = path.with_name(path.name + '.processing')
+        try:
+            path.replace(processing)
+        except Exception:
+            processing = path
+        try:
+            raw = json.loads(processing.read_text(encoding='utf-8'))
+            requests = raw.get('requests') if isinstance(raw, dict) else []
+            if not isinstance(requests, list):
+                requests = []
+            now = time.time()
+            jobs = [
+                item for item in requests
+                if isinstance(item, dict)
+                and now - float(item.get('started_at') or 0) <= self._RESUME_MAX_AGE
+                and self._is_resumable_endpoint(str(item.get('endpoint') or ''))
+            ]
+            if not jobs:
+                return
+            logger.info(f'[Overstats] 检测到 {len(jobs)} 条重载前未完成请求，开始恢复')
+            sem = asyncio.Semaphore(self._RESUME_CONCURRENCY)
+
+            async def _one(item: dict) -> None:
+                async with sem:
+                    if self._shutting_down:
+                        return
+                    endpoint = str(item.get('endpoint') or '')
+                    payload = item.get('payload') if isinstance(item.get('payload'), dict) else {}
+                    base_url = str(item.get('base_url') or '') or None
+                    image, error, _ = await self._fetch_image(
+                        endpoint, payload, timeout=300, retry=False, base_url=base_url
+                    )
+                    if not image:
+                        logger.warning(f'[Overstats] 恢复请求失败: {endpoint} {error}')
+                        return
+                    user_key = str(item.get('user_key') or '')
+                    command = str(item.get('command') or '')
+                    if self._save_image_locally and self.temp_image_dir:
+                        digest = hashlib.sha1(image).hexdigest()[:16]
+                        img_path = self.temp_image_dir / f'{digest}_{time.time_ns()}.png'
+                        await self._write_image_atomic(img_path, image)
+                        if user_key:
+                            self._record_image_cache_sync(user_key, str(img_path), command)
+                    logger.info(
+                        f'[Overstats] 已恢复重载前请求: {command or endpoint} user={user_key or "-"}'
+                    )
+
+            await asyncio.gather(*(_one(item) for item in jobs), return_exceptions=True)
+            try:
+                self._image_cache_service.flush()
+            except Exception:
+                pass
+            logger.info(f'[Overstats] 重载前请求恢复完成: {len(jobs)} 条')
+        except asyncio.CancelledError:
+            # 恢复过程被再次重载打断：把未处理文件还原，交给下次启动继续
+            try:
+                if processing != path and processing.exists() and not path.exists():
+                    processing.replace(path)
+            except Exception:
+                pass
+            raise
+        except Exception as e:
+            logger.warning(f'[Overstats] 恢复重载前请求异常: {e}')
+        finally:
+            if processing != path:
+                try:
+                    processing.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def _is_qq_official(self, event: AstrMessageEvent) -> bool:
         """判断当前消息是否来自 QQ 官方机器人平台——委托 platform 适配器。"""
@@ -1693,6 +1923,9 @@ class OverstatsPlugin(Star):
         for attempt in ((1, 2) if retry else (1,)):  # 最多 2 次尝试（1 次自动重试），间隔 10 秒
             start_ts = time.time()
             self._log_backend_send(endpoint, payload, attempt)
+            # 登记在途请求：正常返回/失败会清除；被取消（重载）时保留，由 terminate 落盘。
+            req_key = self._register_inflight_request(endpoint, payload, base_url)
+            request_cancelled = False
             try:
                 session = await self._get_http_session()
                 req_timeout = aiohttp.ClientTimeout(total=timeout) if timeout != 600 else None
@@ -1753,7 +1986,17 @@ class OverstatsPlugin(Star):
                                 _mode = str(_details.get('mode') or '') if isinstance(_details, dict) else ''
                                 error_data['message'] = _friendly.format(mode=_MODE_LABELS.get(_mode, '该'))
                         return (None, error_data, error_data.get('error', '') if isinstance(error_data, dict) else '')
+            except asyncio.CancelledError:
+                # 任务被取消（重载/卸载）：保留 inflight，由 terminate 落盘给新实例重放
+                request_cancelled = True
+                raise
             except Exception as e:
+                # 重载窗口内的连接断开（Server disconnected / ClientConnectionError）：
+                # 视为重载中断，静默取消而不是向用户推送 ❌；请求保留在 inflight 中等待重放。
+                if self._is_reload_window() and isinstance(e, aiohttp.ClientConnectionError):
+                    logger.warning(f'[Overstats] 重载窗口内连接断开，静默交给新实例恢复: {endpoint}')
+                    request_cancelled = True
+                    raise asyncio.CancelledError() from e
                 if retry and attempt < 2:
                     logger.warning(f'网络请求异常，10秒后自动重试（第2/2次）: {e}')
                     await asyncio.sleep(10)
@@ -1763,33 +2006,10 @@ class OverstatsPlugin(Star):
                     asyncio.ensure_future(self.monitor.record_api(endpoint, False, elapsed))
                 logger.error(f'网络请求异常: {e}')
                 return (None, {'error': 'network_error', 'message': str(e)}, 'network_error')
+            finally:
+                if not request_cancelled:
+                    self._clear_inflight_request(req_key)
         return (None, {'error': 'retry_exhausted', 'message': '重试耗尽'}, 'retry_exhausted')
-
-    async def _post_json(self, endpoint: str, payload: dict = None, timeout: int = 60) -> tuple[dict | None, dict | None]:
-        """请求后端 JSON 接口，返回 (data, error)。
-
-        与 _fetch_image 的区别：不校验图片，直接把 JSON 体交回调用方；
-        error 沿用后端错误体结构（含 error/message），便于复用既有提示逻辑。
-        不做重试：调用方都是「先解析再请求」的短链路，重试收益低且会放大延迟。
-        """
-        url = f'{self._resolve_backend_url()}{endpoint}'
-        self._log_backend_send(endpoint, payload or {})
-        try:
-            session = await self._get_http_session()
-            async with session.post(url, json=payload or {}, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
-                try:
-                    data = await resp.json()
-                except Exception:
-                    logger.error(f'后端 JSON 接口返回非 JSON: {endpoint} HTTP {resp.status}')
-                    return None, {'error': 'non_json_error', 'message': f'后端返回非 JSON 数据（HTTP {resp.status}）'}
-                if resp.status == 200 and isinstance(data, dict):
-                    return data, None
-                if isinstance(data, dict):
-                    return None, data
-                return None, {'error': 'http_error', 'message': f'后端接口响应异常，状态码: {resp.status}'}
-        except Exception as e:
-            logger.error(f'后端 JSON 请求异常: {endpoint} | {e}')
-            return None, {'error': 'network_error', 'message': str(e)}
 
     async def _periodic_cleanup_loop(self):
         """每日凌晨 4 点清理临时图片目录，保留最近 24 小时内的文件，并清理过期缓存索引"""
@@ -2006,7 +2226,7 @@ class OverstatsPlugin(Star):
             """
         if self._full_adapt_map is not None:
             return self._full_adapt_map
-        table = [(['owhelp', 'ow菜单', 'ow帮助', 'OW帮助', 'help'], self.ow_help), (['所有指令', '别称'], self.show_aliases), (['快速指南', '快捷指令'], self.quick_guide_command), (['大神绑定', '绑定'], self.dashen_bind), (['今日总结', '今日', '今日数据'], self.dashen_today), (['昨日总结', '昨日', '昨日数据', '昨天数据'], self.dashen_yesterday), (['周度总结', '本周总结', '本周数据', '本周'], self.dashen_week), (['大神数据', '详情卡片', '战绩查询', '数据'], self.dashen_profile), (['大神对局', '最近对局', '战绩', '对局'], self.dashen_match), (['单局详细', '单局详情', '单局'], self.dashen_match_detail), (['历史段位', '历届段位'], self.dashen_rank_history), (['同玩查询', '开黑胜率'], self.dashen_sameplay), (['快速强度', '快速强度指数'], self.quick_strength), (['竞技强度', '竞技强度指数'], self.competitive_strength), (['快速英雄云图', '快速云图'], self.quick_hero_treemap), (['竞技英雄云图', '竞技云图'], self.competitive_hero_treemap), (['威能'], self.ow_hero_perk), (['ow英雄'], self.ow_hero_pick), (['商店', 'ow商店'], self.ow_shop), (['ow赛事', '赛事'], self.ow_esports), (['获取段位分布'], self.get_rank_distribution), (['ow活动', '活动'], self.ow_activities), (['banpick', '全英雄排行'], self.ban_pick_stats), (['mappick'], self.map_pick_stats), (['皮肤搜索'], self.skin_search), (['ow更新', '版本更新'], self.ow_patch_notes), (['省榜', '排行'], self.ow_rank_leaderboard), (['绝活榜', '英雄省榜'], self.ow_hero_leaderboard), (['ow百科', '英雄百科', 'ow英雄百科', '百科'], self.ow_hero_wiki), (['英雄对比', 'ow英雄对比'], self.ow_hero_compare), (['ow猜猜', '猜猜', 'ow猜'], self.ow_guess), (['赛季总结', '赛季报告', 'ow赛季总结'], self.ow_season_summary)]
+        table = [(['owhelp', 'ow菜单', 'ow帮助', 'OW帮助', 'help'], self.ow_help), (['所有指令', '别称'], self.show_aliases), (['快速指南', '快捷指令'], self.quick_guide_command), (['大神绑定', '绑定'], self.dashen_bind), (['今日总结', '今日', '今日数据'], self.dashen_today), (['昨日总结', '昨日', '昨日数据', '昨天数据'], self.dashen_yesterday), (['周度总结', '本周总结', '本周数据', '本周'], self.dashen_week), (['大神数据', '详情卡片', '战绩查询', '数据'], self.dashen_profile), (['大神对局', '最近对局', '战绩', '对局'], self.dashen_match), (['单局详细', '单局详情', '单局'], self.dashen_match_detail), (['历史段位', '历届段位'], self.dashen_rank_history), (['同玩查询', '开黑胜率'], self.dashen_sameplay), (['快速强度', '快速强度指数'], self.quick_strength), (['竞技强度', '竞技强度指数'], self.competitive_strength), (['快速英雄云图', '快速云图'], self.quick_hero_treemap), (['竞技英雄云图', '竞技云图'], self.competitive_hero_treemap), (['威能'], self.ow_hero_perk), (['ow英雄'], self.ow_hero_pick), (['商店', 'ow商店'], self.ow_shop), (['ow赛事', '赛事'], self.ow_esports), (['获取段位分布'], self.get_rank_distribution), (['ow活动', '活动'], self.ow_activities), (['banpick', '全英雄排行'], self.ban_pick_stats), (['mappick'], self.map_pick_stats), (['皮肤搜索'], self.skin_search), (['ow更新', '版本更新'], self.ow_patch_notes), (['省榜', '排行'], self.ow_rank_leaderboard), (['绝活榜', '英雄省榜'], self.ow_hero_leaderboard), (['ow百科', '英雄百科', 'ow英雄百科', '百科'], self.ow_hero_wiki), (['英雄对比', 'ow英雄对比'], self.ow_hero_compare), (['ow猜猜', '猜猜', 'ow猜'], self.ow_guess)]
         m = {}
         for names, method in table:
             for n in names:
@@ -2549,7 +2769,6 @@ class OverstatsPlugin(Star):
 • <qqbot-cmd-input text="今日总结 " show="今日总结" reference="false" /> (别称：<qqbot-cmd-input text="今日 " show="今日" reference="false" />, <qqbot-cmd-input text="今日数据 " show="今日数据" reference="false" />)
 • <qqbot-cmd-input text="昨日总结 " show="昨日总结" reference="false" /> (别称：<qqbot-cmd-input text="昨日 " show="昨日" reference="false" />, <qqbot-cmd-input text="昨日数据 " show="昨日数据" reference="false" />, <qqbot-cmd-input text="昨天数据 " show="昨天数据" reference="false" />)
 • <qqbot-cmd-input text="周度总结 " show="周度总结" reference="false" /> (别称：<qqbot-cmd-input text="本周总结 " show="本周总结" reference="false" />, <qqbot-cmd-input text="本周数据 " show="本周数据" reference="false" />, <qqbot-cmd-input text="本周 " show="本周" reference="false" />)
-• <qqbot-cmd-input text="赛季总结 " show="赛季总结" reference="false" /> (别称：<qqbot-cmd-input text="赛季报告 " show="赛季报告" reference="false" />, <qqbot-cmd-input text="ow赛季总结 " show="ow赛季总结" reference="false" />)
 
 🔹 **图表与排行类：**
 • <qqbot-cmd-input text="历史段位 " show="历史段位" reference="false" /> (别称：<qqbot-cmd-input text="历届段位 " show="历届段位" reference="false" />)
@@ -2654,8 +2873,8 @@ class OverstatsPlugin(Star):
         """显示 Overstats 查询菜单，列出所有常用指令入口。"""
         help_text = """📌 Overstats 查询菜单
 🔗 ➤ <qqbot-cmd-input text="绑定 " show="绑定" reference="false" />示例：绑定 Player#12345
-📋 ➤ <qqbot-cmd-input text="今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="周度总结 " show="本周" reference="false" /> ➤ <qqbot-cmd-input text="赛季总结 " show="赛季总结" reference="false" />可选赛季号
-📊 ➤ <qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" /> ➤ <qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />数字 锐评关/全员关
+📋 ➤ <qqbot-cmd-input text="今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="周度总结 " show="本周" reference="false" />
+📊 ➤ <qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" />可选英雄名 ➤ <qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />数字 锐评关/全员关
 📈 ➤ <qqbot-cmd-input text="快速强度 " show="快速强度" reference="false" />可选对局数 ➤ <qqbot-cmd-input text="竞技强度 " show="竞技强度" reference="false" />可选对局数 ➤ <qqbot-cmd-input text="获取段位分布 " show="获取段位分布" reference="false" />可选 快速/竞技 段位
 🗺️ ➤ <qqbot-cmd-input text="快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="竞技英雄云图 " show="竞技云图" reference="false" /> ➤ <qqbot-cmd-input text="历史段位 " show="历史段位" reference="false" />
 🏆 ➤ <qqbot-cmd-input text="省榜 " show="省榜" reference="false" />省份 位置 ➤ <qqbot-cmd-input text="绝活榜 " show="绝活榜" reference="false" />省份 英雄 开放
@@ -2737,14 +2956,6 @@ class OverstatsPlugin(Star):
         async for r in self._run_with_cmd_slot(event, lambda: features_summary.dashen_week(self, event, bnet_id)):
             yield r
 
-    @filter.command('赛季总结', alias={'赛季报告', 'ow赛季总结'})
-    async def ow_season_summary(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
-        """生成指定赛季的赛季报告卡片（赛季号省略时默认上一赛季）。"""
-        # 暂时屏蔽：上游赛季报告接口鉴权失效（401 Token Invalid），代码保留在
-        # features/season.py。恢复时删除下面这一行提示、还原原调用即可：
-        #   async for r in self._run_with_cmd_slot(event, lambda: features_season.ow_season_summary(...)):
-        yield event.plain_result('⚠️ 赛季总结功能暂时不可用，请登录网易大神查看。')
-
     @filter.command('大神数据', alias={'详情卡片', '战绩查询', '数据'})
     async def dashen_profile(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
         """查看玩家详情卡片（支持 快速/竞技 模式）。"""
@@ -2752,9 +2963,9 @@ class OverstatsPlugin(Star):
             yield r
 
     @filter.command('大神对局', alias={'最近对局', '战绩', '对局'})
-    async def dashen_match(self, event: AstrMessageEvent, bnet_id: str = ''):
-        """拉取最近 20 局的对局列表。"""
-        async for r in self._run_with_cmd_slot(event, lambda: features_players.dashen_match(self, event, bnet_id)):
+    async def dashen_match(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
+        """拉取最近 20 局的对局列表，可选追加英雄名筛选。"""
+        async for r in self._run_with_cmd_slot(event, lambda: features_players.dashen_match(self, event, arg1, arg2)):
             yield r
 
     @filter.command('单局详细', alias={'单局', '单局详情'})

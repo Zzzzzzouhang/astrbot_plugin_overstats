@@ -38,13 +38,26 @@ async def dashen_profile(plugin, event: AstrMessageEvent, arg1: str = '', arg2: 
         await plugin._finalize_business_status_prompt(prompt_token, success, cmd_name='大神数据', error_code=err_code)
 
 
-async def dashen_match(plugin, event: AstrMessageEvent, bnet_id: str = ''):
-    """拉取最近 20 局的对局列表。"""
+async def dashen_match(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
+    """拉取最近 20 局的对局列表，可选追加英雄名做筛选。"""
+    positional, _kw = plugin._extract_keywords([arg1, arg2])
+    bnet_id = ''
+    hero = ''
+    for item in positional:
+        if '#' in item or '＃' in item:
+            bnet_id = item
+        elif not hero:
+            hero = item
     target_id, _gate = await plugin._gate_bnet_id(event, bnet_id, '大神对局')
     if _gate:
         yield _gate
         return
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📊 正在拉取 {target_id} 的<qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" />，可用参数 战网id 查询别人。')
+    payload = {'bnet_id': target_id}
+    hero_hint = ''
+    if hero:
+        payload['hero'] = hero
+        hero_hint = f'（英雄：{hero}）'
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📊 正在拉取 {target_id} 的<qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" />{hero_hint}，可用参数 战网id 英雄名 查询别人。')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -52,7 +65,7 @@ async def dashen_match(plugin, event: AstrMessageEvent, bnet_id: str = ''):
     success = False
     err_code = ''
     try:
-        img_bytes, error_data, err_code = await plugin._fetch_image('/dashen-match/image', {'bnet_id': target_id})
+        img_bytes, error_data, err_code = await plugin._fetch_image('/dashen-match/image', payload)
         if img_bytes:
             success = True
             async for r in plugin._send_image_result(event, img_bytes, '大神对局'):
