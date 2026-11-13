@@ -45,7 +45,12 @@ try:
         is_valid_image_head,
         should_skip_status_prompt,
     )
-    from .core.service import CommandConcurrencyService, ImageCacheService, ReplyNoticeService
+    from .core.service import (
+        CommandConcurrencyService,
+        ImageCacheService,
+        MatchHeroContextService,
+        ReplyNoticeService,
+    )
     from .core.platform.astrbot import AstrBotPlatformAdapter
     from .core.platform.media_url import MediaURLServer
     from .core.platform.qq_url_sender import send_images_by_url
@@ -64,7 +69,12 @@ except ImportError:  # 插件作为顶层模块加载时
         is_valid_image_head,
         should_skip_status_prompt,
     )
-    from core.service import CommandConcurrencyService, ImageCacheService, ReplyNoticeService  # type: ignore[no-redef]
+    from core.service import (  # type: ignore[no-redef]
+        CommandConcurrencyService,
+        ImageCacheService,
+        MatchHeroContextService,
+        ReplyNoticeService,
+    )
     from core.platform.astrbot import AstrBotPlatformAdapter  # type: ignore[no-redef]
     from core.platform.media_url import MediaURLServer  # type: ignore[no-redef]
     from core.platform.qq_url_sender import send_images_by_url  # type: ignore[no-redef]
@@ -278,6 +288,10 @@ class OverstatsPlugin(Star):
     _REPLY_MSG_ID_TTL = 300                       # QQ 回复消息 msg_id 过期时间（秒）
     _TIMEOUT_WARN_BEFORE = 290                    # 4分50秒：仍未返回则主动预警
     _IMAGE_CACHE_TTL = 86400                       # 生成图片本地缓存保留时长（24 小时）
+    # 「大神对局 英雄」筛选的上下文有效期：5 分钟内直接发数字按该英雄定位，
+    # 超时或重新发不带英雄的「大神对局」即失效。纯内存 + TTL，不落盘。
+    _MATCH_HERO_CONTEXT_TTL = 300
+    _MATCH_HERO_CONTEXT_MAX_ENTRIES = 512          # 条目上限，超出按最早到期淘汰
     _CONGESTION_RUNNING_THRESHOLD = 3              # 在执行指令数达到此值视为服务繁忙
     # 获取图片单次补发上限：单聊每条消息最多回复 4 张、群聊最多 5 张，
     # 规避 QQ 被动回复次数超限；超出部分仍保留 24 小时，可再次获取图片取回。
@@ -381,6 +395,12 @@ class OverstatsPlugin(Star):
         self._image_cache_service = ImageCacheService(
             self._image_cache_index_path,
             ttl=self._IMAGE_CACHE_TTL,
+        )
+        # 对局英雄上下文（service 层）：记住「大神对局 <英雄>」的筛选，
+        # 5 分钟内用户直接发数字时按该英雄定位单局。带 TTL 与容量上限。
+        self._match_hero_context = MatchHeroContextService(
+            ttl_seconds=self._MATCH_HERO_CONTEXT_TTL,
+            max_entries=self._MATCH_HERO_CONTEXT_MAX_ENTRIES,
         )
         # 重载保护：登记「已发往后端、尚未返回」的图片请求；terminate 时落盘，
         # 新实例启动后重放并写入图片缓存，用户点「获取图片」即可取回。
@@ -1208,6 +1228,33 @@ class OverstatsPlugin(Star):
         except Exception:
             return str(event.get_sender_id())
 
+    def _match_hero_key(self, event: AstrMessageEvent) -> str:
+        """对局英雄上下文的键：群聊按「群 + 用户」隔离，私聊按用户，避免跨群串味。"""
+        base = self._user_key(event)
+        group_id = self._get_group_id(event)
+        return f'{group_id}:{base}' if group_id else base
+
+    def _remember_match_hero(self, key: str, hero: str) -> None:
+        """记住该用户最近一次「大神对局 <英雄>」的筛选（TTL 内有效）。"""
+        try:
+            self._match_hero_context.remember(key, hero)
+        except Exception as e:
+            logger.warning(f'记录对局英雄上下文失败: {e}')
+
+    def _get_match_hero(self, key: str) -> str:
+        """取 TTL 内记住的英雄；过期或不存在返回空串。"""
+        try:
+            return self._match_hero_context.get(key)
+        except Exception:
+            return ''
+
+    def _forget_match_hero(self, key: str) -> None:
+        """解除该用户的英雄筛选（发不带英雄的「大神对局」时调用）。"""
+        try:
+            self._match_hero_context.forget(key)
+        except Exception:
+            pass
+
     @staticmethod
     def _get_today_reset_ts(reset_hour: int = 4) -> int:
         """返回最近一次某整点（本地时间）的 Unix 时间戳，用于每日计数重置。
@@ -1492,6 +1539,11 @@ class OverstatsPlugin(Star):
         """
         logger.info('[Overstats] 插件卸载中：开始清理资源')
         self._shutting_down = True
+        # 对局英雄上下文是纯内存态：显式清空，热重载后不残留旧筛选
+        try:
+            self._match_hero_context.clear()
+        except Exception:
+            pass
         # 重载保护：先把「已发出、未返回」的图片请求落盘，新实例启动后会重放并写入
         # 图片缓存（用户点「获取图片」可取）。必须在关闭 http session / 停后端之前执行。
         self._persist_inflight_requests()
@@ -2874,7 +2926,7 @@ class OverstatsPlugin(Star):
         help_text = """📌 Overstats 查询菜单
 🔗 ➤ <qqbot-cmd-input text="绑定 " show="绑定" reference="false" />示例：绑定 Player#12345
 📋 ➤ <qqbot-cmd-input text="今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="周度总结 " show="本周" reference="false" />
-📊 ➤ <qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" />可选英雄名 ➤ <qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />数字 锐评关/全员关
+📊 ➤ <qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" />可选英雄名/序号 ➤ <qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />数字 可选英雄名 锐评关/全员关
 📈 ➤ <qqbot-cmd-input text="快速强度 " show="快速强度" reference="false" />可选对局数 ➤ <qqbot-cmd-input text="竞技强度 " show="竞技强度" reference="false" />可选对局数 ➤ <qqbot-cmd-input text="获取段位分布 " show="获取段位分布" reference="false" />可选 快速/竞技 段位
 🗺️ ➤ <qqbot-cmd-input text="快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="竞技英雄云图 " show="竞技云图" reference="false" /> ➤ <qqbot-cmd-input text="历史段位 " show="历史段位" reference="false" />
 🏆 ➤ <qqbot-cmd-input text="省榜 " show="省榜" reference="false" />省份 位置 ➤ <qqbot-cmd-input text="绝活榜 " show="绝活榜" reference="false" />省份 英雄 开放
@@ -2963,9 +3015,9 @@ class OverstatsPlugin(Star):
             yield r
 
     @filter.command('大神对局', alias={'最近对局', '战绩', '对局'})
-    async def dashen_match(self, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
-        """拉取最近 20 局的对局列表，可选追加英雄名筛选。"""
-        async for r in self._run_with_cmd_slot(event, lambda: features_players.dashen_match(self, event, arg1, arg2)):
+    async def dashen_match(self, event: AstrMessageEvent, arg1: str = '', arg2: str = '', arg3: str = ''):
+        """查看最近对局列表；带序号时直接出该场单局详情（可与英雄名叠加）。"""
+        async for r in self._run_with_cmd_slot(event, lambda: features_players.dashen_match(self, event, arg1, arg2, arg3)):
             yield r
 
     @filter.command('单局详细', alias={'单局', '单局详情'})

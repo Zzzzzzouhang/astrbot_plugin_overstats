@@ -38,26 +38,43 @@ async def dashen_profile(plugin, event: AstrMessageEvent, arg1: str = '', arg2: 
         await plugin._finalize_business_status_prompt(prompt_token, success, cmd_name='大神数据', error_code=err_code)
 
 
-async def dashen_match(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = ''):
-    """拉取最近 20 局的对局列表，可选追加英雄名做筛选。"""
-    positional, _kw = plugin._extract_keywords([arg1, arg2])
+async def dashen_match(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = '', arg3: str = ''):
+    """查看最近对局列表；带序号时直接出该场单局详情（可与英雄名叠加）。"""
+    positional, _kw = plugin._extract_keywords([arg1, arg2, arg3])
     bnet_id = ''
     hero = ''
+    index = None
+    # 「大神对局 4 源氏」= 源氏第 4 局：序号 + 英雄名 + 战网ID 三者顺序无关。
+    # 纯数字只当序号，不会被误判成英雄名（「76」这类英雄别名需单独输入才生效）。
     for item in positional:
         if '#' in item or '＃' in item:
             bnet_id = item
+        elif item.isdigit() and index is None:
+            index = int(item)
         elif not hero:
             hero = item
+
+    if index is not None:
+        # 带序号即单局查询：直接复用「单局详细」的全部分支
+        # （序号上限校验、违规封禁、AI 锐评限次、多图发送）。
+        async for result in dashen_match_detail(plugin, event, str(index), hero, bnet_id):
+            yield result
+        return
     target_id, _gate = await plugin._gate_bnet_id(event, bnet_id, '大神对局')
     if _gate:
         yield _gate
         return
+    # 英雄上下文：带英雄时成功出图后记住（供后续数字直接复用），
+    # 不带英雄说明用户要看全部对局，立刻解除上一次的英雄筛选。
+    hero_ctx_key = plugin._match_hero_key(event)
+    if not hero:
+        plugin._forget_match_hero(hero_ctx_key)
     payload = {'bnet_id': target_id}
     hero_hint = ''
     if hero:
         payload['hero'] = hero
         hero_hint = f'（英雄：{hero}）'
-    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📊 正在拉取 {target_id} 的<qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" />{hero_hint}，可用参数 战网id 英雄名 查询别人。')
+    status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, f'📊 正在拉取 {target_id} 的<qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" />{hero_hint}，可用参数 战网id 序号 英雄名 查询别人。')
     if status_text:
         yield event.plain_result(status_text)
     if _maintenance_stop:
@@ -68,6 +85,9 @@ async def dashen_match(plugin, event: AstrMessageEvent, arg1: str = '', arg2: st
         img_bytes, error_data, err_code = await plugin._fetch_image('/dashen-match/image', payload)
         if img_bytes:
             success = True
+            if hero:
+                # 只有成功筛出结果才记住，避免无效英雄名污染后续数字查询
+                plugin._remember_match_hero(hero_ctx_key, hero)
             async for r in plugin._send_image_result(event, img_bytes, '大神对局'):
                 yield r
         else:
@@ -90,6 +110,7 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
     positional, kw = plugin._extract_keywords([arg1, arg2, arg3])
     index = 0
     bnet_id = None
+    hero = ''
     for arg in positional:
         if arg.isdigit():
             digit = int(arg)
@@ -97,11 +118,16 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
                 yield plugin._plain_error_result(event, '❌ 错误：单局详细的数字索引不能大于 20！')
                 return
             index = max(0, digit - 1) if digit > 0 else 0
-        else:
+        elif '#' in arg or '＃' in arg:
             bnet_id = arg
+        elif not hero:
+            hero = arg
     if not bnet_id:
         user_id = event.get_sender_id()
         bnet_id = await plugin._get_user_bind_id(user_id)
+    # 未显式指定英雄时，沿用 5 分钟内「大神对局 <英雄>」记住的筛选
+    if not hero:
+        hero = plugin._get_match_hero(plugin._match_hero_key(event))
     target_id = await plugin._get_bnet_id(event, bnet_id)
     if not target_id:
         _gate = await plugin._maintenance_gate(event)
@@ -115,7 +141,8 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
     allow_analyze, used_count, ai_review_blocked, ai_review_limit = await plugin._ai_review_limit_check(event, want_analyze)
     analyze = allow_analyze
 
-    base_prompt = f'⏳ 正在拉取 {target_id} 第 {index + 1} 局的<qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />多图详细战绩，可用参数：战网id 序号 查询别人。'
+    hero_hint = f'（英雄：{hero}）' if hero else ''
+    base_prompt = f'⏳ 正在拉取 {target_id} 第 {index + 1} 局的<qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />{hero_hint}多图详细战绩，可用参数：战网id 序号 英雄名 查询别人。'
     if ai_review_blocked:
         base_prompt += f'（今日 AI 锐评次数已用完（{used_count}/{ai_review_limit}），本次仅出图不评价）'
     elif kw.get('analyze') is False:
@@ -126,6 +153,8 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
     if _maintenance_stop:
         return
     payload = {'bnet_id': target_id, 'index': str(index), 'limit': '20', 'include_fight': True, 'include_previous_season': True, 'show_all_heroes': kw.get('show_all_heroes', True), 'analyze': analyze}
+    if hero:
+        payload['hero'] = hero
     url = f'{plugin._resolve_backend_url()}/dashen-match/detail/replies'
     success = False
     err_code = ''

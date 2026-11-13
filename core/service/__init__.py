@@ -5,6 +5,12 @@
 
 from .command_concurrency import CommandConcurrencyService
 from .image_cache import ImageCacheService
+from .match_hero_context import MatchHeroContextService
 from .reply_notice import ReplyNoticeService
 
-__all__ = ["CommandConcurrencyService", "ReplyNoticeService", "ImageCacheService"]
+__all__ = [
+    "CommandConcurrencyService",
+    "ReplyNoticeService",
+    "ImageCacheService",
+    "MatchHeroContextService",
+]
