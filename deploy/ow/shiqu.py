@@ -36,6 +36,10 @@ _SHIQU_IMAGE_ENDPOINT = "/dashen-shiqu/image"
 _SHIQU_BTN = '<qqbot-cmd-input text="是区吗" show="是区吗" reference="false" />'
 _SHIQU_RESULT_BTN = '<qqbot-cmd-input text="ow是区吗结果" show="ow是区吗结果" reference="false" />'
 
+# 本地图片缓存中「是区吗」判定书的 command 标记（与 _send_image_result 发送时一致）。
+# 「结果」指令优先按此标记命中本地缓存直接补发，避免每次回放都打后端。
+_SHIQU_CACHE_COMMAND = "是区吗"
+
 
 class ShiquManager:
     def __init__(self, plugin):
@@ -187,6 +191,29 @@ class ShiquManager:
         except Exception:
             pass
 
+    # ── 本地图片缓存（结果指令优先复用）──
+
+    def _get_cached_last_image(self, event) -> str:
+        """取本地 24 小时内最近一张「是区吗」判定书图片路径；没有则返回空串。
+
+        缓存条目已由 ImageCacheService.list_alive 过滤（保留期内 + 文件存在 + 文件头合法），
+        此处只按 command 精确匹配，从新到旧取第一张。
+        """
+        try:
+            entries = self._plugin._get_user_all_images(self._user_key(event))
+        except Exception:
+            return ""
+        for entry in reversed(entries or []):
+            try:
+                if str(entry.get("command") or "") != _SHIQU_CACHE_COMMAND:
+                    continue
+                path = str(entry.get("path") or "")
+            except Exception:
+                continue
+            if path:
+                return path
+        return ""
+
     # ── 主流程 ──
 
     async def run(self, event, bnet_id_input: str = "", match_count: int = 0):
@@ -264,15 +291,24 @@ class ShiquManager:
                 return
 
             # 普通路径：先发送上次结果图，再设 pending 等待二次确认
+            # 上次图片优先取本地缓存（24 小时内已生成过），避免每次确认都打后端；
+            # 本地没有再用 use_db=true 让后端回放库里的最近一次判定。
             last_target = await self._get_last_target(event)
             last_ok = False
-            if last_target:
+            cached_path = self._get_cached_last_image(event)
+            if cached_path:
+                last_ok = True
+                async for r in self._plugin._send_cached_image_result(event, cached_path, _SHIQU_CACHE_COMMAND):
+                    yield r
+            elif last_target:
                 img_bytes, _error_data, _err_code = await self._plugin._fetch_image(
-                    _SHIQU_IMAGE_ENDPOINT, {"bnet_id": last_target, "use_db": True}, timeout=630
+                    _SHIQU_IMAGE_ENDPOINT,
+                    {"bnet_id": str(last_target).replace("＃", "#").strip(), "use_db": True},
+                    timeout=630,
                 )
                 if img_bytes:
                     last_ok = True
-                    async for r in self._plugin._send_image_result(event, img_bytes, "是区吗", ""):
+                    async for r in self._plugin._send_image_result(event, img_bytes, _SHIQU_CACHE_COMMAND, ""):
                         yield r
             if last_ok:
                 await self._set_pending(event)
@@ -348,12 +384,37 @@ class ShiquManager:
         logger.info(f"[是区吗][uid={uid}] 查询完成 total={time.time() - t0:.1f}s")
 
     async def last_result(self, event):
-        """读取用户上次查询的 target_id，调后端 use_db=true 取最近一次判定书图片发送。"""
+        """返回上次生成的判定书：本地图片缓存优先，未命中再让后端 use_db=true 直接回放。
+
+        ① 本地缓存（24 小时）里有「是区吗」图片 → 直接补发，不发后端请求；
+        ② 本地没有 → 后端 use_db=true 从库里取该玩家最近一次判定并渲染返回；
+        ③ 后端库里也没有该玩家记录（404 db_record_not_found）→ 提示先正常生成一份。
+        """
         uid = self._user_key(event)
+
+        # ── ① 本地缓存命中：直接补发已落盘的判定书图片 ──
+        cached_path = self._get_cached_last_image(event)
+        if cached_path:
+            logger.info(f"[是区吗][uid={uid}] 结果命中本地图片缓存，直接补发")
+            async for r in self._plugin._send_cached_image_result(event, cached_path, _SHIQU_CACHE_COMMAND):
+                yield r
+            self._record_cmd('ow是区吗结果', True)
+            return
+
+        # ── ② 本地无图：后端 use_db=true 回放最近一次判定 ──
         target_id = await self._get_last_target(event)
+        if not target_id:
+            # KV 未记录（换平台/清理过）时用绑定 ID 兜底，仍有库记录就能取回
+            try:
+                target_id = await self._plugin._get_bnet_id(event, "")
+            except Exception:
+                target_id = ""
         if not target_id:
             yield event.plain_result(f"❌ 没有找到上次的判定书结果，请先用 {_SHIQU_BTN} 生成一份。")
             return
+        # 库里 target_id 为上游规范化后的 battle tag（半角 #），此处同步归一，避免全角/空格查不到
+        target_id = str(target_id).replace("＃", "#").strip()
+
         # 地址解析：专属分流生效时显式走专属地址（读写同节点）；否则传 None，
         # 由 _fetch_image 按解析链取值（特权独立后端地址 → 主地址）。
         img_bytes, error_data, _err_code = await self._plugin._fetch_image(
@@ -367,11 +428,17 @@ class ShiquManager:
             # ID 解析失败与其他指令统一中文提示（不透传后端英文原文）
             if "Could not resolve customerToken" in msg:
                 yield event.plain_result(self._plugin._id_resolve_err("获取是区吗结果失败"))
+            elif _err_code == "db_record_not_found":
+                yield event.plain_result(
+                    f"❌ 后端暂无 {target_id} 的判定记录（库中没有生成过的判定书），"
+                    f"请先发送 {_SHIQU_BTN} 生成一份。"
+                )
             else:
                 yield event.plain_result(f"❌ 暂无 {target_id} 的最近判定书：{msg or '数据库记录缺失'}。")
             self._record_cmd('ow是区吗结果', False, error_code=_err_code)
             return
-        async for r in self._plugin._send_image_result(event, img_bytes, "是区吗", ""):
+        # 回放成功同样会落盘并登记图片缓存（command=是区吗），下次「结果」直接走本地
+        async for r in self._plugin._send_image_result(event, img_bytes, _SHIQU_CACHE_COMMAND, ""):
             yield r
         self._record_cmd('ow是区吗结果', True)
 
