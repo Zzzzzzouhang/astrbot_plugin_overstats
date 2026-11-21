@@ -31,18 +31,25 @@ async def dashen_today(plugin, event: AstrMessageEvent, bnet_id: str = ''):
             async for r in plugin._send_image_result(event, img_bytes, '今日总结'):
                 yield r
         elif error_data and error_data.get('error') == 'summary_empty' and (error_data.get('details', {}).get('scope') == 'today'):
-            yield event.plain_result(f'ℹ️ {target_id} 在过去的 24 小时内没有<qqbot-cmd-input text="今日总结 " show="今日总结" reference="false" />对局记录，尝试生成<qqbot-cmd-input text="昨日总结 " show="昨日总结" reference="false" />...')
+            yield event.plain_result(f'ℹ️ {target_id} 在过去的 24 小时内没有对局记录，尝试生成<qqbot-cmd-input text="昨日总结 " show="昨日总结" reference="false" />...')
             img_bytes, error_data, err_code = await plugin._fetch_image('/dashen-summary/yesterday/image', {'bnet_id': target_id})
             if img_bytes:
                 success = True
                 async for r in plugin._send_image_result(event, img_bytes, '今日总结'):
                     yield r
+            else:
+                # 昨日回退也失败时必须给用户结论：否则只发出「尝试生成昨日总结…」后便无任何回复
+                err_msg = error_data.get('message') if error_data else '获取昨日总结失败，可能昨日没有对局记录。'
+                if err_msg and 'Could not resolve customerToken' in err_msg:
+                    yield plugin._plain_error_result(event, plugin._id_resolve_err('获取昨日总结失败'))
+                elif error_data and error_data.get('error') == 'summary_empty':
+                    yield plugin._plain_error_result(event, f'❌ {target_id} 在最近 24 小时和昨日都没有对局记录')
+                else:
+                    yield plugin._plain_error_result(event, f'❌ {err_msg}')
         else:
-            err_msg = error_data.get('message') if error_data else '获取昨日总结失败，可能昨日没有对局记录。'
+            err_msg = error_data.get('message') if error_data else '获取今日总结失败，请稍后重试。'
             if err_msg and 'Could not resolve customerToken' in err_msg:
-                yield plugin._plain_error_result(event, plugin._id_resolve_err('获取昨日总结失败'))
-            elif error_data and error_data.get('error') == 'summary_empty':
-                yield plugin._plain_error_result(event, f'❌ {target_id} 在过去 48 小时内没有对局记录')
+                yield plugin._plain_error_result(event, plugin._id_resolve_err('获取今日总结失败'))
             else:
                 yield plugin._plain_error_result(event, f'❌ {err_msg}')
     finally:
