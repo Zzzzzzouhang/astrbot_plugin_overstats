@@ -10,7 +10,9 @@ v3 重构（取代旧 CommandQueueService 的真实等待队列）：
   重指令池默认 10；超限即拒（抛 SlotRejected），不再入队干等——
   排队等待正是 QQ 群聊「msg_id 已过期」与后端被瞬时打满的主要来源；
 - 按用户并发上限（per_user_max，默认 2）跨轻/重单一计数，
-  特权（白名单群/人/管理员/总开关关闭）豁免；全局容量对所有人一致生效；
+  特权（白名单群/人/管理员/总开关关闭）豁免；
+- 全局容量默认对所有人生效，仅「重指令池」对白名单群/人、管理员豁免
+  （bypass_heavy_pool：池满仍准入、允许超发）；并发总开关关闭不取消重池容量；
 - 运行槽位超时自动释放保留：expire_all 回收占用超过 slot_auto_release
   的槽位，回收幂等（reclaimed 抵扣），正常路径永不触发。
 """
@@ -116,9 +118,25 @@ class CommandConcurrencyService:
 
     # ── 主流程 ────────────────────────────────────────────────
 
-    async def acquire(self, user_key: Optional[str], *, privileged: bool = False, heavy: bool = False) -> SlotTicket:
-        """获取一个全局并发槽位。成功返回凭证；被拒绝抛 SlotRejected（不排队、不等待）。"""
-        request = SlotRequest.of(user_key, privileged=privileged, heavy=heavy)
+    async def acquire(
+        self,
+        user_key: Optional[str],
+        *,
+        privileged: bool = False,
+        heavy: bool = False,
+        bypass_heavy_pool: bool = False,
+    ) -> SlotTicket:
+        """获取一个全局并发槽位。成功返回凭证；被拒绝抛 SlotRejected（不排队、不等待）。
+
+        bypass_heavy_pool：白名单群/人、管理员在重指令池（是区吗/开庭）满时仍准入，
+        计数允许超过 heavy_max（超发）；不改变轻池与个人上限的判定。
+        """
+        request = SlotRequest.of(
+            user_key,
+            privileged=privileged,
+            heavy=heavy,
+            bypass_heavy_pool=bypass_heavy_pool,
+        )
         async with self._lock:
             decision = decide_admission(
                 ConcurrencyUsage(

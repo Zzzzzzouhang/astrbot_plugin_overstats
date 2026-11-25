@@ -58,6 +58,7 @@ def decide_admission(usage: ConcurrencyUsage, request: SlotRequest) -> Admission
       per_user_max<=0 表示不限制；
     - 全局槽位按指令轻重分流到独立池：轻指令池与重指令池分别判定；
       容量 <=0 表示不限制（轻指令默认 0，即无限直连后端）；
+      bypass_heavy_pool（白名单群/人、管理员）豁免重指令池容量，池满时仍准入（超发）；
     - 任一口径不满足 → REJECT（附原因），由 handler 返回对应文案，不排队。
     """
     if (
@@ -70,7 +71,11 @@ def decide_admission(usage: ConcurrencyUsage, request: SlotRequest) -> Admission
         return AdmissionDecision(SlotOutcome.REJECT, RejectReason.PER_USER_FULL)
 
     if request.heavy:
-        if usage.heavy_max > 0 and usage.heavy_used >= usage.heavy_max:
+        if (
+            usage.heavy_max > 0
+            and usage.heavy_used >= usage.heavy_max
+            and not request.bypass_heavy_pool
+        ):
             return AdmissionDecision(SlotOutcome.REJECT, RejectReason.HEAVY_FULL)
     else:
         if usage.light_max > 0 and usage.light_used >= usage.light_max:

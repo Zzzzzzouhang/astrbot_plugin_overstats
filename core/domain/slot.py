@@ -17,17 +17,28 @@ class SlotRequest:
     user_key: Optional[str] = None
     command_class: CommandClass = CommandClass.LIGHT
     privileged: bool = False
+    # 是否豁免重指令全局池（白名单群/人、管理员）：池满时仍准入，允许超发。
+    # 与 privileged 解耦：并发总开关关闭时所有人 privileged，但重池容量仍应生效。
+    bypass_heavy_pool: bool = False
 
     @property
     def heavy(self) -> bool:
         return self.command_class is CommandClass.HEAVY
 
     @classmethod
-    def of(cls, user_key: Optional[str], *, privileged: bool = False, heavy: bool = False) -> "SlotRequest":
+    def of(
+        cls,
+        user_key: Optional[str],
+        *,
+        privileged: bool = False,
+        heavy: bool = False,
+        bypass_heavy_pool: bool = False,
+    ) -> "SlotRequest":
         return cls(
             user_key=user_key,
             command_class=CommandClass.HEAVY if heavy else CommandClass.LIGHT,
             privileged=privileged,
+            bypass_heavy_pool=bypass_heavy_pool,
         )
 
 

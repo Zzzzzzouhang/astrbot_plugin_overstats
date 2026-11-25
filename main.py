@@ -280,6 +280,7 @@ class OverstatsPlugin(Star):
         "预设": {"lb_mode": "preset"},
         # 单局详细开关
         "锐评": {"analyze": True},
+        "锐评开": {"analyze": True},
         "锐评关": {"analyze": False},
         "全员关": {"show_all_heroes": False},
     }
@@ -836,6 +837,8 @@ class OverstatsPlugin(Star):
                         默认 0 = 不限制，即无限直连后端、由后端自行调度。
           heavy_max:    重指令（仅 是区吗 / 开庭）全局并发容量，默认 10；
                         超出即拒绝并返回文案，不排队。轻/重两池相互独立。
+                        白名单群/人、管理员豁免该池（池满仍准入，允许超发）；
+                        并发总开关关闭不取消该容量（重池池满仍拒普通用户）。
         """
         raw = str(self.config.get('cmd_concurrency', '{}') or '{}').strip()
         if getattr(self, '_concurrency_cfg_raw', None) == raw:
@@ -904,14 +907,21 @@ class OverstatsPlugin(Star):
         except Exception:
             return None
 
-    async def _try_acquire_cmd_slot(self, event: AstrMessageEvent | None = None, *, privileged: bool = False, heavy: bool = False) -> SlotTicket:
+    async def _try_acquire_cmd_slot(self, event: AstrMessageEvent | None = None, *, privileged: bool = False, heavy: bool = False, bypass_heavy_pool: bool = False) -> SlotTicket:
         """获取指令并发槽位（轻/重独立池，超限即拒）。
 
         成功返回槽位凭证；被拒绝抛 SlotRejected（个人并发已满 / 轻或重全局槽位已满）。
         heavy：重指令标记（仅 是区吗/开庭），进入独立的重指令池。
+        bypass_heavy_pool：白名单群/人、管理员在重池满时仍准入（允许超发）。
+        与 privileged 解耦——并发总开关关闭时所有人 privileged，但重池容量仍生效。
         """
         self._load_concurrency_config()
-        return await self._cmd_concurrency.acquire(self._cmd_user_key(event), privileged=privileged, heavy=heavy)
+        return await self._cmd_concurrency.acquire(
+            self._cmd_user_key(event),
+            privileged=privileged,
+            heavy=heavy,
+            bypass_heavy_pool=bypass_heavy_pool,
+        )
 
     async def _release_cmd_slot(self, event: AstrMessageEvent | None = None, slot_id: int = 0) -> None:
         """释放该用户的指令并发槽位。
@@ -1002,7 +1012,10 @@ class OverstatsPlugin(Star):
         - 超限即拒：获得不到槽位立即返回拒绝文案，不排队、不干等——
           排队等待正是 QQ 群聊「msg_id 已过期」与后端被瞬时打满的主要来源。
         - 单用户并发上限（per_user_max，默认 2）跨轻/重单一计数；
-          特权（白名单群/人/管理员/并发关闭）不受约束，但仍受全局容量约束。
+          特权（白名单群/人/管理员/并发关闭）不受约束。
+        - 重指令池容量（heavy_max）对普通用户硬限制；白名单群/人、管理员豁免该池
+          （池满仍准入，允许超发）。bypass 与 privileged 解耦：并发总开关关闭时
+          所有人 privileged，但重池容量仍按配置生效。
         - 槽位覆盖整个生成器生命周期，try/finally 保证任何中断（含 astrbot 取消）都会释放；
           另有 _slot_reclaim_loop 每 60s 兜底回收占用超 1 小时的泄漏槽位。
         - 超时预警计时起点为「收到用户指令」的时刻（本方法入口，早于后续所有 await），
@@ -1027,12 +1040,19 @@ class OverstatsPlugin(Star):
         _job_token = None
         try:
             privileged = self._is_privileged(event)
+            # 白名单群/人、管理员：重指令池（是区吗/开庭）满时仍准入，避免高峰期被「并发已满」挡住。
+            # 不含「并发总开关关闭」——该情形下重池容量仍按配置生效。
+            bypass_heavy_pool = heavy and (
+                self._is_whitelisted(event) or self._is_astrbot_admin(event)
+            )
             # 后端地址上下文：特权分流开启时指向独立地址，否则显式置 None（主地址），
             # 避免同一任务内上一条特权指令的地址残留影响到本条普通指令。
             _backend_token = _ACTIVE_BACKEND_URL.set(self._active_backend_url_for(privileged))
             ticket: SlotTicket | None = None
             try:
-                ticket = await self._try_acquire_cmd_slot(event, privileged=privileged, heavy=heavy)
+                ticket = await self._try_acquire_cmd_slot(
+                    event, privileged=privileged, heavy=heavy, bypass_heavy_pool=bypass_heavy_pool,
+                )
             except SlotRejected as rej:
                 # 超限即拒：个人并发已满 / 轻或重全局槽位已满，直接返回对应文案。
                 # 诊断日志：白名单命中情况在此暴露——填的是 QQ 号而非 openid 时
@@ -1044,7 +1064,8 @@ class OverstatsPlugin(Star):
                 logger.warning(
                     f'[Overstats] 指令并发拒绝: cmd={cmd_text or "-"} reason={getattr(rej, "reason", "-")} '
                     f'user={uid or "-"} group={self._get_group_id(event) or "-"} '
-                    f'privileged={privileged} whitelist={self._is_whitelisted(event)} '
+                    f'privileged={privileged} bypass_pool={bypass_heavy_pool} '
+                    f'whitelist={self._is_whitelisted(event)} '
                     f'admin={self._is_astrbot_admin(event)}'
                 )
                 yield event.plain_result(self._concurrency_reject_text(getattr(rej, 'reason', None), heavy))
@@ -2926,7 +2947,7 @@ class OverstatsPlugin(Star):
         help_text = """📌 Overstats 查询菜单
 🔗 ➤ <qqbot-cmd-input text="绑定 " show="绑定" reference="false" />示例：绑定 Player#12345
 📋 ➤ <qqbot-cmd-input text="今日总结 " show="今日" reference="false" /> ➤ <qqbot-cmd-input text="昨日总结 " show="昨日" reference="false" /> ➤ <qqbot-cmd-input text="周度总结 " show="本周" reference="false" />
-📊 ➤ <qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" />可选英雄名/序号 ➤ <qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />数字 可选英雄名 锐评关/全员关
+📊 ➤ <qqbot-cmd-input text="大神数据 " show="大神数据" reference="false" /> ➤ <qqbot-cmd-input text="大神对局 " show="大神对局" reference="false" />可选英雄名/序号 ➤ <qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />数字 可选英雄名 锐评开/锐评关/全员关
 📈 ➤ <qqbot-cmd-input text="快速强度 " show="快速强度" reference="false" />可选对局数 ➤ <qqbot-cmd-input text="竞技强度 " show="竞技强度" reference="false" />可选对局数 ➤ <qqbot-cmd-input text="获取段位分布 " show="获取段位分布" reference="false" />可选 快速/竞技 段位
 🗺️ ➤ <qqbot-cmd-input text="快速英雄云图 " show="快速云图" reference="false" /> ➤ <qqbot-cmd-input text="竞技英雄云图 " show="竞技云图" reference="false" /> ➤ <qqbot-cmd-input text="历史段位 " show="历史段位" reference="false" />
 🏆 ➤ <qqbot-cmd-input text="省榜 " show="省榜" reference="false" />省份 位置 ➤ <qqbot-cmd-input text="绝活榜 " show="绝活榜" reference="false" />省份 英雄 开放
@@ -3022,7 +3043,7 @@ class OverstatsPlugin(Star):
 
     @filter.command('单局详细', alias={'单局', '单局详情'})
     async def dashen_match_detail(self, event: AstrMessageEvent, arg1: str = '', arg2: str = '', arg3: str = ''):
-        """查看指定序号的单局多图详细战绩（可加 锐评关/全员关 控制开关）。"""
+        """查看指定序号的单局多图详细战绩（可加 锐评开/锐评关/全员关 控制开关）。"""
         async for r in self._run_with_cmd_slot(event, lambda: features_players.dashen_match_detail(self, event, arg1, arg2, arg3)):
             yield r
 

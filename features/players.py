@@ -101,7 +101,7 @@ async def dashen_match(plugin, event: AstrMessageEvent, arg1: str = '', arg2: st
 
 
 async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', arg2: str = '', arg3: str = ''):
-    """查看指定序号的单局多图详细战绩（可加 锐评关/全员关 控制开关）。"""
+    """查看指定序号的单局多图详细战绩（可加 锐评开/锐评关/全员关 控制开关）。"""
     CMD = '单局详细'
     banned, ban_remain = await plugin._check_violation_ban(event, CMD)
     if banned:
@@ -136,8 +136,19 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
             return
         yield plugin._plain_error_result(event, '❌ 请输入战网ID，如：单局详细 Player#12345 1 \n或先使用 /绑定 战网ID，示例：/绑定 Player#12345')
         return
-    # AI 锐评每日限次（参考「是区吗」每日重置 + 管理员/白名单豁免逻辑）
-    want_analyze = kw.get('analyze', True)
+    # AI 锐评：
+    # 1) 显式关键词（锐评 / 锐评开 / 锐评关）优先；
+    # 2) 未显式指定时受「自动 AI 锐评」开关约束：普通用户默认只出图（需加「锐评开」），
+    #    白名单群/个人与 AstrBot 管理员不受影响，仍自动锐评；
+    # 3) 最终是否真正锐评还要过每日限次检查（管理员/白名单豁免）。
+    if 'analyze' in kw:
+        want_analyze = bool(kw.get('analyze'))
+    else:
+        want_analyze = (
+            bool(plugin.config.get('ai_review_auto_enabled', False))
+            or plugin._is_whitelisted(event)
+            or plugin._is_astrbot_admin(event)
+        )
     allow_analyze, used_count, ai_review_blocked, ai_review_limit = await plugin._ai_review_limit_check(event, want_analyze)
     analyze = allow_analyze
 
@@ -147,6 +158,8 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
         base_prompt += f'（今日 AI 锐评次数已用完（{used_count}/{ai_review_limit}），本次仅出图不评价）'
     elif kw.get('analyze') is False:
         base_prompt += '（本次已跳过 AI 锐评，出图更快）'
+    elif not want_analyze:
+        base_prompt += '（自动 AI 锐评已关闭，需要锐评请加「锐评开」）'
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, base_prompt)
     if status_text:
         yield event.plain_result(status_text)

@@ -390,6 +390,12 @@
     "hint": "auto 模式下可选。AI 分析接口的代理地址（用于 OpenAI 官方和 Google OpenAI 兼容端点）。无需代理则留空。",
     "default": ""
   },
+  "ai_review_auto_enabled": {
+    "description": "【单局详细】自动 AI 锐评开关",
+    "type": "bool",
+    "hint": "关闭时（默认），普通用户发送「单局详细」只出图、不做 AI 锐评，需在指令里显式加「锐评开」才会锐评；白名单群、白名单用户与 AstrBot 管理员不受影响，仍自动锐评。开启后所有用户默认自动锐评。",
+    "default": false
+  },
   "ai_review_limit_enabled": {
     "description": "【单局详细】AI 锐评每日限次开关",
     "type": "bool",
