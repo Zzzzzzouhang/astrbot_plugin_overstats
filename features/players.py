@@ -156,10 +156,6 @@ async def dashen_match_detail(plugin, event: AstrMessageEvent, arg1: str = '', a
     base_prompt = f'⏳ 正在拉取 {target_id} 第 {index + 1} 局的<qqbot-cmd-input text="单局详细 " show="单局详细" reference="false" />{hero_hint}多图详细战绩，可用参数：战网id 序号 英雄名 查询别人。'
     if ai_review_blocked:
         base_prompt += f'（今日 AI 锐评次数已用完（{used_count}/{ai_review_limit}），本次仅出图不评价）'
-    elif kw.get('analyze') is False:
-        base_prompt += '（本次已跳过 AI 锐评，出图更快）'
-    elif not want_analyze:
-        base_prompt += '（自动 AI 锐评已关闭，需要锐评请加「锐评开」）'
     status_text, prompt_token, _maintenance_stop = await plugin._prepare_business_status_prompt(event, base_prompt)
     if status_text:
         yield event.plain_result(status_text)
